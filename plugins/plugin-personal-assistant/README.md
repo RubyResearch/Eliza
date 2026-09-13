@@ -565,5 +565,11 @@ The run records the canonical PDF identity before storing bytes. An acknowledged
 failure with no uncertain external effect releases the claim; lost storage or
 provider acknowledgements preserve it for reconciliation. Expired execution
 leases do not settle these claims.
+Agreement downloads, owner/guest projections, approved-obligation reads, pinned
+context, and exports reject a revoking or deleted workspace. Asynchronous reads
+recheck admission before returning private data, including PDF reads that began
+before revocation. Export audit writes also require active admission. The planner
+reports revoked agreement context as explicitly unavailable while preserving
+unrelated work; it does not substitute an empty, apparently healthy pin set.
 These internal guards do not themselves expose a delete endpoint or establish a
 backup-retention policy.

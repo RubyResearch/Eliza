@@ -105,6 +105,29 @@ export function assertFamilyWorkspaceActive(state: FamilyWorkspaceState): void {
     );
 }
 
+/**
+ * Check read admission without converting a revoked workspace into an empty result.
+ * Readers repeat this check after asynchronous retrieval before returning private data.
+ */
+export async function assertFamilyWorkspaceReadable(
+  runtime: IAgentRuntime,
+  agentId = runtime.agentId,
+): Promise<void> {
+  await ensureFamilyWorkspaceOperationStore(runtime, agentId);
+  const rows = await executeRawSql(
+    runtime,
+    `SELECT state FROM ${lifecycle} WHERE agent_id=${sqlQuote(agentId)}`,
+  );
+  if (rows.length !== 1)
+    throw new ElizaError(
+      "[FamilyWorkspace] Workspace lifecycle state is unavailable",
+      { code: "FAMILY_WORKSPACE_UNAVAILABLE" },
+    );
+  assertFamilyWorkspaceActive(
+    z.enum(["active", "revoking", "deleted"]).parse(rows[0].state),
+  );
+}
+
 /** Inspect state and mutate canonical stores under a shared, ordered lock inventory. */
 export async function withFamilyWorkspaceStateTransaction<T>(
   runtime: IAgentRuntime,

@@ -5,7 +5,7 @@
  */
 
 import { hasOwnerAccess } from "@elizaos/agent";
-import type { Memory, Provider } from "@elizaos/core";
+import { ElizaError, type Memory, type Provider } from "@elizaos/core";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
 import { getAgreementKnowledgeService } from "../lifeops/household/agreement-knowledge.js";
 
@@ -30,10 +30,27 @@ export const agreementPinsProvider: Provider = {
     if (typeof principalEntityId !== "string" || !principalEntityId.trim()) {
       return { text: "", values: { agreementPinCount: 0 }, data: {} };
     }
-    const views = await service.activePinnedContextForPrincipal({
-      principalEntityId,
-      roomId: typeof message.roomId === "string" ? message.roomId : undefined,
-    });
+    let views: Awaited<
+      ReturnType<typeof service.activePinnedContextForPrincipal>
+    >;
+    try {
+      views = await service.activePinnedContextForPrincipal({
+        principalEntityId,
+        roomId: typeof message.roomId === "string" ? message.roomId : undefined,
+      });
+    } catch (error) {
+      // error-policy:J4 Revoked family context is explicit; unrelated planner work remains usable.
+      if (
+        !(error instanceof ElizaError) ||
+        error.code !== "FAMILY_WORKSPACE_FENCED"
+      )
+        throw error;
+      return {
+        text: "Family workspace access has been revoked. Parenting-agreement context is unavailable.",
+        values: { agreementPinStatus: "revoked" },
+        data: { agreementContext: { status: "revoked" } },
+      };
+    }
     if (views.length === 0) {
       return { text: "", values: { agreementPinCount: 0 }, data: {} };
     }
