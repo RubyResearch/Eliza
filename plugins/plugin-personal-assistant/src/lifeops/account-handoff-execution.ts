@@ -10,6 +10,7 @@ import { AccountHandoffAdmission } from "./account-handoff-admission.js";
 import { AccountHandoffCalendarMappings } from "./account-handoff-calendar-mappings.js";
 import { AccountHandoffDataDisposition } from "./account-handoff-data-disposition.js";
 import { AccountHandoffDisconnect } from "./account-handoff-disconnect.js";
+import { verifyAccountHandoffGoogle } from "./account-handoff-google-verification.js";
 import { AccountHandoffRecipients } from "./account-handoff-recipients.js";
 import { AccountHandoffResume } from "./account-handoff-resume.js";
 import { AccountHandoffSourceSelection } from "./account-handoff-source-selection.js";
@@ -77,6 +78,15 @@ export class AccountHandoffExecution {
     switch (record.phase) {
       case "reviewed":
         handoffReadSourceReviewSchema.parse(record.receipt.readSourceReview);
+        // A known permission or provider failure must not first interrupt active work.
+        // This preflight does not replace verification under the later pause fence.
+        await verifyAccountHandoffGoogle(
+          this.runtime.agentId,
+          this.requestUrl,
+          record.review,
+          this.accounts,
+          this.google,
+        );
         await new AccountHandoffRecipients(
           this.runtime,
           this.ownerEntityId,

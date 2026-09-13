@@ -177,7 +177,14 @@ for (const width of [1280, 390]) {
         saved = {
           ...saved,
           revision: saved.revision + 1,
-          phase: advanceCalls === 1 ? "pausing" : "completed",
+          phase:
+            advanceCalls === 1
+              ? "pausing"
+              : advanceCalls < 4
+                ? "applying_mappings"
+                : advanceCalls === 4
+                  ? "verifying_replacement"
+                  : "completed",
         };
         if (advanceCalls === 1)
           return route.fulfill({
@@ -317,6 +324,7 @@ for (const width of [1280, 390]) {
     });
     await start.click();
     await expect(panel.getByRole("alert")).toContainText("Response lost");
+    await expect(start).toBeDisabled();
     await expect(panel.getByRole("alert")).toBeInViewport();
     await page.screenshot({ path: testInfo.outputPath(`error-${width}.png`) });
     await page.reload();
@@ -364,6 +372,6 @@ for (const width of [1280, 390]) {
       expect.stringMatching(/^503 .*account-handoffs.*advance/),
     ]);
     expect(disconnectCalls).toBe(0);
-    expect(advanceCalls).toBe(2);
+    expect(advanceCalls).toBe(5);
   });
 }

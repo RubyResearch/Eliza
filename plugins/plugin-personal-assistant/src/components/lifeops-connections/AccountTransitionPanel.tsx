@@ -57,6 +57,15 @@ export function AccountTransitionPanel({
   const [record, setRecord] = useState<AccountHandoffRecord | null>(null);
   const [operationId, setOperationId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
+  const [needsReadback, setNeedsReadback] = useState(false);
+  const workInFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const errorElement = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
@@ -69,24 +78,29 @@ export function AccountTransitionPanel({
   const terminal =
     record?.phase === "completed" || record?.phase === "cancelled";
   async function run(work: () => Promise<void>) {
+    if (workInFlight.current) return;
+    workInFlight.current = true;
     setBusy(true);
     setError(null);
     try {
       await work();
     } catch (cause) {
       // error-policy:J4 Failed checkpoints remain visible; saved readback is a separate recovery action.
+      if (!mounted.current) return;
       setError(
         cause instanceof Error
           ? cause.message
           : "Account switch unavailable. Refresh saved progress before retrying.",
       );
     } finally {
-      setBusy(false);
+      workInFlight.current = false;
+      if (mounted.current) setBusy(false);
     }
   }
   async function reopen() {
     const saved = await api.getActiveLifeOpsAccountHandoff();
     setRecord(saved.handoff);
+    setNeedsReadback(false);
     setLoaded(true);
   }
   function resetChoices() {
@@ -148,12 +162,30 @@ export function AccountTransitionPanel({
   }
   async function advance() {
     if (!record) throw new Error("Refresh saved progress first.");
-    const result = await api.advanceLifeOpsAccountHandoff(
-      record.operationId,
-      record.revision,
-    );
-    setRecord(result.handoff);
-    if (result.handoff.phase === "completed") await refresh();
+    let current = record;
+    while (mounted.current) {
+      // A lost response leaves this set until the owner reads the durable state.
+      setNeedsReadback(true);
+      const { handoff: next } = await api.advanceLifeOpsAccountHandoff(
+        current.operationId,
+        current.revision,
+      );
+      if (!mounted.current) return;
+      if (
+        next.operationId !== current.operationId ||
+        next.revision < current.revision
+      )
+        throw new Error("Account switch changed. Refresh saved progress.");
+      setRecord(next);
+      setNeedsReadback(false);
+      if (next.phase === "completed") {
+        await refresh();
+        return;
+      }
+      if (next.phase === "cancelled" || next.revision === current.revision)
+        return;
+      current = next;
+    }
   }
   const calendarName = (id: string) =>
     snapshot.calendars.find(
@@ -438,9 +470,16 @@ export function AccountTransitionPanel({
                 (l) => l.disposition === "copy_to_replacement",
               ).length
             }{" "}
-            events selected for copying;{" "}
-            {record.review.retireApprovalIds.length} approvals selected for
-            retirement.
+            {record.review.calendarLinks.filter(
+              (link) => link.disposition === "copy_to_replacement",
+            ).length === 1
+              ? "event"
+              : "events"}{" "}
+            selected for copying; {record.review.retireApprovalIds.length}{" "}
+            {record.review.retireApprovalIds.length === 1
+              ? "approval"
+              : "approvals"}{" "}
+            selected for retirement.
           </p>
           <details>
             <summary>Exact saved choices</summary>
@@ -454,7 +493,10 @@ export function AccountTransitionPanel({
                 Progress is saved after each step. If a request fails or you
                 leave this page, refresh saved progress before continuing.
               </p>
-              <Button disabled={busy} onClick={() => void run(advance)}>
+              <Button
+                disabled={busy || needsReadback}
+                onClick={() => void run(advance)}
+              >
                 {record.phase === "reviewed"
                   ? "Start reviewed account switch"
                   : "Continue account switch"}
@@ -496,6 +538,7 @@ export function AccountTransitionPanel({
                     .handoff,
                 );
               else await reopen();
+              setNeedsReadback(false);
             })
           }
         >
