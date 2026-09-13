@@ -6,6 +6,7 @@
  */
 import { ElizaError, validateUuid } from "@elizaos/core";
 import { z } from "zod";
+import { normalizeHouseholdIdentifier } from "../household/types.js";
 import {
   executeRawSql,
   type LifeOpsDatabaseContext,
@@ -21,6 +22,22 @@ export const familyIntakeIdSchema = z
     (value) => validateUuid(value) !== null,
     "Invalid entity or document identifier",
   );
+
+/** Graph contacts use opaque identities, including owner-confirmed email IDs. */
+export const familyRecipientEntityIdSchema = z
+  .string()
+  .transform((value, ctx) => {
+    try {
+      return normalizeHouseholdIdentifier(value, "recipientEntityId");
+    } catch {
+      // error-policy:J3 Reject malformed identifiers without inventing a recipient.
+      ctx.addIssue({
+        code: "custom",
+        message: "Select a valid recipient identity",
+      });
+      return z.NEVER;
+    }
+  });
 
 const sections = [
   "custody_calendar",
@@ -50,7 +67,7 @@ const factSchema = z.strictObject({
   accountability: z.array(nonempty),
   urgency: nonempty.nullable(),
   unanswered: z.boolean(),
-  recipientEntityIds: z.array(familyIntakeIdSchema),
+  recipientEntityIds: z.array(familyRecipientEntityIdSchema),
 });
 export const familyIntakeExtractionSchema = z.strictObject({
   facts: z.array(factSchema.omit({ id: true, recipientEntityIds: true })),

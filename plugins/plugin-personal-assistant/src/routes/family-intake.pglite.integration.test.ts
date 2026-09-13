@@ -179,7 +179,35 @@ it("selects a canonical source, extracts private proposals and preserves review/
     expect(prompt).toContain(JSON.stringify(complete));
     expect(proposed.facts[0].sourceQuote).toBe(quote);
     expect(proposed.facts[0].recipientEntityIds).toEqual([]);
-    const recipient = randomUUID();
+    const recipientResponse = await fetch(
+      `${base.replace(/\/intake$/u, "")}/email-recipients/confirm`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          entityId: null,
+          name: "Synthetic recipient",
+          address: "recipient@example.test",
+          confirmed: true,
+        }),
+      },
+    );
+    expect(
+      recipientResponse.status,
+      await recipientResponse.clone().text(),
+    ).toBe(200);
+    const { recipient: confirmedRecipient } = await recipientResponse.json();
+    const recipient = confirmedRecipient.entityId;
+    for (const invalidRecipient of ["", "bad\nidentity", "x".repeat(513)]) {
+      const invalidReview = await post(`/${selected.id}/review`, {
+        expectedRevision: proposed.revision,
+        facts: proposed.facts.map((fact: Record<string, unknown>) => ({
+          ...fact,
+          recipientEntityIds: [invalidRecipient],
+        })),
+      });
+      expect(invalidReview.status).toBe(400);
+    }
     const reviewedResponse = await post(`/${selected.id}/review`, {
       expectedRevision: proposed.revision,
       facts: proposed.facts.map((fact: Record<string, unknown>) => ({
@@ -306,7 +334,7 @@ it("selects a canonical source, extracts private proposals and preserves review/
         text: "Please confirm next month's pickup arrangement.",
         unanswered: true,
       },
-      recipientEntityIds: [owner],
+      recipientEntityIds: [recipient],
     });
     expect(update.status, await update.clone().text()).toBe(201);
     const openRequest = (await update.json()).review;
@@ -315,7 +343,7 @@ it("selects a canonical source, extracts private proposals and preserves review/
       facts: [
         {
           unanswered: true,
-          recipientEntityIds: [owner],
+          recipientEntityIds: [recipient],
           statement: "Please confirm next month's pickup arrangement.",
         },
       ],

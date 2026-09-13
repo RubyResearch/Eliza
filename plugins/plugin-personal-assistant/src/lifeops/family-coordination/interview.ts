@@ -11,6 +11,7 @@ import {
   type FamilyIntakeFact,
   type FamilyIntakeReview,
   familyIntakeIdSchema,
+  familyRecipientEntityIdSchema,
 } from "./intake-review.js";
 import { getFamilyIntakeService } from "./intake-service.js";
 
@@ -33,7 +34,7 @@ export const familyInterviewAnswerSchema = z.strictObject({
     z.strictObject({ kind: z.literal("no_additional_updates") }),
   ]),
   recipientEntityIds: z
-    .array(familyIntakeIdSchema)
+    .array(familyRecipientEntityIdSchema)
     .refine(
       (ids) => new Set(ids).size === ids.length,
       "Recipient identities must be unique",
