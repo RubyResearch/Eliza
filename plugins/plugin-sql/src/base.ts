@@ -570,7 +570,10 @@ import {
   taskTable,
   worldTable,
 } from "./schema/index";
-import { documentSearchTokensExpression } from "./schema/memory";
+import {
+  documentSearchQueryTokensExpression,
+  documentSearchTokensExpression,
+} from "./schema/memory";
 
 type AgentRow = typeof agentTable.$inferSelect;
 type AgentMessageExamples = NonNullable<Agent["messageExamples"]>;
@@ -2000,16 +2003,12 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
       const normalizedQuery = params.query?.trim();
       let queryCondition: SQL = sql`true`;
       if (normalizedQuery) {
-        queryCondition = sql`${documentSearchTokensExpression(
-          memoryTable.content,
-          memoryTable.metadata
-        )} @> regexp_split_to_array(
-          translate(
-            trim(${normalizedQuery}),
-            'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-            'abcdefghijklmnopqrstuvwxyz'
-          ),
-          E'[ \\t\\r\\n\\f]+'
+        queryCondition = sql`(
+          ${documentSearchTokensExpression(memoryTable.content, memoryTable.metadata, true)}
+          @> ${documentSearchQueryTokensExpression(sql`${normalizedQuery}`, true)}
+        ) AND (
+          ${documentSearchTokensExpression(memoryTable.content, memoryTable.metadata)}
+          @> ${documentSearchQueryTokensExpression(sql`${normalizedQuery}`)}
         )`;
       }
 

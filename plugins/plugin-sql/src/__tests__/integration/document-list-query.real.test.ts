@@ -1191,6 +1191,34 @@ describe("document list query (real SQL parity)", () => {
     }
   });
 
+  it("stores and searches complete oversized tokens without admitting partial-word candidates", async () => {
+    const token = "界".repeat(9000) + "finish";
+    const queryToken = "文".repeat(256);
+    const source = document(801, { content: { text: `Before ${token} ${queryToken} after` } });
+    const different = document(802, { content: { text: `Before ${token}extra after` } });
+    await seedSql([source, different]);
+    const inMemory = await seedInMemory([source, different]);
+    const context = {
+      agentId,
+      requesterEntityId: REQUESTER_ID,
+      requesterRoomIds: [roomId],
+      requesterRole: "USER" as const,
+      limit: 10,
+      offset: 0,
+    };
+    for (const query of [queryToken, "界".repeat(128), "after", "文".repeat(128)]) {
+      const result = await adapter.queryDocuments({ ...context, query });
+      expect(result).toEqual(await inMemory.queryDocuments({ ...context, query }));
+      if (query === queryToken) {
+        expect(ids(result.documents)).toEqual([source.id]);
+        expect(result.documents[0]?.content.text).toBe(source.content.text);
+      }
+      if (query === "界".repeat(128) || query === "文".repeat(128)) {
+        expect(result.documents).toEqual([]);
+      }
+    }
+  });
+
   it("installs the evidence-backed portable-token index", async () => {
     const db = adapter.getDatabase() as DrizzleDatabase;
     const result = await db.execute(sql`
