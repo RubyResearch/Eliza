@@ -86,6 +86,7 @@ const agreementExtractionSchema = z.strictObject({
 });
 
 import {
+  assertFamilyWorkspaceReadable,
   beginFamilyWorkspaceOperation,
   settleFamilyWorkspaceOperation,
   withActiveFamilyWorkspaceTransaction,
@@ -575,14 +576,20 @@ export class AgreementKnowledgeRepository {
     manifestSha256: string;
     archiveSha256: string;
   }) {
-    const rows = await executeRawSql(
+    const rows = await withActiveFamilyWorkspaceTransaction(
       this.runtime,
-      `INSERT INTO app_lifeops.life_audit_events (
+      ["app_lifeops.life_audit_events"],
+      (tx) =>
+        executeRawSqlTx(
+          tx,
+          `INSERT INTO app_lifeops.life_audit_events (
       id, agent_id, event_type, owner_type, owner_id, reason, inputs_json, decision_json, actor, created_at
     ) VALUES (${sqlQuote(input.exportId)}, ${sqlQuote(this.agentId)}, 'agreement_export_prepared', 'parenting_agreement', ${sqlQuote(input.artifact.id)},
       'Verified archive prepared for owner download; client receipt is not asserted',
       ${sqlQuote(JSON.stringify({ schemaVersion: 1, actorEntityId: input.ownerEntityId, source: { id: input.artifact.id, version: input.artifact.version, content_sha256: input.artifact.contentSha256 } }))},
       ${sqlQuote(JSON.stringify({ manifestSha256: input.manifestSha256, archiveSha256: input.archiveSha256 }))}, 'owner', ${sqlQuote(input.createdAt)}) RETURNING id`,
+        ),
+      this.agentId,
     );
     if (rows.length !== 1)
       throw new AgreementKnowledgeError(
@@ -1246,8 +1253,15 @@ export class AgreementKnowledgeService {
     }
   }
 
-  listApprovedObligations(): Promise<ParentingAgreementObligation[]> {
-    return this.deps.repository.listApprovedObligations();
+  async listApprovedObligations(): Promise<ParentingAgreementObligation[]> {
+    await this.requireReadableWorkspace();
+    const obligations = await this.deps.repository.listApprovedObligations();
+    await this.requireReadableWorkspace();
+    return obligations;
+  }
+
+  private requireReadableWorkspace(): Promise<void> {
+    return assertFamilyWorkspaceReadable(this.deps.runtime, this.deps.agentId);
   }
 
   async prepareOwnerReview(input: {
@@ -1462,6 +1476,7 @@ export class AgreementKnowledgeService {
   }
 
   private async requireArtifact(id: string) {
+    await this.requireReadableWorkspace();
     const artifact = await this.deps.repository.getArtifact(
       normalizeHouseholdIdentifier(id, "artifactId"),
     );
@@ -1472,6 +1487,7 @@ export class AgreementKnowledgeService {
         { artifactId: id },
       );
     }
+    await this.requireReadableWorkspace();
     return artifact;
   }
 
@@ -1480,16 +1496,19 @@ export class AgreementKnowledgeService {
     householdId?: string;
   }): Promise<ParentingAgreementView[]> {
     this.requireOwner(input.ownerEntityId);
+    await this.requireReadableWorkspace();
     const householdId = input.householdId
       ? normalizeHouseholdIdentifier(input.householdId, "householdId")
       : undefined;
     const artifacts = await this.deps.repository.listArtifacts(householdId);
-    return await Promise.all(
+    const views = await Promise.all(
       artifacts.map(async (artifact) => ({
         artifact,
         obligations: await this.deps.repository.listObligations(artifact.id),
       })),
     );
+    await this.requireReadableWorkspace();
+    return views;
   }
 
   async createAgreementVersion(input: {
@@ -1815,6 +1834,7 @@ export class AgreementKnowledgeService {
         { artifactId: artifact.id },
       );
     }
+    await this.requireReadableWorkspace();
     return {
       bytes,
       mimeType: artifact.mimeType,
@@ -1990,6 +2010,7 @@ export class AgreementKnowledgeService {
       manifestSha256,
       archiveSha256: crypto.createHash("sha256").update(bytes).digest("hex"),
     });
+    await this.requireReadableWorkspace();
     return {
       bytes,
       mimeType: "application/zip",
@@ -2317,6 +2338,7 @@ export class AgreementKnowledgeService {
     roomId?: string;
   }): Promise<ParentingAgreementView[]> {
     this.requireOwner(input.ownerEntityId);
+    await this.requireReadableWorkspace();
     const targets: Array<{
       targetType: KnowledgePinTargetType;
       targetId: string;
@@ -2337,6 +2359,7 @@ export class AgreementKnowledgeService {
       ).filter((obligation) => obligation.status === "approved");
       if (obligations.length > 0) views.push({ artifact, obligations });
     }
+    await this.requireReadableWorkspace();
     return views;
   }
 
@@ -2351,6 +2374,7 @@ export class AgreementKnowledgeService {
     roomId?: string;
     at?: Date;
   }): Promise<Array<ParentingAgreementView | ParentingAgreementGuestView>> {
+    await this.requireReadableWorkspace();
     const principalEntityId = normalizeHouseholdIdentifier(
       input.principalEntityId,
       "principalEntityId",
@@ -2401,6 +2425,7 @@ export class AgreementKnowledgeService {
         throw error;
       }
     }
+    await this.requireReadableWorkspace();
     return views;
   }
 
@@ -2505,6 +2530,7 @@ export class AgreementKnowledgeService {
     );
     const obligations = await this.deps.repository.listObligations(artifact.id);
     if (principalEntityId === SELF_ENTITY_ID) {
+      await this.requireReadableWorkspace();
       return { artifact, obligations };
     }
     const grants = await this.deps.repository.listGrants(
@@ -2521,6 +2547,7 @@ export class AgreementKnowledgeService {
           scope: "knowledge.read",
           at: input.at ?? this.now(),
         });
+        await this.requireReadableWorkspace();
         return {
           artifact: guestArtifactProjection(artifact),
           obligations: obligations

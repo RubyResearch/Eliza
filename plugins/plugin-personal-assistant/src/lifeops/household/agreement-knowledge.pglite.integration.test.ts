@@ -51,6 +51,7 @@ import {
   createLifeOpsTestRuntime,
   type RealTestRuntimeResult,
 } from "../../../test/helpers/runtime.js";
+import { agreementPinsProvider } from "../../providers/agreement-pins.js";
 import { bindMachineAuthIdentityToEntity } from "../../routes/authenticated-entity-principal.js";
 import { CalendarCardAccessStore } from "../calendar-card.js";
 import { importFamilyCorrespondence } from "../family-coordination/intake-import.js";
@@ -3786,6 +3787,164 @@ describe("parenting-agreement knowledge — real PGlite", () => {
       runtime,
       z.string().parse(claims[0].operation_id),
     );
+  });
+
+  it("revokes retained agreement reads and pinned context when workspace deletion starts", async () => {
+    const service = createAgreementKnowledgeService(runtime);
+    const bytes = pdf("private agreement read revocation");
+    const source = await service.createAgreementVersion({
+      agreementKey: "read-revocation",
+      title: "Read revocation",
+      originalFilename: "read-revocation.pdf",
+      mimeType: "application/pdf",
+      bytes,
+      uploadedByEntityId: SELF_ENTITY_ID,
+    });
+    expect(
+      (
+        await service.readOwnerPdf({
+          artifactId: source.id,
+          ownerEntityId: SELF_ENTITY_ID,
+        })
+      ).bytes,
+    ).toEqual(bytes);
+    await ensureFamilyWorkspaceOperationStore(runtime);
+    await executeRawSql(
+      runtime,
+      `UPDATE app_lifeops.life_family_workspace_state SET state='revoking' WHERE agent_id=${sqlQuote(runtime.agentId)}`,
+    );
+    try {
+      for (const read of [
+        () =>
+          service.readOwnerPdf({
+            artifactId: source.id,
+            ownerEntityId: SELF_ENTITY_ID,
+          }),
+        () =>
+          service.readFor({
+            artifactId: source.id,
+            principalEntityId: SELF_ENTITY_ID,
+          }),
+        () => service.listOwnerAgreements({ ownerEntityId: SELF_ENTITY_ID }),
+        () => service.listApprovedObligations(),
+        () => service.activePinnedContext({ ownerEntityId: SELF_ENTITY_ID }),
+        () =>
+          service.activePinnedContextForPrincipal({
+            principalEntityId: "verified-co-parent",
+          }),
+        () =>
+          service.exportOwnerAgreement({
+            artifactId: source.id,
+            ownerEntityId: SELF_ENTITY_ID,
+          }),
+      ])
+        await expect(read()).rejects.toMatchObject({
+          code: "FAMILY_WORKSPACE_FENCED",
+        });
+      const context = await agreementPinsProvider.get(runtime, {
+        id: crypto.randomUUID() as UUID,
+        agentId: runtime.agentId,
+        entityId: runtime.agentId,
+        roomId: runtime.agentId,
+        content: {
+          text: "What agreement context remains?",
+          source: "eliza-client",
+        },
+      });
+      expect(context.data).toEqual({ agreementContext: { status: "revoked" } });
+      expect(context.text).not.toContain(source.title);
+      await expect(
+        new AgreementKnowledgeRepository(runtime, runtime.agentId).recordExport(
+          {
+            artifact: source,
+            exportId: crypto.randomUUID(),
+            ownerEntityId: SELF_ENTITY_ID,
+            createdAt: new Date().toISOString(),
+            manifestSha256: "a".repeat(64),
+            archiveSha256: "b".repeat(64),
+          },
+        ),
+      ).rejects.toMatchObject({ code: "FAMILY_WORKSPACE_FENCED" });
+      const storage = runtime.getService<IFileStorageService>(
+        ServiceType.REMOTE_FILES,
+      );
+      if (!storage) throw new Error("Real file storage unavailable");
+      expect(await storage.readPrivate(source.mediaFileName)).toEqual(bytes);
+      expect(
+        await runtime.getMemoryById(source.documentId as UUID),
+      ).not.toBeNull();
+    } finally {
+      await executeRawSql(
+        runtime,
+        `UPDATE app_lifeops.life_family_workspace_state SET state='active' WHERE agent_id=${sqlQuote(runtime.agentId)}`,
+      );
+    }
+  });
+
+  it("rejects an owner PDF response when revocation commits during its storage read", async () => {
+    const service = createAgreementKnowledgeService(runtime);
+    const source = await service.createAgreementVersion({
+      agreementKey: "read-revocation-race",
+      title: "Read race",
+      originalFilename: "race.pdf",
+      mimeType: "application/pdf",
+      bytes: pdf("private bytes read before revocation"),
+      uploadedByEntityId: SELF_ENTITY_ID,
+    });
+    const storage = runtime.getService<IFileStorageService>(
+      ServiceType.REMOTE_FILES,
+    );
+    if (!storage) throw new Error("Real file storage unavailable");
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = storage.readPrivate;
+    storage.readPrivate = async (fileName) => {
+      const bytes = await original.call(storage, fileName);
+      if (fileName === source.mediaFileName) {
+        entered();
+        await gate;
+      }
+      return bytes;
+    };
+    const pending = service.readOwnerPdf({
+      artifactId: source.id,
+      ownerEntityId: SELF_ENTITY_ID,
+    });
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "FAMILY_WORKSPACE_FENCED",
+    });
+    try {
+      await started;
+      await executeRawSql(
+        runtime,
+        `UPDATE app_lifeops.life_family_workspace_state SET state='revoking' WHERE agent_id=${sqlQuote(runtime.agentId)}`,
+      );
+      release();
+      await rejected;
+      await executeRawSql(
+        runtime,
+        `UPDATE app_lifeops.life_family_workspace_state SET state='deleted' WHERE agent_id=${sqlQuote(runtime.agentId)}`,
+      );
+      await expect(
+        createAgreementKnowledgeService(runtime).readOwnerPdf({
+          artifactId: source.id,
+          ownerEntityId: SELF_ENTITY_ID,
+        }),
+      ).rejects.toMatchObject({ code: "FAMILY_WORKSPACE_FENCED" });
+    } finally {
+      release();
+      storage.readPrivate = original;
+      await executeRawSql(
+        runtime,
+        `UPDATE app_lifeops.life_family_workspace_state SET state='active' WHERE agent_id=${sqlQuote(runtime.agentId)}`,
+      );
+    }
   });
 
   it("holds deletion behind real in-flight ingestion and durably fences subsequent uploads", async () => {
