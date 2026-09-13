@@ -399,7 +399,7 @@ export class GoogleDomain {
     return grant;
   }
 
-  public async requireGoogleGmailGrant(
+  private async requireGoogleGmailConnection(
     requestUrl: URL,
     requestedMode?: LifeOpsConnectorMode,
     requestedSide?: LifeOpsConnectorSide,
@@ -416,6 +416,21 @@ export class GoogleDomain {
     if (!status.connected || !grant) {
       fail(409, "Google Gmail is not connected.");
     }
+    return grant;
+  }
+
+  public async requireGoogleGmailGrant(
+    requestUrl: URL,
+    requestedMode?: LifeOpsConnectorMode,
+    requestedSide?: LifeOpsConnectorSide,
+    grantId?: string,
+  ): Promise<LifeOpsConnectorGrant> {
+    const grant = await this.requireGoogleGmailConnection(
+      requestUrl,
+      requestedMode,
+      requestedSide,
+      grantId,
+    );
     if (!grant.capabilities.includes("google.gmail.triage")) {
       fail(403, "Google Gmail triage access has not been granted.");
     }
@@ -428,7 +443,7 @@ export class GoogleDomain {
     requestedSide?: LifeOpsConnectorSide,
     grantId?: string,
   ): Promise<LifeOpsConnectorGrant> {
-    const grant = await this.requireGoogleGmailGrant(
+    const grant = await this.requireGoogleGmailConnection(
       requestUrl,
       requestedMode,
       requestedSide,

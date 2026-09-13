@@ -180,9 +180,6 @@ export function googleCapabilitiesForAccount(
   if (normalized.has("google.calendar.write")) {
     normalized.add("google.calendar.read");
   }
-  if (normalized.has("google.gmail.send")) {
-    normalized.add("google.gmail.triage");
-  }
   if (normalized.has("google.gmail.manage")) {
     normalized.add("google.gmail.triage");
   }
