@@ -26,6 +26,12 @@ export const client = {
   // (installed in the fixture) intercepts.
   getBaseUrl: () => "",
   getRestAuthToken: () => null,
+  // The LifeOps activity-signal capture (started by the shell's renderer
+  // service after first paint) subscribes to base-URL authority changes and
+  // compares revisions before re-probing. The fixture never rebinds its host,
+  // so the revision is constant and the subscription is inert.
+  getAuthorityRevision: () => 0,
+  onAuthorityChange: (_listener: () => void) => () => {},
   // Typed widget requests still pass through the fixture's window.fetch mock;
   // mirror the production client's JSON boundary so constructor-based imports
   // and the shared singleton observe the same seeded responses.

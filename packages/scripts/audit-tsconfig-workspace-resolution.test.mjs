@@ -321,6 +321,9 @@ test("historic app and Electrobun mappings are real red-green controls", {
   });
   assert.match(
     electrobunBroken.violations.join("\n"),
-    /platforms\/electrobun\/tsconfig\.json: unresolved @elizaos\/capacitor-bun-runtime imported by packages\/app-core\/src\/platform\/ios-runtime-bridge\.ts/,
+    // The control proves that dropping the path mapping is detected; which
+    // workspace file happens to be the first importer is not part of the
+    // contract and has already moved twice (#30709, ios-local-agent-transport).
+    /platforms\/electrobun\/tsconfig\.json: unresolved @elizaos\/capacitor-bun-runtime imported by packages\/\S+\.tsx?$/m,
   );
 });
