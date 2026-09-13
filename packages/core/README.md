@@ -16,6 +16,13 @@ or by a current room ADMIN for global and user-private documents. Every grantee
 must be an entity in the current agent tenant. Invalid or duplicate grant arrays
 fail closed.
 
+The `DOCUMENT` chat action exposes `inspect_pins` / `set_pins` and
+`inspect_readers` / `set_readers` for the verified owner. Inspection returns the
+current revision; saves require that revision and explicit complete targets.
+An empty chat-pin or named-reader array removes that selection. Pins never
+grant read access, and removing named readers does not revoke room access.
+These controls do not publish documents to the internet.
+
 ## Key concepts
 
 - **AgentRuntime:** Central orchestrator for the agent lifecycle, plugin loading, and the message loop.
