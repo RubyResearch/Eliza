@@ -8,7 +8,15 @@
  * for real.
  */
 
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import type { Context } from "hono";
 import * as workersHonoAuthActual from "@/lib/auth/workers-hono-auth";
 import * as rateLimitActual from "@/lib/middleware/rate-limit";
@@ -28,6 +36,7 @@ type AppCtx = Context<AppEnv>;
 const ORG = "00000000-0000-4000-8000-0000000000aa";
 const USER = "00000000-0000-4000-8000-0000000000bb";
 const API_KEY_ID = "00000000-0000-4000-8000-0000000000cc";
+const TRACE_ID = "0123456789abcdef0123456789abcdef";
 
 const UPSTREAM_URL = "https://api.openai.com/v1/embeddings";
 const UPSTREAM_KEY = "sk-upstream-test";
@@ -62,6 +71,7 @@ mock.module("@/lib/providers/language-model", () => ({
 }));
 
 const reserveCredits = mock();
+const markProviderDispatched = mock();
 const billUsage = mock();
 mock.module("@/lib/services/ai-billing", () => ({
   ...aiBillingActual,
@@ -87,6 +97,7 @@ mock.module("@/lib/services/organization-inference-admission", () => ({
       mode: "synchronous_reservation",
       settle,
       settleUnknown: () => settle(reservation.reservedAmount),
+      markProviderDispatched,
     };
   },
 }));
@@ -172,6 +183,7 @@ function post(body: unknown, ctx?: ExecutionContext) {
       headers: {
         Authorization: "Bearer eliza_test_key",
         "Content-Type": "application/json",
+        "X-Eliza-Trace-Id": TRACE_ID,
       },
       body: JSON.stringify(body),
     },
@@ -205,6 +217,8 @@ beforeEach(() => {
   resolveInferenceAuthContext.mockReset();
   enforceOrgRateLimit.mockReset();
   reserveCredits.mockReset();
+  markProviderDispatched.mockReset();
+  markProviderDispatched.mockResolvedValue(undefined);
   billUsage.mockReset();
   usageCreate.mockReset();
   embed.mockReset();
@@ -253,6 +267,113 @@ beforeEach(() => {
 });
 
 describe("embeddings pass-through (#15512)", () => {
+  test.each(["passthrough", "sdk-single", "sdk-batch"] as const)(
+    "%s reports admission timing without including the provider wait",
+    async (path) => {
+      let clock = 0;
+      const timer = spyOn(performance, "now").mockImplementation(() => clock);
+      const { ctx, scheduled } = makeExecutionCtx();
+      try {
+        process.env.INFERENCE_PASSTHROUGH_EMBEDDINGS =
+          path === "passthrough" ? "true" : "false";
+        resolveInferenceAuthContext.mockImplementation(
+          async (
+            _request: Request,
+            options: inferenceAuthActual.ResolveInferenceAuthOptions,
+          ) => {
+            clock += 11;
+            options.onTelemetry?.({
+              v: 1,
+              traceId: TRACE_ID,
+              authSource: "bearer_api_key",
+              controlledProbe: "off",
+              cacheAvailability: "available",
+              cacheBackend: "redis_rest",
+              cacheRead: "hit",
+              authoritative: "not_run",
+              cacheWrite: "not_run",
+              result: "authorized_cache",
+              timings: {
+                extractMs: 1,
+                cacheAvailabilityMs: 0,
+                cacheReadMs: 10,
+                keyLookupMs: null,
+                userOrgLookupMs: null,
+                moderationMs: null,
+                cacheWriteMs: null,
+                totalMs: 11,
+              },
+            });
+            return {
+              kind: "authorized",
+              source: "cache",
+              ctx: { userId: USER, orgId: ORG, apiKeyId: API_KEY_ID },
+            };
+          },
+        );
+        enforceOrgRateLimit.mockImplementation(async () => {
+          clock += 13;
+          return null;
+        });
+        reserveCredits.mockImplementation(async () => {
+          clock += 17;
+          return { reservedAmount: 0.01, reconcile: async () => undefined };
+        });
+        markProviderDispatched.mockImplementation(async () => {
+          clock += 7;
+        });
+        fetchImpl = async () => {
+          clock += 1_000;
+          return new Response(JSON.stringify(UPSTREAM_BODY));
+        };
+        embed.mockImplementation(async () => {
+          clock += 1_000;
+          return { embedding: [0.25, -0.5, 1], usage: { tokens: 7 } };
+        });
+        embedMany.mockImplementation(async () => {
+          clock += 1_000;
+          return { embeddings: [[0.25, -0.5, 1]], usage: { tokens: 7 } };
+        });
+
+        const res = await post(
+          {
+            model: "text-embedding-3-small",
+            input: path === "sdk-batch" ? ["hello"] : "hello",
+          },
+          ctx,
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers.get("X-Eliza-Preforward-Ms")).toBe(
+          "total=48;auth=11;mid=13;reserve=17;setup=7",
+        );
+        expect(res.headers.get("Server-Timing")).toContain(
+          "gateway_preforward;dur=48",
+        );
+        expect(res.headers.get("X-Eliza-Trace-Id")).toBe(TRACE_ID);
+        expect(res.headers.get("X-Eliza-Auth-Trace")).toContain(
+          "backend=redis_rest;read=hit;authoritative=not_run",
+        );
+        expect(res.headers.get("Server-Timing")).toContain(
+          "auth_cache_read;dur=10",
+        );
+        expect(await res.json()).toMatchObject({
+          data: [{ embedding: [0.25, -0.5, 1] }],
+        });
+        expect(markProviderDispatched).toHaveBeenCalledTimes(1);
+        expect(
+          fetchMock.mock.calls.length +
+            embed.mock.calls.length +
+            embedMany.mock.calls.length,
+        ).toBe(1);
+        await Promise.all(scheduled);
+        expect(billUsage).toHaveBeenCalledTimes(1);
+      } finally {
+        await Promise.all(scheduled);
+        timer.mockRestore();
+      }
+    },
+  );
+
   test("flag on + openai source: upstream bytes returned verbatim, SDK never called, usage billed from upstream", async () => {
     armReservation();
     let upstreamInit: RequestInit | undefined;

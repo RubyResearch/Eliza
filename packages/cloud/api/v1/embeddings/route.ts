@@ -21,6 +21,15 @@ import {
   OrgRateLimitCacheNotReadyError,
 } from "@/lib/middleware/rate-limit";
 import {
+  bindGatewayHandoffTelemetry,
+  type GatewayHandoffTelemetry,
+  type GatewayPreforwardTiming,
+  resolveElizaTraceId,
+  snapshotGatewayPreforwardTiming,
+  withGatewayPreforwardTelemetry,
+  withInferenceAuthTelemetry,
+} from "@/lib/observability/http-telemetry";
+import {
   estimateTokens,
   getProviderFromModel,
   normalizeModelName,
@@ -37,7 +46,10 @@ import type { CreditReservation } from "@/lib/services/credits";
 import { deferredCredentialAdmissionGuard } from "@/lib/services/deferred-credential-admission-guard";
 import { inferenceRateLimitConfig } from "@/lib/services/inference-admission-snapshot";
 import type { InferenceAdmissionSnapshot } from "@/lib/services/inference-auth-cache";
-import { resolveInferenceAuthContext } from "@/lib/services/inference-auth-context";
+import {
+  type InferenceAuthTelemetry,
+  resolveInferenceAuthContext,
+} from "@/lib/services/inference-auth-context";
 import { InferenceBalanceCacheWarmingError } from "@/lib/services/inference-billing-fast-path";
 import type { InferenceCredentialCheck } from "@/lib/services/inference-credential-revocation";
 import { isPassthroughEmbeddingsEnabled } from "@/lib/services/inference-passthrough";
@@ -64,6 +76,18 @@ interface EmbeddingsRequest {
 const app = new Hono<AppEnv>();
 
 app.post("/", async (c) => {
+  const telemetryStartedAt = performance.now();
+  const traceId = resolveElizaTraceId(c.req.raw.headers);
+  let authTelemetry: InferenceAuthTelemetry | undefined;
+  let preforwardTiming: GatewayPreforwardTiming | undefined;
+  const attachTelemetry = (response: Response): Response => {
+    const withAuth = authTelemetry
+      ? withInferenceAuthTelemetry(response, traceId, authTelemetry)
+      : response;
+    return preforwardTiming
+      ? withGatewayPreforwardTelemetry(withAuth, traceId, preforwardTiming)
+      : withAuth;
+  };
   let settleReservation: OrganizationInferenceAdmission["settle"] | undefined;
   let settleUnknown:
     | OrganizationInferenceAdmission["settleUnknown"]
@@ -140,9 +164,13 @@ app.post("/", async (c) => {
     let user: { id: string; organization_id: string };
     let apiKeyId: string | null;
     const resolution = await resolveInferenceAuthContext(c.req.raw, {
+      traceId,
       executionCtx,
       cacheOnly: Boolean(executionCtx),
       deferStrongCredentialCheck: Boolean(executionCtx) && requestIsValid,
+      onTelemetry: (telemetry) => {
+        authTelemetry = telemetry;
+      },
     });
     if (resolution.kind === "warming") {
       return c.json(
@@ -222,6 +250,7 @@ app.post("/", async (c) => {
       apiKeyId = c.get("apiKeyId") ?? null;
     }
 
+    const tAuth = performance.now();
     const orgRateLimitPromise = user.organization_id
       ? enforceOrgRateLimit(user.organization_id, "embeddings", {
           cacheOnly: Boolean(executionCtx),
@@ -321,6 +350,7 @@ app.post("/", async (c) => {
     const requestId = crypto.randomUUID();
     providerRequestId = requestId;
     const affiliateCode = c.req.header("X-Affiliate-Code") ?? null;
+    const tBeforeReserve = performance.now();
     try {
       const admission = await admitOrganizationInference({
         context: {
@@ -424,6 +454,29 @@ app.post("/", async (c) => {
       throw error;
     }
 
+    const tAfterReserve = performance.now();
+    // Match chat timing: stop before the direct fetch / SDK invocation, after
+    // argument construction and the existing provider-dispatch admission gate.
+    const handoffTelemetry: GatewayHandoffTelemetry = {
+      capture: () => {
+        const handoffAt = performance.now();
+        preforwardTiming = snapshotGatewayPreforwardTiming({
+          authMs: tAuth - telemetryStartedAt,
+          middleMs: tBeforeReserve - tAuth,
+          reserveMs: tAfterReserve - tBeforeReserve,
+          setupMs: handoffAt - tAfterReserve,
+          totalMs: handoffAt - telemetryStartedAt,
+        });
+      },
+      emit: () => {
+        logger.info("[Embeddings][preforward]", {
+          traceId,
+          model,
+          ...preforwardTiming,
+        });
+      },
+    };
+
     // billUsage receives the admission settler so affiliate earnings remain
     // clamped to what the authoritative asynchronous reservation collected.
     const settleOwner = settleReservation;
@@ -458,7 +511,10 @@ app.post("/", async (c) => {
     if (passthroughUpstream) {
       await markProviderDispatched?.();
       providerDispatched = true;
-      const upstreamResponse = await fetch(passthroughUpstream.url, {
+      const upstreamResponse = await bindGatewayHandoffTelemetry(
+        handoffTelemetry,
+        (init: RequestInit) => fetch(passthroughUpstream.url, init),
+      )({
         method: "POST",
         headers: {
           Authorization: `Bearer ${passthroughUpstream.apiKey}`,
@@ -490,7 +546,10 @@ app.post("/", async (c) => {
       const embeddingModel = getTextEmbeddingModel(model);
       await markProviderDispatched?.();
       providerDispatched = true;
-      const result = await embedMany({
+      const result = await bindGatewayHandoffTelemetry(
+        handoffTelemetry,
+        embedMany,
+      )({
         model: embeddingModel,
         values: request.input,
       });
@@ -500,7 +559,10 @@ app.post("/", async (c) => {
       const embeddingModel = getTextEmbeddingModel(model);
       await markProviderDispatched?.();
       providerDispatched = true;
-      const result = await embed({
+      const result = await bindGatewayHandoffTelemetry(
+        handoffTelemetry,
+        embed,
+      )({
         model: embeddingModel,
         value: request.input,
       });
@@ -599,28 +661,32 @@ app.post("/", async (c) => {
     // probes distinguish the paths without log access (same convention as
     // /v1/chat/completions).
     if (passthroughBody) {
-      return new Response(passthroughBody, {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Eliza-Inference-Path": "passthrough",
-        },
-      });
+      return attachTelemetry(
+        new Response(passthroughBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Eliza-Inference-Path": "passthrough",
+          },
+        }),
+      );
     }
 
-    return c.json({
-      object: "list",
-      data: embeddings.map((embedding, index) => ({
-        object: "embedding",
-        embedding,
-        index,
-      })),
-      model,
-      usage: {
-        prompt_tokens: actualTokens,
-        total_tokens: actualTokens,
-      },
-    });
+    return attachTelemetry(
+      c.json({
+        object: "list",
+        data: embeddings.map((embedding, index) => ({
+          object: "embedding",
+          embedding,
+          index,
+        })),
+        model,
+        usage: {
+          prompt_tokens: actualTokens,
+          total_tokens: actualTokens,
+        },
+      }),
+    );
   } catch (error) {
     // error-policy:J1 route boundary — this catch cancels admitted credit on a
     // provider failure and translates the failure into a structured response.
