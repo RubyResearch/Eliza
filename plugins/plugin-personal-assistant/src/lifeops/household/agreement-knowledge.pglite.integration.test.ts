@@ -47,6 +47,8 @@ import {
   type RealTestRuntimeResult,
 } from "../../../test/helpers/runtime.js";
 import { bindMachineAuthIdentityToEntity } from "../../routes/authenticated-entity-principal.js";
+import { importFamilyCorrespondence } from "../family-coordination/intake-import.js";
+import { FamilyIntakeReviewStore } from "../family-coordination/intake-review.js";
 import { MonthlyFamilyPacketService } from "../family-coordination/monthly-packet.js";
 import { exportFamilyWorkspace } from "../family-workflows/workspace-export.js";
 import {
@@ -715,6 +717,121 @@ describe("parenting-agreement knowledge — real PGlite", () => {
         .update(exported.bytes)
         .digest("hex"),
     });
+  });
+
+  it("exports selected correspondence and its review history, excluding other tenants and rejecting changed or deleted originals", async () => {
+    const documents = runtime.getService<DocumentService>(
+      DocumentService.serviceType,
+    );
+    if (!documents) throw new Error("Canonical documents are unavailable");
+    const text =
+      "Synthetic correspondence: Please confirm the library pickup.\nNo agreement has been reached.";
+    const selected = await importFamilyCorrespondence(runtime, {
+      id: crypto.randomUUID(),
+      periodKey: "2026-12",
+      title: "Synthetic export source",
+      text,
+    });
+    const foreignId = crypto.randomUUID();
+    const store = new FamilyIntakeReviewStore(runtime);
+    const access = {
+      requesterEntityId: selected.selectedByEntityId,
+      role: "OWNER" as const,
+      isOwner: true,
+    };
+    try {
+      const fact = {
+        id: crypto.randomUUID(),
+        section: "unanswered" as const,
+        statement: "Library pickup remains unconfirmed.",
+        sourceQuote: "Please confirm the library pickup.",
+        dates: [],
+        requests: ["Confirm pickup"],
+        commitments: [],
+        accountability: [],
+        urgency: null,
+        unanswered: true,
+        recipientEntityIds: [],
+      };
+      const proposed = await store.propose({
+        id: selected.id,
+        expectedRevision: selected.revision,
+        sourceSha256: selected.source.contentSha256,
+        facts: [fact],
+      });
+      const reviewed = await store.review({
+        id: selected.id,
+        expectedRevision: proposed.revision,
+        reviewerEntityId: selected.selectedByEntityId,
+        facts: [
+          {
+            ...fact,
+            statement: "Owner reviewed: pickup is still unconfirmed.",
+          },
+        ],
+      });
+      await executeRawSql(
+        runtime,
+        `INSERT INTO app_lifeops.life_family_intake_reviews
+        (agent_id,id,period_key,document_id,revision,status,review_json)
+        SELECT ${sqlQuote(crypto.randomUUID())},${sqlQuote(foreignId)},period_key,document_id,revision,status,review_json
+        FROM app_lifeops.life_family_intake_reviews
+        WHERE agent_id=${sqlQuote(runtime.agentId)} AND id=${sqlQuote(selected.id)}`,
+      );
+      const files = readStoredZip(
+        (await exportFamilyWorkspace(runtime, SELF_ENTITY_ID)).bytes,
+      );
+      const manifestBytes = files.get("manifest.json");
+      if (!manifestBytes) throw new Error("Workspace manifest is missing");
+      const manifest = JSON.parse(manifestBytes.toString("utf8"));
+      expect(manifest.records.intakeReviews).toEqual(
+        expect.arrayContaining(
+          [selected, proposed, reviewed].map((review) =>
+            expect.objectContaining({
+              id: selected.id,
+              revision: review.revision,
+              review_json: review,
+            }),
+          ),
+        ),
+      );
+      expect(
+        manifest.records.intakeReviews.some(
+          (row: { id: string }) => row.id === foreignId,
+        ),
+      ).toBe(false);
+      const sources = manifest.intakeSources.filter(
+        (source: { documentId: string }) =>
+          source.documentId === selected.source.documentId,
+      );
+      expect(sources).toHaveLength(1);
+      const original = files.get(sources[0].path);
+      if (!original) throw new Error("Selected correspondence is missing");
+      expect(original.toString("utf8")).toBe(text);
+      expect(crypto.createHash("sha256").update(original).digest("hex")).toBe(
+        selected.source.contentSha256,
+      );
+      await documents.updateDocument({
+        documentId: selected.source.documentId as UUID,
+        content: "Changed correspondence",
+        accessContext: access,
+      });
+      await expect(
+        exportFamilyWorkspace(runtime, SELF_ENTITY_ID),
+      ).rejects.toMatchObject({ code: "FAMILY_EXPORT_SOURCE_INTEGRITY" });
+      await documents.deleteDocumentWithAccessContext(
+        selected.source.documentId as UUID,
+        access,
+      );
+      await expect(
+        exportFamilyWorkspace(runtime, SELF_ENTITY_ID),
+      ).rejects.toMatchObject({ code: "FAMILY_EXPORT_SOURCE_UNAVAILABLE" });
+    } finally {
+      await executeRawSql(
+        runtime,
+        `DELETE FROM app_lifeops.life_family_intake_reviews WHERE id IN (${sqlQuote(selected.id)},${sqlQuote(foreignId)})`,
+      );
+    }
   });
 
   it("exports retained school bytes without executor leases or another agent's records and fails on missing source bytes", async () => {

@@ -492,8 +492,9 @@ Saving a correction does not prepare a model review, approve, pin or share it.
 ### Family workspace export
 
 The owner-only `POST /api/lifeops/family-workflows/export` downloads a ZIP with
-all family agreement versions, retained school PDFs, monthly packet versions
-and drafts, their approval records, and stored provider/school mutation receipts.
+all family agreement versions, retained school PDFs, selected correspondence,
+every intake review revision, monthly packet versions and drafts, their approval
+records, and stored provider/school mutation receipts.
 Each member has a SHA-256 checksum. Agreement archives preserve their existing
 source/extraction and review/access provenance; packet and workflow records use
 one database statement snapshot. The manifest records this component-snapshot
@@ -502,6 +503,13 @@ Missing or changed retained PDF bytes fail export rather than producing a
 healthy-looking partial archive. Connection credentials and executor lease
 tokens are excluded. Export records preparation, not receipt by the client,
 and does not revoke access or delete data.
+
+Selected correspondence is read through the canonical owner document boundary.
+Its complete text must match the SHA-256 recorded by every referencing intake
+revision; changed or unavailable originals fail export explicitly. Repeated
+references reuse one archive member. The manifest binds each original to its
+document identity and content hash, while retaining proposal and owner-review
+history separately. Unrelated documents and another agent's intake are excluded.
 
 ## Selected correspondence and monthly drafts
 

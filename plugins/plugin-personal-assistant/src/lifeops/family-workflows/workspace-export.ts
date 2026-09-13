@@ -6,10 +6,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createZipArchive } from "@elizaos/agent/api/zip-utils";
 import {
+  DocumentService,
   ElizaError,
   type IAgentRuntime,
   type IFileStorageService,
+  resolveOwnerEntityIdOrDefault,
   ServiceType,
+  validateUuid,
 } from "@elizaos/core";
 import { z } from "zod";
 import { getAgreementKnowledgeService } from "../household/agreement-knowledge.js";
@@ -21,6 +24,11 @@ type ExportRecord = z.infer<typeof recordSchema>;
 // Explicit projections keep executor leases and connection credentials outside
 // the portable owner record even when the underlying schemas grow.
 const SOURCES = [
+  {
+    key: "intakeReviews",
+    table: "app_lifeops.life_family_intake_reviews",
+    columns: "id,period_key,document_id,revision,status,review_json",
+  },
   {
     key: "packets",
     table: "app_lifeops.life_family_packets",
@@ -70,8 +78,12 @@ const SOURCES = [
   },
 ] as const;
 
-function failure(message: string, code: string): never {
-  throw new ElizaError(`[FamilyWorkspaceExport] ${message}`, { code });
+function failure(
+  message: string,
+  code: string,
+  context?: Record<string, string>,
+): never {
+  throw new ElizaError(`[FamilyWorkspaceExport] ${message}`, { code, context });
 }
 
 function sha256(bytes: Buffer | string): string {
@@ -226,6 +238,84 @@ export async function exportFamilyWorkspace(
       schoolFiles.push({ path: name, sha256: digest, byteSize: bytes.length });
       retained.add(digest);
     }
+  const intakeSources = [];
+  const intakeReferences = new Set<string>();
+  const intakeReferenceSchema = z.object({
+    document_id: z.string(),
+    review_json: z.object({
+      source: z.object({
+        documentId: z.string(),
+        contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+    }),
+  });
+  const intakeReviews = snapshot.records.intakeReviews;
+  if (intakeReviews !== undefined)
+    for (const row of intakeReviews) {
+      const parsed = intakeReferenceSchema.safeParse(row);
+      if (!parsed.success)
+        failure(
+          "A selected source reference is invalid",
+          "FAMILY_EXPORT_INVALID_RECORD",
+        );
+      const source = parsed.data.review_json.source;
+      const documentId = validateUuid(source.documentId);
+      if (!documentId || source.documentId !== parsed.data.document_id)
+        failure(
+          "A selected source identity is inconsistent",
+          "FAMILY_EXPORT_INVALID_RECORD",
+        );
+      const name = `correspondence/${documentId}/${source.contentSha256}.txt`;
+      if (intakeReferences.has(name)) continue;
+      const documents = runtime.getService<DocumentService>(
+        DocumentService.serviceType,
+      );
+      if (!documents)
+        failure(
+          "Canonical document service is unavailable",
+          "FAMILY_EXPORT_UNAVAILABLE",
+        );
+      const document = await documents.getDocumentByIdWithAccessContext(
+        documentId,
+        {
+          requesterEntityId: resolveOwnerEntityIdOrDefault(runtime),
+          role: "OWNER",
+          isOwner: true,
+        },
+      );
+      if (!document || document.id !== documentId)
+        failure(
+          "Retained selected correspondence is unavailable to this owner",
+          "FAMILY_EXPORT_SOURCE_UNAVAILABLE",
+          { documentId, expectedSha256: source.contentSha256 },
+        );
+      const metadata = z
+        .object({
+          ingestionState: z.literal("ready"),
+          contentType: z.literal("text/plain"),
+        })
+        .safeParse(document.metadata);
+      const text = document.content.text;
+      if (
+        !metadata.success ||
+        typeof text !== "string" ||
+        sha256(text) !== source.contentSha256
+      )
+        failure(
+          "Retained selected correspondence changed or failed integrity verification",
+          "FAMILY_EXPORT_SOURCE_INTEGRITY",
+          { documentId, expectedSha256: source.contentSha256 },
+        );
+      const bytes = Buffer.from(text, "utf8");
+      files.push({ name, data: bytes });
+      intakeSources.push({
+        documentId,
+        contentSha256: source.contentSha256,
+        path: name,
+        byteSize: bytes.length,
+      });
+      intakeReferences.add(name);
+    }
   const exportId = `family_export_${randomUUID()}`;
   const manifest = Buffer.from(
     `${JSON.stringify(
@@ -237,11 +327,12 @@ export async function exportFamilyWorkspace(
         captureStartedAt,
         captureCompletedAt: new Date().toISOString(),
         scope:
-          "All family agreement versions, school workflow records and monthly packets owned by this agent. Unrelated calendars, inboxes and connection credentials are excluded.",
+          "All family agreement versions, selected correspondence and intake review revisions, school workflow records and monthly packets owned by this agent. Unrelated documents, calendars, inboxes and connection credentials are excluded.",
         consistency:
-          "Packet and workflow records share one database statement snapshot. Each nested agreement archive records its own review/access snapshot and source-byte checksums.",
+          "Intake, packet and workflow records share one database statement snapshot. Selected correspondence is read through owner document access and must match every retained review hash. Each nested agreement archive records its own review/access snapshot and source-byte checksums.",
         sourceArchives,
         schoolFiles,
+        intakeSources,
         ...snapshot,
         receiptCoverage:
           "Only stored approval states, provider receipts and school mutation receipts are included. Missing receipts do not establish delivery. This preparation does not assert successful client download.",
