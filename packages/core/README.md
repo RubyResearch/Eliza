@@ -471,3 +471,19 @@ bun run --cwd packages/core typecheck     # tsgo --noEmit
 For agent-facing notes on layout, the public surface, and how to extend the runtime, see [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md).
 
 ---
+
+
+### Document input encoding
+
+`DocumentService.addDocument` accepts literal text for text formats and Base64
+for binary formats. Text that happens to resemble Base64 stays literal. A caller
+sending Base64-encoded text must set `contentEncoding: "base64"`; decoding rejects
+malformed Base64 or invalid UTF-8 before storage. `contentEncoding: "utf8"` is
+invalid for a binary format. Normal chat, selected correspondence, file and URL
+text imports need no encoding conversion.
+
+Text content identities preserve exact whitespace and literal encoding-like
+content. Equal retries deduplicate; different text does not reuse a document
+merely because trimming or guessed decoding would produce the same value.
+Existing source records are not rewritten. Previously normalized or misdecoded
+records require source-backed review before any recovery or migration.

@@ -557,6 +557,29 @@ it("selects a canonical source, extracts private proposals and preserves review/
         (review: { id: string }) => review.id === failedSelection.id,
       ),
     ).toEqual(failedSelection);
+    for (const text of [
+      "Concurrent synthetic audience decisions",
+      "SGVsbG8gV29ybGQh",
+      "  Literal source with surrounding whitespace.\n",
+    ]) {
+      const literalInput = {
+        id: randomUUID(),
+        periodKey: "2027-01",
+        title: "Literal selected source",
+        text,
+      };
+      const response = await post("/import", literalInput);
+      expect(response.status, await response.clone().text()).toBe(201);
+      const selectedLiteral = (await response.json()).review;
+      const savedLiteral = await documents.getDocumentByIdWithAccessContext(
+        selectedLiteral.source.documentId,
+        { requesterEntityId: owner, role: "OWNER", isOwner: true },
+      );
+      expect(savedLiteral?.content.text).toBe(text);
+      expect(
+        (await (await post("/import", literalInput)).json()).review,
+      ).toEqual(selectedLiteral);
+    }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await host.cleanup();

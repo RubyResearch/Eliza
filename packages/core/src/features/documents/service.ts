@@ -54,6 +54,7 @@ import {
 } from "../../types";
 import { splitChunks, validateUuid } from "../../utils";
 import { Semaphore } from "../../utils/prompt-batcher/shared";
+import { toWellFormedUnicode } from "../../utils/well-formed";
 import { bm25Scores, normalizeBm25Scores } from "./bm25.ts";
 import { validateModelConfig } from "./config";
 import { addDocumentFromFilePath, loadDocumentsFromPath } from "./docs-loader";
@@ -87,7 +88,6 @@ import {
 	generateContentBasedId,
 	isBinaryContentType,
 	isTextBackedDocumentContent,
-	looksLikeBase64,
 	normalizeDocumentContentType,
 	stripDocumentFilenameExtension,
 } from "./utils.ts";
@@ -1671,7 +1671,62 @@ export class DocumentService extends Service {
 			};
 		}
 
+		const binaryInput =
+			normalizeDocumentContentType(options.contentType) === "application/pdf" ||
+			options.originalFilename.toLowerCase().endsWith(".pdf") ||
+			isBinaryContentType(options.contentType, options.originalFilename);
+		if (
+			options.contentEncoding !== undefined &&
+			options.contentEncoding !== "utf8" &&
+			options.contentEncoding !== "base64"
+		)
+			throw new ElizaError("Use utf8 or base64 for document contentEncoding", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+		if (binaryInput && options.contentEncoding === "utf8")
+			throw new ElizaError("Binary documents require Base64 input", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+		if (!binaryInput && options.contentEncoding === "base64") {
+			const encoded = options.content.replace(/\s/g, "");
+			const bytes = Buffer.from(encoded, "base64");
+			if (
+				!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+					encoded,
+				) ||
+				bytes.toString("base64") !== encoded
+			)
+				throw new ElizaError(
+					"Encoded text must contain valid canonical Base64",
+					{ code: "DOCUMENT_BASE64_INVALID" },
+				);
+			try {
+				options = {
+					...options,
+					content: new TextDecoder("utf-8", {
+						fatal: true,
+						ignoreBOM: true,
+					}).decode(bytes),
+					contentEncoding: "utf8",
+				};
+			} catch (cause) {
+				// error-policy:J2 Encoded text with invalid UTF-8 is rejected before persistence.
+				throw new ElizaError("Encoded text is not valid UTF-8", {
+					code: "DOCUMENT_ENCODING_INVALID",
+					cause,
+				});
+			}
+		}
+		if (
+			!binaryInput &&
+			toWellFormedUnicode(options.content) !== options.content
+		)
+			throw new ElizaError("Document text contains invalid Unicode", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+
 		const contentBasedId = generateContentBasedId(options.content, agentId, {
+			literalText: !binaryInput,
 			includeFilename: options.originalFilename,
 			contentType: options.contentType,
 			...(options.audience === "chat"
@@ -1868,49 +1923,8 @@ export class DocumentService extends Service {
 				);
 				documentContentToStore = content;
 			} else {
-				if (looksLikeBase64(content)) {
-					try {
-						const decodedBuffer = Buffer.from(content, "base64");
-						const decodedText = decodedBuffer.toString("utf8");
-
-						const invalidCharCount = (decodedText.match(/\ufffd/g) || [])
-							.length;
-						const textLength = decodedText.length;
-
-						if (invalidCharCount > 0 && invalidCharCount / textLength > 0.1) {
-							throw new Error(
-								"Decoded content contains too many invalid characters",
-							);
-						}
-
-						logger.debug(
-							`Successfully decoded base64 content for text file: ${originalFilename}`,
-						);
-						extractedText = decodedText;
-						documentContentToStore = decodedText;
-					} catch (e) {
-						// error-policy:J2 Preserve the decoding failure as the cause
-						// of a document-specific validation error.
-						logger.error(
-							{ error: e instanceof Error ? e : new Error(String(e)) },
-							`Failed to decode base64 for ${originalFilename}`,
-						);
-						throw new ElizaError(
-							`File ${originalFilename} appears to be corrupted or incorrectly encoded`,
-							{
-								code: "DOCUMENT_ENCODING_INVALID",
-								context: { originalFilename, contentType },
-								cause: e,
-							},
-						);
-					}
-				} else {
-					logger.debug(
-						`Treating content as plain text for file: ${originalFilename}`,
-					);
-					extractedText = content;
-					documentContentToStore = content;
-				}
+				extractedText = content;
+				documentContentToStore = content;
 			}
 
 			if (!extractedText || extractedText.trim() === "") {
@@ -1939,6 +1953,9 @@ export class DocumentService extends Service {
 			const ingestionAttemptId = this.runtime.createRunId();
 			const scopedMetadata = {
 				...metadata,
+				textBacked:
+					!isPdfFile &&
+					!isBinaryContentType(normalizedContentType, originalFilename),
 				scope: documentScope,
 				scopedToEntityId: scopedEntityId,
 				addedBy: addedBy ?? entityId,
@@ -2926,7 +2943,7 @@ export class DocumentService extends Service {
 				const documentId = generateContentBasedId(
 					trimmedItem,
 					this.runtime.agentId,
-					{ includeFilename: filename },
+					{ includeFilename: filename, literalText: true },
 				) as UUID;
 
 				if (await this.checkExistingDocument(documentId)) {

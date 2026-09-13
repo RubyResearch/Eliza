@@ -272,13 +272,15 @@ export function generateContentBasedId(
 		includeFilename?: string;
 		contentType?: string;
 		namespace?: string;
+		/** Preserve literal source text, including whitespace and Base64-looking words. */
+		literalText?: boolean;
 	},
 ): string {
 	const { includeFilename, contentType, namespace } = options || {};
 
 	let contentForHashing: string;
 
-	if (looksLikeBase64(content)) {
+	if (!options?.literalText && looksLikeBase64(content)) {
 		const decoded = Buffer.from(content, "base64").toString("utf8");
 		if (decoded.includes("\ufffd") || contentType?.includes("pdf")) {
 			contentForHashing = toWellFormedUnicode(content);
@@ -289,10 +291,12 @@ export function generateContentBasedId(
 		contentForHashing = toWellFormedUnicode(content);
 	}
 
-	contentForHashing = contentForHashing
-		.replace(/\r\n/g, "\n") // Normalize line endings
-		.replace(/\r/g, "\n")
-		.trim();
+	if (!options?.literalText) {
+		contentForHashing = contentForHashing
+			.replace(/\r\n/g, "\n")
+			.replace(/\r/g, "\n")
+			.trim();
+	}
 
 	const componentsToHash =
 		namespace === undefined
