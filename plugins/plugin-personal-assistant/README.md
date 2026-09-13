@@ -554,5 +554,9 @@ and approvals remain usable, and history maintenance preserves fenced family
 records. Scheduled family execution holds a durable operation through final
 receipt persistence. A rejected execution retains its claim for reconciliation;
 typed domain errors remain unchanged for callers and diagnostics record the
-operation identity. These internal guards do not themselves expose a delete
-endpoint or establish a backup-retention policy.
+operation identity. Direct packet creation and draft edits also hold active-state
+admission through their database commit. Approval requests retain a durable claim
+until both canonical persistence and reminder surfacing finish; an uncertain
+completion leaves its packet/version identity available for reconciliation.
+These internal guards do not themselves expose a delete endpoint or establish a
+backup-retention policy.

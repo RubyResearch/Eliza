@@ -14,7 +14,11 @@ import type {
   ApprovalRequest,
 } from "../approval-queue.types.js";
 import { collectCalendarClaims } from "../family-workflows/calendar-claims.js";
-import type { RawSqlQuery } from "../sql.js";
+import {
+  ensureFamilyWorkspaceOperationStore,
+  fenceFamilyWorkspace,
+} from "../family-workflows/workspace-operation-store.js";
+import { type RawSqlQuery, withRequiredTransaction } from "../sql.js";
 import { familyIntakeClaim } from "./intake-claims.js";
 
 import { FamilyIntakeReviewStore } from "./intake-review.js";
@@ -462,6 +466,168 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
     expect(
       await service.readDraftApprovalId(draft.packetId, draft.draftVersion),
     ).toBeNull();
+  });
+
+  it.each(["packet", "draft", "revision", "approval"] as const)(
+    "rejects a %s mutation after the workspace fence without persisting private data",
+    async (kind) => {
+      const packet = await service.buildInternal(period("2026-09"), [
+        claim("a"),
+      ]);
+      const draft = await service.createExternalDraft(packet, {
+        ...guestDraft,
+        email: { subject: "September plans", senderGrantId: "sender-1" },
+      });
+      await ensureFamilyWorkspaceOperationStore(runtime);
+      await db.query(
+        "UPDATE app_lifeops.life_family_workspace_state SET state='revoking' WHERE agent_id='agent-a'",
+      );
+      const before = await db.query(
+        "SELECT packet_json FROM app_lifeops.life_family_packets ORDER BY internal_version",
+      );
+      const draftsBefore = await db.query(
+        "SELECT * FROM app_lifeops.life_family_packet_drafts ORDER BY draft_version",
+      );
+      const queue = {
+        enqueueTransactional: vi.fn(async (input: ApprovalEnqueueInput) => ({
+          request: approval(input),
+          reused: false,
+        })),
+        surfaceEnqueuedApproval: vi.fn(async () => undefined),
+      };
+      const mutate = () => {
+        switch (kind) {
+          case "packet":
+            return service.buildInternal(period("2026-09"), [
+              claim("new-private-source"),
+            ]);
+          case "draft":
+            return service.createExternalDraft(packet, guestDraft);
+          case "revision":
+            return service.reviseDraft({
+              packetId: packet.packetId,
+              expectedDraftVersion: draft.draftVersion,
+              subject: "Revised plans",
+              body: "A new private revision",
+            });
+          case "approval":
+            return service.enqueueDraftApproval({
+              draft,
+              queue,
+              requestedBy: "owner",
+              subjectUserId: "owner",
+              expiresAt: new Date("2026-10-01T00:00:00Z"),
+            });
+        }
+      };
+      await expect(mutate()).rejects.toMatchObject({
+        code: "FAMILY_WORKSPACE_FENCED",
+      });
+      expect(
+        (
+          await db.query(
+            "SELECT packet_json FROM app_lifeops.life_family_packets ORDER BY internal_version",
+          )
+        ).rows,
+      ).toEqual(before.rows);
+      expect(
+        (
+          await db.query(
+            "SELECT * FROM app_lifeops.life_family_packet_drafts ORDER BY draft_version",
+          )
+        ).rows,
+      ).toEqual(draftsBefore.rows);
+      expect(queue.enqueueTransactional).not.toHaveBeenCalled();
+      expect(queue.surfaceEnqueuedApproval).not.toHaveBeenCalled();
+    },
+  );
+
+  it("holds deletion through approval reminder surfacing and releases the claim after completion", async () => {
+    const packet = await service.buildInternal(period("2026-09"), [claim("a")]);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const work = service.enqueueDraftApproval({
+      draft,
+      queue: {
+        enqueueTransactional: async (input) => ({
+          request: approval(input),
+          reused: false,
+        }),
+        surfaceEnqueuedApproval: async () => {
+          entered();
+          await pending;
+        },
+      },
+      requestedBy: "owner",
+      subjectUserId: "owner",
+      expiresAt: new Date("2026-10-01T00:00:00Z"),
+    });
+    await started;
+    try {
+      await expect(
+        withRequiredTransaction(runtime, (tx) =>
+          fenceFamilyWorkspace(tx, runtime.agentId),
+        ),
+      ).rejects.toMatchObject({ code: "FAMILY_DELETION_WORK_UNSETTLED" });
+    } finally {
+      release();
+    }
+    await work;
+    await withRequiredTransaction(runtime, (tx) =>
+      fenceFamilyWorkspace(tx, runtime.agentId),
+    );
+    await expect(
+      new MonthlyFamilyPacketService(runtime).buildInternal(period("2026-10"), [
+        claim("later"),
+      ]),
+    ).rejects.toMatchObject({ code: "FAMILY_WORKSPACE_FENCED" });
+  });
+
+  it("retains reconciliation identity when approval reminder completion is unknown", async () => {
+    const packet = await service.buildInternal(period("2026-09"), [claim("a")]);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    await expect(
+      service.enqueueDraftApproval({
+        draft,
+        queue: {
+          enqueueTransactional: async (input) => ({
+            request: approval(input),
+            reused: false,
+          }),
+          surfaceEnqueuedApproval: async () => {
+            throw new Error("reminder acknowledgement lost");
+          },
+        },
+        requestedBy: "owner",
+        subjectUserId: "owner",
+        expiresAt: new Date("2026-10-01T00:00:00Z"),
+      }),
+    ).rejects.toThrow("reminder acknowledgement lost");
+    const rows = await db.query(
+      "SELECT target_json FROM app_lifeops.life_family_workspace_operations WHERE agent_id='agent-a'",
+    );
+    expect(rows.rows).toEqual([
+      {
+        target_json: {
+          kind: "family-packet-approval",
+          packetId: packet.packetId,
+          draftVersion: draft.draftVersion,
+        },
+      },
+    ]);
+    await ensureFamilyWorkspaceOperationStore(runtime);
+    await expect(
+      withRequiredTransaction(runtime, (tx) =>
+        fenceFamilyWorkspace(tx, runtime.agentId),
+      ),
+    ).rejects.toMatchObject({ code: "FAMILY_DELETION_WORK_UNSETTLED" });
   });
 
   it("survives restart, preserves provenance, deduplicates content, and versions changed internal packets", async () => {

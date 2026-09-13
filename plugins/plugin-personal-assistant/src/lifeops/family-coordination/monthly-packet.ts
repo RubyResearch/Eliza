@@ -11,6 +11,12 @@ import type {
   ApprovalQueue,
   ApprovalRequest,
 } from "../approval-queue.types.js";
+import {
+  assertFamilyWorkspaceActive,
+  beginFamilyWorkspaceOperation,
+  settleFamilyWorkspaceOperation,
+  withFamilyWorkspaceStateTransaction,
+} from "../family-workflows/workspace-operation-store.js";
 import { getAgreementKnowledgeService } from "../household/agreement-knowledge.js";
 import {
   executeRawSql,
@@ -21,7 +27,6 @@ import {
   type TransactionalDb,
   toNumber,
   toText,
-  withRequiredTransaction,
 } from "../sql.js";
 
 import { validateFamilyIntakeClaim } from "./intake-claims.js";
@@ -381,11 +386,22 @@ function parsePacket(row: Record<string, unknown>): MonthlyFamilyPacket {
   return parseJsonValue<MonthlyFamilyPacket>(row.packet_json, null as never);
 }
 
-/** Serialize packet and draft publication, including the first version with no row to lock. */
-async function lockPacketPublication(tx: TransactionalDb): Promise<void> {
-  await executeRawSqlTx(
-    tx,
-    "LOCK TABLE app_lifeops.life_family_packets IN SHARE ROW EXCLUSIVE MODE",
+/** Serialize version allocation and hold workspace admission through commit. */
+async function withPacketMutation<T>(
+  runtime: IAgentRuntime,
+  mutate: (tx: TransactionalDb) => Promise<T>,
+): Promise<T> {
+  return withFamilyWorkspaceStateTransaction(
+    runtime,
+    [
+      "app_lifeops.life_family_packet_drafts",
+      "app_lifeops.life_family_packets",
+    ],
+    (tx, state) => {
+      assertFamilyWorkspaceActive(state);
+      return mutate(tx);
+    },
+    { lockMode: "SHARE ROW EXCLUSIVE" },
   );
 }
 
@@ -444,8 +460,7 @@ export class MonthlyFamilyPacketService {
     await this.ensureSchema();
     validatePeriod(period);
     incoming.forEach(validateClaim);
-    return await withRequiredTransaction(this.runtime, async (tx) => {
-      await lockPacketPublication(tx);
+    return await withPacketMutation(this.runtime, async (tx) => {
       const priorRows = await executeRawSqlTx(
         tx,
         `SELECT packet_json FROM app_lifeops.life_family_packets WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND period_key < ${sqlQuote(period.key)} ORDER BY period_key DESC, internal_version DESC LIMIT 1`,
@@ -712,8 +727,7 @@ export class MonthlyFamilyPacketService {
       if (body.includes(claim.statement))
         fail("owner-only content leaked", "FAMILY_PACKET_PRIVACY_LEAK");
     }
-    return await withRequiredTransaction(this.runtime, async (tx) => {
-      await lockPacketPublication(tx);
+    return await withPacketMutation(this.runtime, async (tx) => {
       const latestPackets = await executeRawSqlTx(
         tx,
         `SELECT packet_json FROM app_lifeops.life_family_packets WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND packet_id=${sqlQuote(packet.packetId)} ORDER BY internal_version DESC LIMIT 1`,
@@ -818,8 +832,7 @@ export class MonthlyFamilyPacketService {
         },
       ],
     };
-    await withRequiredTransaction(this.runtime, async (tx) => {
-      await lockPacketPublication(tx);
+    await withPacketMutation(this.runtime, async (tx) => {
       // Read the current versions after every publisher has acquired the same lock.
       const packets = await executeRawSqlTx(
         tx,
@@ -871,8 +884,14 @@ export class MonthlyFamilyPacketService {
     ) {
       fail("draft is missing or tampered", "FAMILY_PACKET_DRAFT_TAMPERED");
     }
-    const request = await withRequiredTransaction(this.runtime, async (tx) => {
-      await lockPacketPublication(tx);
+    const operationId = await beginFamilyWorkspaceOperation(this.runtime, {
+      kind: "family-packet-approval",
+      packetId: draft.packetId,
+      draftVersion: draft.draftVersion,
+    });
+    // The claim spans approval persistence and reminder surfacing. Uncertain
+    // failures retain its identity for reconciliation before workspace deletion.
+    const request = await withPacketMutation(this.runtime, async (tx) => {
       const packets = await executeRawSqlTx(
         tx,
         `SELECT internal_version FROM app_lifeops.life_family_packets WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND packet_id=${sqlQuote(draft.packetId)} ORDER BY internal_version DESC LIMIT 1`,
@@ -933,6 +952,7 @@ export class MonthlyFamilyPacketService {
       return approval;
     });
     await args.queue.surfaceEnqueuedApproval(request);
+    await settleFamilyWorkspaceOperation(this.runtime, operationId);
     return request;
   }
 
