@@ -502,3 +502,21 @@ Missing or changed retained PDF bytes fail export rather than producing a
 healthy-looking partial archive. Connection credentials and executor lease
 tokens are excluded. Export records preparation, not receipt by the client,
 and does not revoke access or delete data.
+
+## Selected correspondence and monthly drafts
+
+Owner-selected correspondence is stored as a complete private document before
+extraction. Direct extraction uses the canonical trajectory recorder when enabled,
+binding the intake identity, review revision and source hash to the full model
+input and output. Invalid model output records a failed attempt and leaves the
+selection unchanged. Extraction inside a chat retains that chat's recording
+context. Generated facts remain proposals without disclosure recipients until
+owner review; recipient identities come from the canonical contact graph and need
+not be UUIDs.
+
+Monthly packet periods retain exclusive end dates in storage, while draft headings
+show the inclusive final civil date. The unanswered summary uses the typed request
+state across source categories after recipient filtering. A request already shown
+under travel, school or scheduling receives a short follow-up entry; its original
+claim and source binding remain single records. Resolved requests leave that
+summary. Neither a prepared draft nor a successful extraction approves delivery.

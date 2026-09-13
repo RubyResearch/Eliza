@@ -256,6 +256,17 @@ function validatePeriod(period: FamilyPacketPeriod): void {
       "FAMILY_PACKET_PERIOD_INVALID",
     );
   }
+  for (const boundary of [period.startsOn, period.endsOnExclusive]) {
+    const parsed = new Date(`${boundary}T00:00:00.000Z`);
+    if (
+      !Number.isFinite(parsed.getTime()) ||
+      !parsed.toISOString().startsWith(`${boundary}T`)
+    )
+      fail(
+        "period contains an invalid calendar date",
+        "FAMILY_PACKET_PERIOD_INVALID",
+      );
+  }
   if (
     period.startsOn >= period.endsOnExclusive ||
     period.timeZone.trim() === ""
@@ -314,11 +325,23 @@ function validateClaim(claim: FamilyPacketClaim): void {
   }
 }
 
+function claimsForSection(
+  claims: readonly FamilyPacketClaim[],
+  section: FamilyPacketSection,
+): FamilyPacketClaim[] {
+  return claims.filter((claim) =>
+    section === "unanswered"
+      ? claim.unanswered === true ||
+        (claim.section === section && claim.unanswered !== false)
+      : claim.section === section,
+  );
+}
+
 function summarizeSections(
   claims: readonly FamilyPacketClaim[],
 ): FamilyPacketSectionSummary[] {
   return FAMILY_PACKET_SECTIONS.map((section) => {
-    const selected = claims.filter((claim) => claim.section === section);
+    const selected = claimsForSection(claims, section);
     const groups = new Map<string, Set<string>>();
     for (const claim of selected) {
       const values = groups.get(claim.stableKey) ?? new Set<string>();
@@ -626,15 +649,18 @@ export class MonthlyFamilyPacketService {
       }
       shareable.push(projected);
     }
+    validatePeriod(packet.period);
+    // Stored periods are half-open civil dates; the reader-facing range is inclusive.
+    const finalDay = new Date(`${packet.period.endsOnExclusive}T00:00:00.000Z`);
+    finalDay.setUTCDate(finalDay.getUTCDate() - 1);
+    const inclusiveEnd = finalDay.toISOString().split("T")[0];
     const lines = [
-      `Family coordination for ${packet.period.startsOn} through ${packet.period.endsOnExclusive} (${packet.period.timeZone})`,
+      `Family coordination for ${packet.period.startsOn} through ${inclusiveEnd} (${packet.period.timeZone})`,
       "",
     ];
     for (const summary of summarizeSections(shareable)) {
       lines.push(`## ${summary.section.replaceAll("_", " ")}`);
-      const claims = shareable.filter(
-        (claim) => claim.section === summary.section,
-      );
+      const claims = claimsForSection(shareable, summary.section);
       if (claims.length === 0) {
         lines.push("Missing: no shareable information is available.", "");
         transformations.push({
@@ -655,6 +681,17 @@ export class MonthlyFamilyPacketService {
         });
       }
       for (const claim of claims) {
+        if (
+          summary.section === "unanswered" &&
+          claim.section !== "unanswered"
+        ) {
+          // Full details already appear in the source category; repeat only the open request.
+          lines.push(
+            `- Awaiting response: ${claim.requests.length ? claim.requests.join("; ") : claim.statement}`,
+          );
+          if (claim.urgency) lines.push(`  Urgency: ${claim.urgency}`);
+          continue;
+        }
         lines.push(`- ${claim.statement}`);
         if (claim.dates.length)
           lines.push(`  Dates: ${claim.dates.join("; ")}`);

@@ -146,6 +146,65 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
 
   afterEach(async () => db.close());
 
+  it.each([
+    ["2026-11", "2026-11-30"],
+    ["2028-02", "2028-02-29"],
+  ])("shows the inclusive final day in a %s draft", async (month, lastDay) => {
+    const selectedPeriod = period(month);
+    const packet = await service.buildInternal(selectedPeriod, []);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    const heading = draft.body.split("\n")[0];
+    expect(heading).toContain(lastDay);
+    expect(heading).not.toContain(selectedPeriod.endsOnExclusive);
+  });
+
+  it("rejects invalid civil-date boundaries before publishing a packet", async () => {
+    await expect(
+      service.buildInternal(
+        { ...period("2026-02"), endsOnExclusive: "2026-02-30" },
+        [],
+      ),
+    ).rejects.toMatchObject({ code: "FAMILY_PACKET_PERIOD_INVALID" });
+    expect(await service.list("2026-02")).toEqual([]);
+  });
+
+  it("summarizes open requests across categories after recipient filtering and removes resolved requests", async () => {
+    const open = claim("travel-request", {
+      section: "travel_consent_health",
+      statement: "Overnight travel is requested, not agreed.",
+      requests: ["Please confirm the proposed overnight trip."],
+      unanswered: true,
+    });
+    const privateRequest = claim("private-request", {
+      section: "school",
+      statement: "Private school concern",
+      requests: ["Private school response needed"],
+      visibility: "owner_only",
+      unanswered: true,
+    });
+    const packet = await service.buildInternal(period("2026-11"), [
+      open,
+      privateRequest,
+    ]);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    const unanswered = draft.body.split("## unanswered\n")[1];
+    expect(unanswered).toContain(open.requests[0]);
+    expect(unanswered).not.toContain("Missing:");
+    expect(draft.body).not.toContain(privateRequest.requests[0]);
+    expect(draft.includedClaimIds).toEqual([open.claimId]);
+    const resolved = await service.buildInternal(period("2026-11"), [
+      { ...open, unanswered: false },
+      privateRequest,
+    ]);
+    const resolvedDraft = await service.createExternalDraft(
+      resolved,
+      guestDraft,
+    );
+    expect(resolvedDraft.body.split("## unanswered\n")[1]).not.toContain(
+      open.requests[0],
+    );
+  });
+
   it("blocks a previously approved correspondence draft after withdrawal", async () => {
     const owner = randomUUID();
     const recipient = randomUUID();

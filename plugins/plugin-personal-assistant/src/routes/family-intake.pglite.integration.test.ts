@@ -12,6 +12,7 @@ import {
   ModelType,
   type Plugin,
   resolveOwnerEntityIdOrDefault,
+  TrajectoriesService,
 } from "@elizaos/core";
 import { expect, it } from "vitest";
 import { tryHandleRuntimePluginRoute } from "../../../../packages/agent/src/api/runtime-plugin-routes.ts";
@@ -19,6 +20,8 @@ import { createLifeOpsTestRuntime } from "../../test/helpers/runtime.js";
 
 it("selects a canonical source, extracts private proposals and preserves review/withdrawal across HTTP retries", async () => {
   let prompt = "";
+  let modelOutput = "";
+  let malformedOutput = false;
   let extractionCalls = 0;
   const quote = "Please confirm pickup at 3 PM.";
   const complete = `${"Earlier correspondence.\n".repeat(8000)}${quote}`;
@@ -30,7 +33,8 @@ it("selects a canonical source, extracts private proposals and preserves review/
       [ModelType.TEXT_LARGE]: async (_runtime, params) => {
         extractionCalls += 1;
         prompt = params.prompt;
-        return JSON.stringify({
+        if (malformedOutput) return "invalid synthetic model JSON";
+        modelOutput = JSON.stringify({
           facts: [
             {
               section: "unanswered",
@@ -45,11 +49,18 @@ it("selects a canonical source, extracts private proposals and preserves review/
             },
           ],
         });
+        return modelOutput;
       },
     },
   };
   const host = await createLifeOpsTestRuntime({ plugins: [model] });
   const runtime = host.runtime;
+  runtime.setSetting("ELIZA_TRAJECTORY_LOGGING", "1");
+  if (!runtime.getService("trajectories"))
+    await runtime.registerService(TrajectoriesService);
+  await runtime.getServiceLoadPromise("trajectories");
+  const trajectories = runtime.getService<TrajectoriesService>("trajectories");
+  if (!trajectories) throw new Error("Trajectory service unavailable");
   const owner = resolveOwnerEntityIdOrDefault(runtime);
   const documents = runtime.getService<DocumentService>(
     DocumentService.serviceType,
@@ -179,6 +190,25 @@ it("selects a canonical source, extracts private proposals and preserves review/
     expect(prompt).toContain(JSON.stringify(complete));
     expect(proposed.facts[0].sourceQuote).toBe(quote);
     expect(proposed.facts[0].recipientEntityIds).toEqual([]);
+    const recorded = (
+      await trajectories.listTrajectories({ source: "lifeops.family-intake" })
+    ).trajectories.filter((entry) => entry.metadata.intakeId === selected.id);
+    expect(recorded).toHaveLength(1);
+    const entry = recorded[0];
+    if (!entry) throw new Error("Intake extraction was not recorded");
+    expect(entry.status).toBe("completed");
+    expect(entry.metadata).toMatchObject({
+      intakeId: selected.id,
+      reviewRevision: selected.revision,
+      sourceSha256: selected.source.contentSha256,
+    });
+    const detail = await trajectories.getTrajectoryDetail(entry.id);
+    if (!detail) throw new Error("Intake trajectory cannot be read");
+    const calls = detail.steps.flatMap((step) => step.llmCalls);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.userPrompt).toBe(prompt);
+    expect(calls[0]?.response).toBe(modelOutput);
+
     const recipientResponse = await fetch(
       `${base.replace(/\/intake$/u, "")}/email-recipients/confirm`,
       {
@@ -489,6 +519,44 @@ it("selects a canonical source, extracts private proposals and preserves review/
       ).status,
     ).toBe(200);
     expect((await post("/interview", noUpdates)).status).toBe(409);
+    malformedOutput = true;
+    const failedImport = await post("/import", {
+      id: randomUUID(),
+      periodKey: "2026-12",
+      title: "Synthetic malformed extraction",
+      text: "Please confirm the December pickup time.",
+    });
+    expect(failedImport.status).toBe(201);
+    const failedSelection = (await failedImport.json()).review;
+    const failedExtraction = await post(`/${failedSelection.id}/extract`, {
+      expectedRevision: failedSelection.revision,
+    });
+    expect(failedExtraction.status).toBe(400);
+    expect((await failedExtraction.json()).error.code).toBe(
+      "FAMILY_INTAKE_EXTRACTION_INVALID",
+    );
+    const failedRecords = (
+      await trajectories.listTrajectories({ source: "lifeops.family-intake" })
+    ).trajectories.filter(
+      (entry) => entry.metadata.intakeId === failedSelection.id,
+    );
+    expect(failedRecords).toHaveLength(1);
+    const failedEntry = failedRecords[0];
+    if (!failedEntry) throw new Error("Failed extraction has no trajectory");
+    expect(failedEntry.status).toBe("error");
+    const failedDetail = await trajectories.getTrajectoryDetail(failedEntry.id);
+    if (!failedDetail) throw new Error("Failed extraction detail unavailable");
+    expect(
+      failedDetail.steps
+        .flatMap((step) => step.llmCalls)
+        .map((call) => call.response),
+    ).toEqual(["invalid synthetic model JSON"]);
+    const failedReadback = await fetch(`${base}?period=2026-12`, { headers });
+    expect(
+      (await failedReadback.json()).reviews.find(
+        (review: { id: string }) => review.id === failedSelection.id,
+      ),
+    ).toEqual(failedSelection);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await host.cleanup();
