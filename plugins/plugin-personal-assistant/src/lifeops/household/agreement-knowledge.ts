@@ -297,7 +297,9 @@ type AgreementKnowledgeErrorCode =
   | "AGREEMENT_INVALID_CONTRACT"
   | "AGREEMENT_OBLIGATION_CONFLICT"
   | "AGREEMENT_STORAGE_UNAVAILABLE"
-  | "AGREEMENT_EXTRACTION_UNAVAILABLE";
+  | "AGREEMENT_EXTRACTION_UNAVAILABLE"
+  | "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED"
+  | "AGREEMENT_INGESTION_CLEANUP_FAILED";
 
 export class AgreementKnowledgeError extends ElizaError {
   override readonly name = "AgreementKnowledgeError";
@@ -1553,72 +1555,143 @@ export class AgreementKnowledgeService {
       .digest("hex");
     const artifactId = `hag_${crypto.randomUUID()}`;
     const stored = await fileStorage.storePrivate(bytes, "application/pdf");
-    if (
-      stored.hash !== expectedSha256 ||
-      !stored.fileName.startsWith(`${expectedSha256}.`) ||
-      stored.size !== bytes.byteLength
-    ) {
-      throw new AgreementKnowledgeError(
-        "File storage returned metadata that does not match the agreement bytes",
-        "AGREEMENT_INVALID_CONTRACT",
-        { expectedSha256, storedHash: stored.hash },
-      );
-    }
-    const document = await documents.addDocument({
-      agentId: this.deps.agentId as UUID,
-      worldId: this.deps.agentId as UUID,
-      roomId: this.deps.agentId as UUID,
-      entityId: this.deps.agentId as UUID,
-      clientDocumentId: "" as UUID,
-      contentType: "text/plain",
-      originalFilename: `${stored.hash}.txt`,
-      content: [
-        `Parenting agreement: ${title}`,
-        `Source PDF: ${originalFilename}`,
-        `Content SHA-256: ${stored.hash}`,
-        `Pages: ${pageCount}`,
-        "",
-        extracted.text,
-        "",
-        "Agreement obligations are inactive until the owner approves their page-cited review records.",
-      ].join("\n"),
-      scope: "owner-private",
-      addedBy: this.deps.agentId as UUID,
-      addedByRole: "RUNTIME",
-      addedFrom: "lifeops",
-      pinned: false,
-      metadata: {
-        source: "lifeops.parenting-agreement",
+    let documentId: UUID | null = null;
+    try {
+      if (
+        stored.hash !== expectedSha256 ||
+        !stored.fileName.startsWith(`${expectedSha256}.`) ||
+        stored.size !== bytes.byteLength
+      ) {
+        throw new AgreementKnowledgeError(
+          "File storage returned metadata that does not match the agreement bytes",
+          "AGREEMENT_INVALID_CONTRACT",
+          { expectedSha256, storedHash: stored.hash },
+        );
+      }
+      const document = await documents.addDocument({
+        agentId: this.deps.agentId as UUID,
+        worldId: this.deps.agentId as UUID,
+        roomId: this.deps.agentId as UUID,
+        entityId: this.deps.agentId as UUID,
+        clientDocumentId: "" as UUID,
+        contentType: "text/plain",
+        // Each immutable artifact owns its document lifecycle, even when the
+        // same PDF is uploaded concurrently or into another agreement family.
+        originalFilename: `${stored.hash}.${artifactId}.txt`,
+        content: [
+          `Parenting agreement: ${title}`,
+          `Source PDF: ${originalFilename}`,
+          `Content SHA-256: ${stored.hash}`,
+          `Pages: ${pageCount}`,
+          "",
+          extracted.text,
+          "",
+          "Agreement obligations are inactive until the owner approves their page-cited review records.",
+        ].join("\n"),
+        scope: "owner-private",
+        addedBy: this.deps.agentId as UUID,
+        addedByRole: "RUNTIME",
+        addedFrom: "lifeops",
+        pinned: false,
+        metadata: {
+          source: "lifeops.parenting-agreement",
+          title,
+          originalFilename,
+          contentType: "application/pdf",
+          mediaUrl: `/api/lifeops/agreements/${artifactId}/download`,
+          mediaHash: stored.hash,
+          mediaFileName: stored.fileName,
+          agreementKey,
+          householdId,
+          agreementExtractionJson: extractionJson,
+        },
+      });
+      documentId = document.storedDocumentMemoryId;
+      return await this.deps.repository.insertArtifact({
+        id: artifactId,
+        agentId: this.deps.agentId,
+        householdId,
+        agreementKey,
+        supersedesArtifactId: null,
         title,
         originalFilename,
-        contentType: "application/pdf",
+        documentId: document.storedDocumentMemoryId,
         mediaUrl: `/api/lifeops/agreements/${artifactId}/download`,
-        mediaHash: stored.hash,
         mediaFileName: stored.fileName,
-        agreementKey,
-        householdId,
-        agreementExtractionJson: extractionJson,
-      },
-    });
-    return await this.deps.repository.insertArtifact({
-      id: artifactId,
-      agentId: this.deps.agentId,
-      householdId,
-      agreementKey,
-      supersedesArtifactId: null,
-      title,
-      originalFilename,
-      documentId: document.storedDocumentMemoryId,
-      mediaUrl: `/api/lifeops/agreements/${artifactId}/download`,
-      mediaFileName: stored.fileName,
-      contentSha256: stored.hash,
-      mimeType: stored.mimeType,
-      byteSize: stored.size,
-      pageCount,
-      uploadedByEntityId: input.uploadedByEntityId,
-      extractionSha256,
-      createdAt: this.now().toISOString(),
-    });
+        contentSha256: stored.hash,
+        mimeType: stored.mimeType,
+        byteSize: stored.size,
+        pageCount,
+        uploadedByEntityId: input.uploadedByEntityId,
+        extractionSha256,
+        createdAt: this.now().toISOString(),
+      });
+    } catch (error) {
+      // error-policy:J2 Roll back only this attempt; preserve committed or uncertain sources.
+      if (documentId) {
+        let persisted: ParentingAgreementArtifact | null;
+        try {
+          persisted = await this.deps.repository.getArtifact(artifactId);
+        } catch (reconciliationError) {
+          // error-policy:J2 A failed commit observation cannot authorize source deletion.
+          const failure = new AgreementKnowledgeError(
+            "Upload persistence could not be reconciled. Inspect the artifact before retrying or deleting its sources.",
+            "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+            { artifactId, documentId, mediaFileName: stored.fileName },
+            new AggregateError([error, reconciliationError]),
+          );
+          this.deps.runtime.reportError(
+            "AgreementKnowledge.ingestion",
+            failure,
+          );
+          throw failure;
+        }
+        if (persisted) {
+          const failure = new AgreementKnowledgeError(
+            "The agreement was persisted but the upload did not finish normally. Review the existing version before retrying.",
+            "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+            { artifactId, documentId, mediaFileName: stored.fileName },
+            error,
+          );
+          this.deps.runtime.reportError(
+            "AgreementKnowledge.ingestion",
+            failure,
+          );
+          throw failure;
+        }
+      }
+      const cleanup = await Promise.allSettled([
+        ...(documentId
+          ? [
+              documents.deleteDocumentWithAccessContext(documentId, {
+                // requireOwner already verified SELF; documents use the runtime UUID.
+                requesterEntityId: this.deps.agentId as UUID,
+                role: "OWNER",
+                isOwner: true,
+              }),
+            ]
+          : []),
+        fileStorage.deletePrivate(stored.fileName),
+      ]);
+      const failures = cleanup.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (failures.length > 0) {
+        const failure = new AgreementKnowledgeError(
+          "The upload failed and its private-source cleanup is incomplete. Resolve the reported storage failures before retrying.",
+          "AGREEMENT_INGESTION_CLEANUP_FAILED",
+          { artifactId, documentId, mediaFileName: stored.fileName },
+          new AggregateError([
+            error,
+            ...failures.map((result) => result.reason),
+          ]),
+        );
+        this.deps.runtime.reportError("AgreementKnowledge.ingestion", failure);
+        throw failure;
+      }
+      throw error;
+    }
   }
 
   async readOwnerPdf(input: {

@@ -17,6 +17,7 @@ import {
   type AgentRuntime,
   attestAuthenticatedApiDeliveryAudience,
   ChannelType,
+  DocumentService,
   documentsPluginCore,
   ElizaError,
   type IAgentRuntime,
@@ -28,6 +29,7 @@ import {
   ServiceType,
   type UUID,
 } from "@elizaos/core";
+import type { PdfService } from "@elizaos/plugin-pdf";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tryHandleRuntimePluginRoute } from "../../../../../packages/agent/src/api/runtime-plugin-routes.ts";
@@ -50,6 +52,7 @@ import { executeRawSql, sqlQuote } from "../sql.js";
 import {
   AgreementKnowledgeError,
   AgreementKnowledgeRepository,
+  AgreementKnowledgeService,
   createAgreementKnowledgeService,
   type ParentingAgreementArtifact,
 } from "./agreement-knowledge.js";
@@ -57,6 +60,7 @@ import {
   getHouseholdCoordinationService,
   type HouseholdCoordinationService,
 } from "./service.js";
+import { DEFAULT_HOUSEHOLD_ID } from "./types.js";
 
 const fileStoragePlugin: Plugin = {
   name: "agreement-knowledge-test-file-storage",
@@ -1997,5 +2001,290 @@ describe("parenting-agreement knowledge — real PGlite", () => {
     await expect(
       createAgreementKnowledgeService(runtime).readOwnerReview(input),
     ).resolves.toEqual(first);
+  });
+
+  it.each(["artifact", "document", "fragment"] as const)(
+    "removes private sources when %s persistence rejects the upload",
+    async (boundary) => {
+      const media = path.join(mediaStateDir, "media");
+      fs.mkdirSync(media, { recursive: true });
+      const filesBefore = fs.readdirSync(media).sort();
+      const documentRows = () =>
+        executeRawSql(
+          runtime,
+          `SELECT id FROM memories WHERE agent_id = ${sqlQuote(runtime.agentId)}
+          AND type IN ('documents', 'document_fragments') ORDER BY id`,
+        );
+      const docsBefore = await documentRows();
+      const table =
+        boundary === "artifact"
+          ? "app_lifeops.life_household_agreement_artifacts"
+          : "memories";
+      await executeRawSql(
+        runtime,
+        `CREATE FUNCTION app_lifeops.reject_ingest_acceptance()
+        RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          ${boundary !== "artifact" ? `IF NEW.type <> '${boundary === "document" ? "documents" : "document_fragments"}' THEN RETURN NEW; END IF;` : ""}
+          RAISE EXCEPTION 'forced upload persistence rejection'; END; $$`,
+      );
+      await executeRawSql(
+        runtime,
+        `CREATE TRIGGER reject_ingest_acceptance
+        BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION app_lifeops.reject_ingest_acceptance()`,
+      );
+      try {
+        await expect(
+          createAgreementKnowledgeService(runtime).createAgreementVersion({
+            agreementKey: `rollback-${boundary}`,
+            title: "Rollback boundary acceptance",
+            originalFilename: "rollback.pdf",
+            mimeType: "application/pdf",
+            bytes: pdf(`private upload rejected by ${boundary} persistence`),
+            uploadedByEntityId: SELF_ENTITY_ID,
+          }),
+        ).rejects.toThrow();
+        expect(await documentRows()).toEqual(docsBefore);
+        expect(fs.readdirSync(media).sort()).toEqual(filesBefore);
+        expect(
+          await new AgreementKnowledgeRepository(
+            runtime,
+            runtime.agentId,
+          ).getArtifactByContent({
+            householdId: DEFAULT_HOUSEHOLD_ID,
+            agreementKey: `rollback-${boundary}`,
+            contentSha256: crypto
+              .createHash("sha256")
+              .update(pdf(`private upload rejected by ${boundary} persistence`))
+              .digest("hex"),
+          }),
+        ).toBeNull();
+      } finally {
+        await executeRawSql(
+          runtime,
+          `DROP TRIGGER reject_ingest_acceptance ON ${table}`,
+        );
+        await executeRawSql(
+          runtime,
+          `DROP FUNCTION app_lifeops.reject_ingest_acceptance()`,
+        );
+      }
+    },
+  );
+
+  it("keeps identical source PDFs in separate agreement families independently readable", async () => {
+    const service = createAgreementKnowledgeService(runtime);
+    const bytes = pdf("same source, independently owned agreement families");
+    const input = {
+      title: "Shared source",
+      originalFilename: "shared-source.pdf",
+      mimeType: "application/pdf",
+      bytes,
+      uploadedByEntityId: SELF_ENTITY_ID,
+    };
+    const first = await service.createAgreementVersion({
+      ...input,
+      agreementKey: "independent-source-first",
+    });
+    const second = await service.createAgreementVersion({
+      ...input,
+      agreementKey: "independent-source-second",
+    });
+    expect(second.documentId).not.toBe(first.documentId);
+    for (const artifact of [first, second]) {
+      expect(
+        (
+          await service.readOwnerPdf({
+            artifactId: artifact.id,
+            ownerEntityId: SELF_ENTITY_ID,
+          })
+        ).bytes,
+      ).toEqual(bytes);
+      const document = await runtime.getMemoryById(artifact.documentId as UUID);
+      expect(document?.metadata?.mediaFileName).toBe(artifact.mediaFileName);
+    }
+  });
+
+  it("rolls back a concurrent duplicate without removing the winning agreement sources", async () => {
+    const service = createAgreementKnowledgeService(runtime);
+    const media = path.join(mediaStateDir, "media");
+    fs.mkdirSync(media, { recursive: true });
+    const filesBefore = new Set(fs.readdirSync(media));
+    const bytes = pdf("simultaneous immutable agreement upload");
+    const input = {
+      agreementKey: "concurrent-upload-rollback",
+      title: "Concurrent source",
+      originalFilename: "concurrent-source.pdf",
+      mimeType: "application/pdf",
+      bytes,
+      uploadedByEntityId: SELF_ENTITY_ID,
+    };
+    const results = await Promise.allSettled([
+      service.createAgreementVersion(input),
+      service.createAgreementVersion(input),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    expect(fulfilled).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    const winner = fulfilled[0];
+    if (!winner) throw new Error("No persisted upload winner");
+    const artifact = winner.value;
+    expect(
+      (
+        await service.readOwnerPdf({
+          artifactId: artifact.id,
+          ownerEntityId: SELF_ENTITY_ID,
+        })
+      ).bytes,
+    ).toEqual(bytes);
+    expect(
+      fs.readdirSync(media).filter((file) => !filesBefore.has(file)),
+    ).toEqual([artifact.mediaFileName]);
+    const documents = await executeRawSql(
+      runtime,
+      `SELECT id FROM memories
+      WHERE agent_id = ${sqlQuote(runtime.agentId)} AND type = 'documents'
+      AND metadata->>'agreementKey' = ${sqlQuote(input.agreementKey)}`,
+    );
+    expect(documents.map((row) => row.id)).toEqual([artifact.documentId]);
+    const document = await runtime.getMemoryById(artifact.documentId as UUID);
+    expect(document?.metadata?.mediaFileName).toBe(artifact.mediaFileName);
+  });
+  it.each(["committed", "unreadable"] as const)(
+    "preserves source data when a lost commit acknowledgement is %s",
+    async (observation) => {
+      class LostAcknowledgementRepository extends AgreementKnowledgeRepository {
+        persisted: ParentingAgreementArtifact | null = null;
+        override async insertArtifact(
+          input: Parameters<AgreementKnowledgeRepository["insertArtifact"]>[0],
+        ) {
+          this.persisted = await super.insertArtifact(input);
+          throw new Error("Simulated lost commit acknowledgement");
+        }
+        override async getArtifact(id: string) {
+          if (observation === "unreadable")
+            throw new Error("Commit observation unavailable");
+          return super.getArtifact(id);
+        }
+      }
+      const repository = new LostAcknowledgementRepository(
+        runtime,
+        runtime.agentId,
+      );
+      const graph = resolveKnowledgeGraphService(runtime);
+      if (!graph) throw new Error("Real graph service unavailable");
+      const service = new AgreementKnowledgeService({
+        runtime,
+        agentId: runtime.agentId,
+        household,
+        entityStore: graph.getEntityStore(runtime.agentId),
+        repository,
+        fileStorage: () =>
+          runtime.getService<IFileStorageService>(ServiceType.REMOTE_FILES),
+        documents: () =>
+          runtime.getService<DocumentService>(DocumentService.serviceType),
+        pdf: () => runtime.getService<PdfService>(ServiceType.PDF),
+      });
+      const bytes = pdf(`persisted upload with ${observation} acknowledgement`);
+      await expect(
+        service.createAgreementVersion({
+          agreementKey: `lost-ack-${observation}`,
+          title: "Commit observation",
+          originalFilename: "commit-observation.pdf",
+          mimeType: "application/pdf",
+          bytes,
+          uploadedByEntityId: SELF_ENTITY_ID,
+        }),
+      ).rejects.toMatchObject({
+        code: "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+      });
+      const persisted = repository.persisted;
+      if (!persisted)
+        throw new Error("The fault must occur after a real commit");
+      const restored = createAgreementKnowledgeService(runtime);
+      expect(
+        (
+          await restored.readOwnerPdf({
+            artifactId: persisted.id,
+            ownerEntityId: SELF_ENTITY_ID,
+          })
+        ).bytes,
+      ).toEqual(bytes);
+      expect(
+        await runtime.getMemoryById(persisted.documentId as UUID),
+      ).not.toBeNull();
+    },
+  );
+
+  it("reports incomplete cleanup when the document store rejects deletion", async () => {
+    const key = "rollback-delete-outage";
+    const documents = runtime.getService<DocumentService>(
+      DocumentService.serviceType,
+    );
+    if (!documents)
+      throw new Error("Real document service unavailable for teardown");
+    const media = path.join(mediaStateDir, "media");
+    fs.mkdirSync(media, { recursive: true });
+    const before = fs.readdirSync(media).sort();
+    await executeRawSql(
+      runtime,
+      `CREATE FUNCTION app_lifeops.reject_rollback_acceptance()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced lifecycle storage outage'; END; $$`,
+    );
+    await executeRawSql(
+      runtime,
+      `CREATE TRIGGER reject_rollback_artifact BEFORE INSERT
+      ON app_lifeops.life_household_agreement_artifacts FOR EACH ROW EXECUTE FUNCTION app_lifeops.reject_rollback_acceptance()`,
+    );
+    await executeRawSql(
+      runtime,
+      `CREATE TRIGGER reject_rollback_document BEFORE DELETE
+      ON memories FOR EACH ROW WHEN (OLD.type = 'documents') EXECUTE FUNCTION app_lifeops.reject_rollback_acceptance()`,
+    );
+    try {
+      await expect(
+        createAgreementKnowledgeService(runtime).createAgreementVersion({
+          agreementKey: key,
+          title: "Cleanup outage",
+          originalFilename: "cleanup-outage.pdf",
+          mimeType: "application/pdf",
+          bytes: pdf("document cleanup unavailable"),
+          uploadedByEntityId: SELF_ENTITY_ID,
+        }),
+      ).rejects.toMatchObject({ code: "AGREEMENT_INGESTION_CLEANUP_FAILED" });
+      expect(fs.readdirSync(media).sort()).toEqual(before);
+      const rows = await executeRawSql(
+        runtime,
+        `SELECT id FROM memories
+        WHERE agent_id = ${sqlQuote(runtime.agentId)} AND type = 'documents'
+        AND metadata->>'agreementKey' = ${sqlQuote(key)}`,
+      );
+      expect(rows).toHaveLength(1);
+    } finally {
+      await executeRawSql(
+        runtime,
+        "DROP TRIGGER reject_rollback_artifact ON app_lifeops.life_household_agreement_artifacts",
+      );
+      await executeRawSql(
+        runtime,
+        "DROP TRIGGER reject_rollback_document ON memories",
+      );
+      await executeRawSql(
+        runtime,
+        "DROP FUNCTION app_lifeops.reject_rollback_acceptance()",
+      );
+      const rows = await executeRawSql(
+        runtime,
+        `SELECT id FROM memories
+        WHERE agent_id = ${sqlQuote(runtime.agentId)} AND type = 'documents'
+        AND metadata->>'agreementKey' = ${sqlQuote(key)}`,
+      );
+      for (const row of rows)
+        await documents.deleteDocumentWithAccessContext(
+          String(row.id) as UUID,
+          { requesterEntityId: runtime.agentId, role: "OWNER" },
+        );
+    }
   });
 });

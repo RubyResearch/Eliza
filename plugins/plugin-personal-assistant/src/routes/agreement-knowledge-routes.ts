@@ -83,6 +83,8 @@ function statusFor(error: { code: string }): number {
     case "AGREEMENT_DUPLICATE_CONTENT":
       return 409;
     case "AGREEMENT_EXTRACTION_UNAVAILABLE":
+    case "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED":
+    case "AGREEMENT_INGESTION_CLEANUP_FAILED":
     case "AGREEMENT_STORAGE_UNAVAILABLE":
     case "AGREEMENT_REVIEW_UNAVAILABLE":
       return 503;

@@ -235,6 +235,13 @@ persists the media SHA-256, handle, document id, byte size, MIME type, filename,
 parser-derived page count, complete extracted text and page map, and version chain; it does
 not create another permanent file store.
 
+Each immutable agreement owns a distinct document ingestion identity. If artifact
+persistence rejects the upload, ingestion removes that attempt's document,
+derived fragments, and private PDF through the canonical services. A failed
+commit observation preserves the sources for reconciliation; an incomplete
+cleanup returns an explicit storage error and reports the affected artifact
+and source handles to runtime diagnostics.
+
 Owner- or agent-extracted obligations begin as `proposed` and must carry an
 in-range page citation plus the cited source text. Only the owner can make the terminal
 `approved` or `rejected` decision. Agent and chat pins are independent
