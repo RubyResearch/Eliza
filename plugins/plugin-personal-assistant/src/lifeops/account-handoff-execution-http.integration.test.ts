@@ -205,6 +205,60 @@ it("advances the saved Google review over authenticated HTTP and recovers provid
       (await client.getLifeOpsAccountHandoff(handoff.operationId)).handoff,
     ).toEqual(handoff);
     const initialRevision = handoff.revision;
+    const beforeControls = await new ApprovalDispatchControlStore(
+      host.runtime,
+    ).read(otherOwner);
+    const manager = getConnectorAccountManager(host.runtime);
+    const replacement = await manager.getAccount(
+      "google",
+      choices.messageDestinations[0].connectorAccountId,
+    );
+    if (!replacement) throw new Error("Replacement fixture missing");
+    await manager.upsertAccount("google", {
+      ...replacement,
+      metadata: {
+        ...replacement.metadata,
+        grantedScopes: [
+          "https://www.googleapis.com/auth/calendar.readonly",
+          "https://www.googleapis.com/auth/gmail.send",
+        ],
+      },
+    });
+    try {
+      await expect(
+        client.advanceLifeOpsAccountHandoff(
+          handoff.operationId,
+          handoff.revision,
+        ),
+      ).rejects.toThrow("Gmail reading");
+      expect(probedAccounts).toEqual([]);
+      expect(
+        (await client.getLifeOpsAccountHandoff(handoff.operationId)).handoff,
+      ).toEqual(handoff);
+      expect(
+        await new ApprovalDispatchControlStore(host.runtime).read(otherOwner),
+      ).toEqual(beforeControls);
+    } finally {
+      await manager.upsertAccount("google", replacement);
+    }
+    await expect(
+      client.advanceLifeOpsAccountHandoff(
+        handoff.operationId,
+        handoff.revision,
+      ),
+    ).rejects.toThrow();
+    expect(
+      (await client.getLifeOpsAccountHandoff(handoff.operationId)).handoff,
+    ).toEqual(handoff);
+    expect(
+      await new ApprovalDispatchControlStore(host.runtime).read(otherOwner),
+    ).toEqual(beforeControls);
+    expect(
+      (
+        await service.getGoogleConnectorAccounts(new URL(baseUrl), "owner")
+      ).some((account) => account.grant?.id === choices.previousGrantId),
+    ).toBe(true);
+    failProbe = false;
     const observedPhases = new Set([handoff.phase]);
     const simultaneous = await Promise.allSettled([
       client.advanceLifeOpsAccountHandoff(
@@ -225,6 +279,8 @@ it("advances the saved Google review over authenticated HTTP and recovers provid
     handoff = (await client.getLifeOpsAccountHandoff(handoff.operationId))
       .handoff;
     expect(handoff.phase).toBe("pausing");
+    // A later outage still blocks the fresh verification after admission pauses.
+    failProbe = true;
     observedPhases.add(handoff.phase);
     let recoveredOutage = false;
     for (
