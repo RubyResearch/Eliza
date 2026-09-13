@@ -5,6 +5,7 @@ import {
   lockOrganizationPolicy,
   lockOrganizationPolicyForRead,
 } from "../../db/repositories/organization-policy-generation";
+import { observeInferenceDependency } from "../observability/cloud-backend-observability";
 import {
   isOrganizationPolicyStamp,
   sameOrganizationPolicyStamp,
@@ -40,19 +41,25 @@ async function admitUnderPolicyLock<T>(
   operation: (policy: OrganizationQuotaPolicy) => Promise<T>,
   lock: typeof lockOrganizationPolicy,
 ): Promise<T> {
-  return writeTransaction(async (tx) => {
-    await lock(tx, organizationId);
-    const policy = await readOrganizationQuotaPolicyInTransaction(tx, organizationId);
-    if (
-      expected !== undefined &&
-      (!isOrganizationPolicyStamp(expected) ||
-        !sameOrganizationPolicyStamp(expected, policy.authority))
-    )
-      throw new ElizaError("Organization policy changed; refresh admission", {
-        code: "ORGANIZATION_POLICY_STALE",
-        context: { organizationId },
-        severity: "ephemeral",
-      });
-    return operation(policy);
-  });
+  return observeInferenceDependency("transaction", "policy_admission", () =>
+    writeTransaction(async (tx) => {
+      await observeInferenceDependency("policy_lock", "policy_admission", () =>
+        lock(tx, organizationId),
+      );
+      const policy = await observeInferenceDependency("policy_read", "policy_admission", () =>
+        readOrganizationQuotaPolicyInTransaction(tx, organizationId),
+      );
+      if (
+        expected !== undefined &&
+        (!isOrganizationPolicyStamp(expected) ||
+          !sameOrganizationPolicyStamp(expected, policy.authority))
+      )
+        throw new ElizaError("Organization policy changed; refresh admission", {
+          code: "ORGANIZATION_POLICY_STALE",
+          context: { organizationId },
+          severity: "ephemeral",
+        });
+      return operation(policy);
+    }),
+  );
 }

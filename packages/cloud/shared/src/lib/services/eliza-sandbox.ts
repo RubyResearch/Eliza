@@ -2401,6 +2401,9 @@ export class ElizaSandboxService {
       const [reserved] = await tx
         .update(agentSandboxes)
         .set({
+          // The trigger must choose OLD + 1; requesting OLD - 1 also makes a
+          // missing trigger fail the checked fence before any runtime push.
+          lifecycle_revision: sql`${agentSandboxes.lifecycle_revision} - 1`,
           last_heartbeat_at: sql`
             CASE
               WHEN ${agentSandboxes.last_heartbeat_at} IS NULL
@@ -2446,6 +2449,9 @@ export class ElizaSandboxService {
       const [completed] = await tx
         .update(agentSandboxes)
         .set({
+          // The reservation already verified trigger authority. Publish only
+          // the next monotonic revision after the runtime has applied state.
+          lifecycle_revision: sql`${agentSandboxes.lifecycle_revision} + 1`,
           last_heartbeat_at: sql`
             CASE
               WHEN ${agentSandboxes.last_heartbeat_at} IS NULL

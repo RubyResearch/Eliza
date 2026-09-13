@@ -3,6 +3,7 @@
 // stream milestone events (#16079), all read back through the admin
 // cloud-observability endpoint.
 import { AsyncLocalStorage } from "node:async_hooks";
+import { logger } from "../utils/logger";
 
 const MAX_EVENTS = 1_000;
 const DEFAULT_SLOW_REQUEST_MS = 1_000;
@@ -141,6 +142,46 @@ function elapsedMs(startedAt: number): number {
 
 function readKey(label: string): string {
   return label.replace(/\s+/g, " ").trim().slice(0, 500) || "unlabeled-read";
+}
+
+/** Log slow inference dependencies in the same invocation as its auth trace. */
+export async function observeInferenceDependency<T>(
+  dependency: "policy_lock" | "policy_read" | "transaction" | "durable_object",
+  operation: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const context = requestAls.getStore();
+  if (
+    !context?.traceId ||
+    !["/api/v1/embeddings", "/api/v1/chat/completions"].includes(context.path)
+  ) {
+    return fn();
+  }
+  const startedAt = performance.now();
+  let outcome: "returned" | "threw" = "threw";
+  try {
+    const result = await fn();
+    outcome = "returned";
+    return result;
+  } finally {
+    const durationMs = elapsedMs(startedAt);
+    if (durationMs >= DEFAULT_SLOW_DB_MS) {
+      // Operations are static caller labels, never SQL, credentials, prompts,
+      // responses, or error messages. Nested spans overlap; do not add them.
+      try {
+        logger.audit("[InferenceAdmission] dependency timing", {
+          traceId: context.traceId,
+          dependency,
+          operation,
+          durationMs,
+          outcome,
+        });
+      } catch {
+        // error-policy:J6 diagnostic sink failure must not replace the exact
+        // admission result or error, nor cause a successful charge to retry.
+      }
+    }
+  }
 }
 
 export async function observeCloudRequest<T>(

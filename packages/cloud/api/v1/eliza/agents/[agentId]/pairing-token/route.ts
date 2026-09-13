@@ -13,6 +13,7 @@ import {
 } from "@/lib/eliza-agent-web-ui";
 import { checkAgentCreditGate } from "@/lib/services/agent-billing-gate";
 import { insufficientCredits402 } from "@/lib/services/agent-billing-gate-402";
+import { warmInferenceRateLimitGate } from "@/lib/services/inference-admission-gate";
 import { getPairingTokenService } from "@/lib/services/pairing-token";
 import { provisioningJobService } from "@/lib/services/provisioning-jobs";
 import {
@@ -222,9 +223,11 @@ async function __hono_POST(
   {
     params,
     canonicalAgentBaseDomain,
+    executionCtx,
   }: {
     params: Promise<{ agentId: string }>;
     canonicalAgentBaseDomain: string | undefined;
+    executionCtx: { waitUntil(promise: Promise<unknown>): void } | undefined;
   },
 ) {
   try {
@@ -405,6 +408,20 @@ async function __hono_POST(
       webUiUrl,
     );
 
+    // Prepare the existing quota gate during browser handoff; warming neither
+    // consumes quota nor replaces the first inference request's admission checks.
+    if (executionCtx) {
+      executionCtx.waitUntil(
+        warmInferenceRateLimitGate(user.organization_id).catch((error) => {
+          // error-policy:J1 Optional background preparation reports its failure;
+          // foreground inference still performs the authoritative gate check.
+          logger.warn("[pairing-token] Inference gate prewarm failed", {
+            error,
+          });
+        }),
+      );
+    }
+
     const response = applyCorsHeaders(
       Response.json({
         success: true,
@@ -434,10 +451,19 @@ async function __hono_POST(
 
 const __hono_app = new Hono<AppEnv>();
 __hono_app.options("/", () => handleCorsOptions(CORS_METHODS));
-__hono_app.post("/", async (c) =>
-  __hono_POST(c.req.raw, {
+__hono_app.post("/", async (c) => {
+  let executionCtx: { waitUntil(promise: Promise<unknown>): void } | undefined;
+  try {
+    executionCtx = c.executionCtx;
+  } catch {
+    // error-policy:J1 Hono has no execution context outside Workers. Those
+    // hosts perform the normal foreground gate check without preparation.
+    executionCtx = undefined;
+  }
+  return __hono_POST(c.req.raw, {
     params: Promise.resolve({ agentId: c.req.param("agentId")! }),
     canonicalAgentBaseDomain: c.env.ELIZA_CLOUD_AGENT_BASE_DOMAIN,
-  }),
-);
+    executionCtx,
+  });
+});
 export default __hono_app;

@@ -15,6 +15,7 @@ Options:
   --run-shortcut           Run the Shortcut with test input. Implies
                            --require-shortcut.
   --live-open              Open the desktop URL scheme with test input.
+  --helper-only            Verify the shell helper without querying Shortcuts.app.
   --no-shortcuts-warning   Suppress the warning when the Shortcut is not found.
   -h, --help               Show this help.
 
@@ -31,6 +32,7 @@ require_shortcut=0
 run_shortcut=0
 live_open=0
 shortcuts_warning=1
+helper_only=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -65,6 +67,10 @@ while [ "$#" -gt 0 ]; do
       live_open=1
       shift
       ;;
+    --helper-only)
+      helper_only=1
+      shift
+      ;;
     --no-shortcuts-warning)
       shortcuts_warning=0
       shift
@@ -79,6 +85,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$helper_only" -eq 1 ] && { [ "$require_shortcut" -eq 1 ] || [ "$live_open" -eq 1 ]; }; then
+  echo "verify-eliza-shortcuts: --helper-only cannot be combined with live verification" >&2
+  exit 2
+fi
 
 if [ ! -x "$helper" ]; then
   echo "verify-eliza-shortcuts: handoff helper is not executable: $helper" >&2
@@ -135,7 +146,9 @@ if [ "$multiline_url" != "$expected_multiline_url" ]; then
 fi
 
 shortcut_present=0
-if command -v shortcuts >/dev/null 2>&1; then
+if [ "$helper_only" -eq 1 ]; then
+  : # Installation checks only the helper; native inventory is an explicit verification.
+elif command -v shortcuts >/dev/null 2>&1; then
   if shortcuts list 2>/dev/null | grep -Fx -- "$shortcut_name" >/dev/null 2>&1; then
     shortcut_present=1
   fi
@@ -168,6 +181,6 @@ echo "PASS stdin can request action=lifeops.create through the runtime route"
 echo "PASS multiline stdin and punctuation are percent-encoded"
 if [ "$shortcut_present" -eq 1 ]; then
   echo "PASS Shortcut exists: $shortcut_name"
-elif [ "$shortcuts_warning" -eq 1 ]; then
+elif [ "$helper_only" -eq 0 ] && [ "$shortcuts_warning" -eq 1 ]; then
   echo "WARN Shortcut not found yet: $shortcut_name"
 fi

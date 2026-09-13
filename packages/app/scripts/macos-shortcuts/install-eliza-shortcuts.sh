@@ -24,7 +24,7 @@ chmod 755 "$target_script"
 chmod 755 "$target_verify_script"
 
 dry_run_url="$(sh "$target_script" --dry-run "remind me to test Eliza Shortcuts")"
-verify_summary="$(sh "$target_verify_script" --helper "$target_script" --no-shortcuts-warning)"
+verify_summary="$(sh "$target_verify_script" --helper "$target_script" --helper-only)"
 
 cat <<EOF
 Installed Eliza macOS Shortcuts handoff helper:

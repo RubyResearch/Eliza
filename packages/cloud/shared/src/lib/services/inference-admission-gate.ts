@@ -15,6 +15,7 @@ import type {
   RuntimeDurableObjectNamespace,
   RuntimeDurableObjectStub,
 } from "../../types/cloud-worker-env";
+import { observeInferenceDependency } from "../observability/cloud-backend-observability";
 import { getCloudBinding } from "../runtime/cloud-bindings";
 import { logger } from "../utils/logger";
 import {
@@ -189,13 +190,15 @@ async function gateFetch(
   signal?: AbortSignal,
 ): Promise<Response> {
   try {
-    return await stub.fetch(
-      new Request(`${GATE_ORIGIN}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal,
-      }),
+    return await observeInferenceDependency("durable_object", path, () =>
+      stub.fetch(
+        new Request(`${GATE_ORIGIN}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal,
+        }),
+      ),
     );
   } catch (error) {
     if (error instanceof InferenceAdmissionGateUnavailableError) throw error;

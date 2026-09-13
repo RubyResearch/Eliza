@@ -15,6 +15,7 @@ import {
   lockOrganizationPolicy,
   lockOrganizationPolicyForRead,
 } from "../../db/repositories/organization-policy-generation";
+import { observeInferenceDependency } from "../observability/cloud-backend-observability";
 import { calculateCost, normalizeModelName } from "../pricing";
 import { createCreditReservationSettler } from "../utils/credit-reservation";
 import { logger } from "../utils/logger";
@@ -342,10 +343,19 @@ export async function admitOrganizationInference(
   // the same organization lock that serializes entitlement and override writes.
   const workerHotPath = typeof params.executionCtx?.waitUntil === "function";
   const lockPolicy = workerHotPath ? lockOrganizationPolicyForRead : lockOrganizationPolicy;
-  const authoritativePolicy = await writeTransaction(async (tx) => {
-    await lockPolicy(tx, params.context.organizationId);
-    return readOrganizationQuotaPolicyInTransaction(tx, params.context.organizationId);
-  });
+  const authoritativePolicy = await observeInferenceDependency(
+    "transaction",
+    "funding_policy",
+    () =>
+      writeTransaction(async (tx) => {
+        await observeInferenceDependency("policy_lock", "funding_policy", () =>
+          lockPolicy(tx, params.context.organizationId),
+        );
+        return observeInferenceDependency("policy_read", "funding_policy", () =>
+          readOrganizationQuotaPolicyInTransaction(tx, params.context.organizationId),
+        );
+      }),
+  );
   if (
     params.admissionSnapshot &&
     (!isInferenceAdmissionSnapshot(params.admissionSnapshot) ||

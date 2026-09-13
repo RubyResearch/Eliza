@@ -1,12 +1,178 @@
 /** Ensures Cloud request telemetry records both successful and thrown requests. */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
+import { logger } from "../utils/logger";
 
 import {
   clearCloudTelemetry,
   getCloudTelemetrySnapshot,
   observeCloudRequest,
+  observeInferenceDependency,
 } from "./cloud-backend-observability";
+
+describe("inference dependency timing", () => {
+  test("a broken diagnostic sink cannot change admission results or errors", async () => {
+    let now = 0;
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    const audit = spyOn(logger, "audit").mockImplementation(() => {
+      throw new Error("sink unavailable");
+    });
+    const failure = new Error("admission refused");
+    const run = (fail: boolean) =>
+      observeCloudRequest(
+        { id: "sink", traceId: "trace-sink", method: "POST", path: "/api/v1/embeddings" },
+        async () => ({
+          status: 200,
+          result: await observeInferenceDependency("policy_lock", "policy_admission", async () => {
+            now += 300;
+            if (fail) throw failure;
+            return "admitted";
+          }),
+        }),
+      );
+    try {
+      expect(await run(false)).toBe("admitted");
+      await expect(run(true)).rejects.toBe(failure);
+      expect(audit).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+      audit.mockRestore();
+    }
+  });
+
+  test("correlates overlapping requests without logging their result or credentials", async () => {
+    let now = 0;
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    const audit = spyOn(logger, "audit").mockImplementation(() => {});
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    const result = { secret: "private result" };
+    const run = (traceId: string, wait: Promise<void>) =>
+      observeCloudRequest(
+        { id: traceId, traceId, method: "POST", path: "/api/v1/embeddings" },
+        async () => ({
+          status: 200,
+          result: await observeInferenceDependency("durable_object", "/rate-limit", async () => {
+            await wait;
+            return result;
+          }),
+        }),
+      );
+    try {
+      const a = run("trace-a", first.promise);
+      const b = run("trace-b", second.promise);
+      now = 300;
+      second.resolve();
+      expect(await b).toBe(result);
+      now = 600;
+      first.resolve();
+      expect(await a).toBe(result);
+      expect(audit.mock.calls).toEqual([
+        [
+          "[InferenceAdmission] dependency timing",
+          {
+            traceId: "trace-b",
+            dependency: "durable_object",
+            operation: "/rate-limit",
+            durationMs: 300,
+            outcome: "returned",
+          },
+        ],
+        [
+          "[InferenceAdmission] dependency timing",
+          {
+            traceId: "trace-a",
+            dependency: "durable_object",
+            operation: "/rate-limit",
+            durationMs: 600,
+            outcome: "returned",
+          },
+        ],
+      ]);
+    } finally {
+      clock.mockRestore();
+      audit.mockRestore();
+    }
+  });
+
+  test("preserves the exact policy error and omits its private message", async () => {
+    let now = 0;
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    const audit = spyOn(logger, "audit").mockImplementation(() => {});
+    const failure = new Error("private database details");
+    try {
+      await expect(
+        observeCloudRequest(
+          {
+            id: "failed",
+            traceId: "trace-failed",
+            method: "POST",
+            path: "/api/v1/chat/completions",
+          },
+          async () => ({
+            status: 200,
+            result: await observeInferenceDependency(
+              "policy_lock",
+              "policy_admission",
+              async () => {
+                now = 250;
+                throw failure;
+              },
+            ),
+          }),
+        ),
+      ).rejects.toBe(failure);
+      expect(audit.mock.calls).toEqual([
+        [
+          "[InferenceAdmission] dependency timing",
+          {
+            traceId: "trace-failed",
+            dependency: "policy_lock",
+            operation: "policy_admission",
+            durationMs: 250,
+            outcome: "threw",
+          },
+        ],
+      ]);
+    } finally {
+      clock.mockRestore();
+      audit.mockRestore();
+    }
+  });
+
+  test("keeps fast calls and non-inference requests quiet", async () => {
+    let now = 0;
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    const audit = spyOn(logger, "audit").mockImplementation(() => {});
+    try {
+      for (const [path, delay] of [
+        ["/api/v1/embeddings", 249],
+        ["/api/v1/shared-agent", 500],
+      ] as const) {
+        expect(
+          await observeCloudRequest(
+            { id: path, traceId: path, method: "POST", path },
+            async () => ({
+              status: 200,
+              result: await observeInferenceDependency(
+                "policy_read",
+                "funding_policy",
+                async () => {
+                  now += delay;
+                  return "unchanged";
+                },
+              ),
+            }),
+          ),
+        ).toBe("unchanged");
+      }
+      expect(audit).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      audit.mockRestore();
+    }
+  });
+});
 
 describe("observeCloudRequest", () => {
   beforeEach(() => clearCloudTelemetry());

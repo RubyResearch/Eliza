@@ -9,6 +9,8 @@ const requireAuthOrApiKeyWithOrg = mock(async () => ({
 const findByIdAndOrg = mock();
 const wasStoppedByUser = mock(async () => false);
 const generateToken = mock(async () => "pair-token");
+const warmInferenceRateLimitGate = mock(async (_organizationId: string) => {});
+const warn = mock(() => undefined);
 const enqueueAgentProvisionOnce = mock();
 const checkProvisioningWorkerHealth = mock(async () => ({ ok: true }));
 let canonicalAgentBaseDomain: string | undefined = "elizacloud.ai";
@@ -50,6 +52,10 @@ mock.module("@/lib/services/pairing-token", () => ({
   }),
 }));
 
+mock.module("@/lib/services/inference-admission-gate", () => ({
+  warmInferenceRateLimitGate,
+}));
+
 mock.module("@/lib/services/provisioning-jobs", () => ({
   provisioningJobService: {
     enqueueAgentProvisionOnce,
@@ -80,7 +86,7 @@ mock.module("@/lib/services/proxy/cors", () => ({
 
 mock.module("@/lib/utils/logger", () => ({
   logger: {
-    warn: mock(() => undefined),
+    warn,
   },
 }));
 
@@ -106,7 +112,9 @@ function runningSandbox(executionTier: "custom" | "dedicated-lazy" | "shared") {
   };
 }
 
-async function postPairingToken() {
+async function postPairingToken(
+  executionCtx?: Parameters<typeof app.fetch>[2],
+) {
   return app.fetch(
     new Request(
       "https://api.example.test/api/v1/eliza/agents/e06bb509-6c52-4c33-a9f7-66addc43e8c8/pairing-token",
@@ -115,6 +123,7 @@ async function postPairingToken() {
     {
       ELIZA_CLOUD_AGENT_BASE_DOMAIN: canonicalAgentBaseDomain,
     } as AppEnv["Bindings"],
+    executionCtx,
   );
 }
 
@@ -125,6 +134,9 @@ describe("eliza agent pairing token route", () => {
     wasStoppedByUser.mockReset();
     wasStoppedByUser.mockResolvedValue(false);
     generateToken.mockClear();
+    warmInferenceRateLimitGate.mockReset();
+    warmInferenceRateLimitGate.mockResolvedValue(undefined);
+    warn.mockClear();
     enqueueAgentProvisionOnce.mockClear();
     checkProvisioningWorkerHealth.mockClear();
     checkAgentCreditGate.mockClear();
@@ -134,6 +146,93 @@ describe("eliza agent pairing token route", () => {
       error: undefined,
     });
     canonicalAgentBaseDomain = "elizacloud.ai";
+  });
+
+  test("returns a usable pairing token while the quota-neutral gate warm is pending", async () => {
+    findByIdAndOrg.mockResolvedValue(runningSandbox("dedicated-lazy"));
+    const pending = Promise.withResolvers<void>();
+    warmInferenceRateLimitGate.mockReturnValueOnce(pending.promise);
+    const background: Promise<unknown>[] = [];
+    try {
+      const response = await postPairingToken({
+        waitUntil(promise) {
+          background.push(promise);
+        },
+        passThroughOnException() {},
+        props: {},
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        data: { token: "pair-token" },
+      });
+      expect(warmInferenceRateLimitGate).toHaveBeenCalledWith("org-1");
+      expect(background).toHaveLength(1);
+    } finally {
+      pending.resolve();
+      await Promise.all(background);
+    }
+  });
+
+  test("a failed background warm preserves pairing and reports the failure", async () => {
+    findByIdAndOrg.mockResolvedValue(runningSandbox("dedicated-lazy"));
+    const failure = new Error("gate unavailable");
+    warmInferenceRateLimitGate.mockRejectedValueOnce(failure);
+    const background: Promise<unknown>[] = [];
+    const response = await postPairingToken({
+      waitUntil(promise) {
+        background.push(promise);
+      },
+      passThroughOnException() {},
+      props: {},
+    });
+    expect(response.status).toBe(200);
+    await Promise.all(background);
+    expect(warn).toHaveBeenCalledWith(
+      "[pairing-token] Inference gate prewarm failed",
+      { error: failure },
+    );
+  });
+
+  test.each([
+    ["unowned", null, 404],
+    ["shared", runningSandbox("shared"), 503],
+    [
+      "starting",
+      { ...runningSandbox("dedicated-lazy"), status: "provisioning" },
+      202,
+    ],
+    ["failed", { ...runningSandbox("dedicated-lazy"), status: "error" }, 500],
+  ])("does not warm a %s agent", async (_label, sandbox, status) => {
+    findByIdAndOrg.mockResolvedValue(sandbox);
+    const waitUntil = mock();
+    const response = await postPairingToken({
+      waitUntil,
+      passThroughOnException() {},
+      props: {},
+    });
+    expect(response.status).toBe(status);
+    expect(warmInferenceRateLimitGate).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  test("does not warm when token generation fails", async () => {
+    findByIdAndOrg.mockResolvedValue(runningSandbox("dedicated-lazy"));
+    generateToken.mockRejectedValueOnce(new Error("token storage unavailable"));
+    const waitUntil = mock();
+    const response = await postPairingToken({
+      waitUntil,
+      passThroughOnException() {},
+      props: {},
+    });
+    expect(response.status).toBe(500);
+    expect(warmInferenceRateLimitGate).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  test("pairs without starting background work outside Workers", async () => {
+    findByIdAndOrg.mockResolvedValue(runningSandbox("dedicated-lazy"));
+    expect((await postPairingToken()).status).toBe(200);
+    expect(warmInferenceRateLimitGate).not.toHaveBeenCalled();
   });
 
   test("routes production token pairing through the canonical hostname instead of its public direct IP", async () => {
