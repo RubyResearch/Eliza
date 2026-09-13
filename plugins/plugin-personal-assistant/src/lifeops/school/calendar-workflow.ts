@@ -26,7 +26,13 @@ import { ELIZA_CALENDAR_GRANT_ID } from "@elizaos/plugin-calendar/internal/eliza
 import type { CalendarOwnerMutationGateway } from "@elizaos/plugin-calendar/routes/mutation-gateway";
 import type { LifeOpsCalendarEvent } from "@elizaos/shared";
 import {
+  beginFamilyWorkspaceOperation,
+  settleFamilyWorkspaceOperation,
+  withActiveFamilyWorkspaceTransaction,
+} from "../family-workflows/workspace-operation-store.js";
+import {
   executeRawSql,
+  executeRawSqlTx,
   parseJsonArray,
   parseJsonRecord,
   sqlQuote,
@@ -750,12 +756,20 @@ export class SchoolCalendarWorkflow {
     await this.ensureSchema();
     assertAllowedUrl(config.landingPageUrl, config);
     const at = this.now().toISOString();
-    const configured = await executeRawSql(
+    const configured = await withActiveFamilyWorkspaceTransaction(
       this.runtime,
-      `INSERT INTO app_lifeops.life_school_calendar_sources (agent_id, source_id, config_json, created_at, updated_at) VALUES (${sqlQuote(this.runtime.agentId)}, ${sqlQuote(config.sourceId)}, ${sqlQuote(canonicalJson(config))}, ${sqlQuote(at)}, ${sqlQuote(at)}) ON CONFLICT (agent_id, source_id) DO UPDATE SET last_content_sha256 = CASE WHEN life_school_calendar_sources.config_json <> EXCLUDED.config_json THEN NULL ELSE life_school_calendar_sources.last_content_sha256 END, config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at
+      [
+        "app_lifeops.life_school_calendar_sources",
+        "app_lifeops.life_school_calendar_runs",
+      ],
+      (tx) =>
+        executeRawSqlTx(
+          tx,
+          `INSERT INTO app_lifeops.life_school_calendar_sources (agent_id, source_id, config_json, created_at, updated_at) VALUES (${sqlQuote(this.runtime.agentId)}, ${sqlQuote(config.sourceId)}, ${sqlQuote(canonicalJson(config))}, ${sqlQuote(at)}, ${sqlQuote(at)}) ON CONFLICT (agent_id, source_id) DO UPDATE SET last_content_sha256 = CASE WHEN life_school_calendar_sources.config_json <> EXCLUDED.config_json THEN NULL ELSE life_school_calendar_sources.last_content_sha256 END, config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at
       WHERE (life_school_calendar_sources.lease_token IS NULL OR life_school_calendar_sources.lease_expires_at < ${sqlQuote(at)})
         AND NOT EXISTS (SELECT 1 FROM app_lifeops.life_school_calendar_runs WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND source_id=${sqlQuote(config.sourceId)} AND state='applying' AND apply_lease_expires_at >= ${sqlQuote(at)})
       RETURNING source_id`,
+        ),
     );
     if (!configured.length)
       throw new SchoolCalendarWorkflowError(
@@ -855,25 +869,59 @@ export class SchoolCalendarWorkflow {
     config: SchoolCalendarSourceConfig = CONCORD_SCHOOL_CALENDAR_SOURCE,
     triggerKind: "manual" | "scheduled" = "manual",
   ): Promise<SchoolCalendarRunResult> {
+    assertAllowedUrl(config.landingPageUrl, config);
+    const runId = randomUUID();
+    const operationId = await beginFamilyWorkspaceOperation(this.runtime, {
+      kind: "school-calendar-work",
+      sourceId: config.sourceId,
+      runId,
+      phase: "ingest",
+    });
+    const result = await this.runAdmitted(
+      config,
+      triggerKind,
+      runId,
+      operationId,
+    );
+    await settleFamilyWorkspaceOperation(this.runtime, operationId);
+    return result;
+  }
+
+  private async runAdmitted(
+    config: SchoolCalendarSourceConfig,
+    triggerKind: "manual" | "scheduled",
+    runId: string,
+    operationId: string,
+  ): Promise<SchoolCalendarRunResult> {
     await this.ensureSchema();
     assertAllowedUrl(config.landingPageUrl, config);
     const leaseToken = randomUUID();
     const now = this.now();
     const acquired = await this.acquire(config, leaseToken, now);
     if (!acquired) return { state: "already_running", runId: null };
-    const runId = randomUUID();
     await this.insertRun(runId, config.sourceId, triggerKind, now);
+    let retentionUncertain = false;
     try {
       if (!this.deps.retainPdf) await this.retainRecordedSources();
       const { pdfUrl, bytes } = await this.retrieve(config);
       const contentSha256 = sha256(bytes);
+      // Persist the canonical identity before storage can lose its acknowledgement.
+      await executeRawSql(
+        this.runtime,
+        `UPDATE app_lifeops.life_school_calendar_runs SET content_sha256=${sqlQuote(contentSha256)},media_url=${sqlQuote(`/api/media/${contentSha256}.pdf`)},discovered_pdf_url=${sqlQuote(pdfUrl)} WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND run_id=${sqlQuote(runId)}`,
+      );
+      retentionUncertain = true;
       const retained = await this.retain(bytes);
-      if (retained.hash !== contentSha256) {
+      if (
+        retained.hash !== contentSha256 ||
+        retained.url !== `/api/media/${contentSha256}.pdf`
+      ) {
         throw new SchoolCalendarWorkflowError(
           "Canonical media store returned a mismatched content hash.",
           "SCHOOL_CALENDAR_MEDIA_HASH_MISMATCH",
         );
       }
+      retentionUncertain = false;
       const source = await this.source(config.sourceId);
       if (
         source.lastContentSha256 === contentSha256 &&
@@ -945,8 +993,10 @@ export class SchoolCalendarWorkflow {
       );
       return { state: "awaiting_approval", runId, plan };
     } catch (error) {
-      // error-policy:J2 Preserve the failure after recording it and releasing the lease.
+      // error-policy:J2 Preserve the failure after its terminal run record is acknowledged.
       await this.failRun(runId, config.sourceId, leaseToken, error);
+      if (!retentionUncertain)
+        await settleFamilyWorkspaceOperation(this.runtime, operationId);
       throw error;
     }
   }
@@ -957,6 +1007,25 @@ export class SchoolCalendarWorkflow {
     gateway: CalendarOwnerMutationGateway;
     config?: SchoolCalendarSourceConfig;
   }): Promise<void> {
+    const operationId = await beginFamilyWorkspaceOperation(this.runtime, {
+      kind: "school-calendar-work",
+      sourceId: (args.config ?? CONCORD_SCHOOL_CALENDAR_SOURCE).sourceId,
+      runId: args.runId,
+      phase: "apply",
+    });
+    await this.applyAdmitted(args, operationId);
+    await settleFamilyWorkspaceOperation(this.runtime, operationId);
+  }
+
+  private async applyAdmitted(
+    args: {
+      runId: string;
+      requestUrl: URL;
+      gateway: CalendarOwnerMutationGateway;
+      config?: SchoolCalendarSourceConfig;
+    },
+    operationId: string,
+  ): Promise<void> {
     await this.ensureSchema();
     const config = args.config ?? CONCORD_SCHOOL_CALENDAR_SOURCE;
     const applyToken = randomUUID();
@@ -981,6 +1050,7 @@ export class SchoolCalendarWorkflow {
       );
       const state = toText(existing[0]?.state);
       if (state === "applied") return;
+      await settleFamilyWorkspaceOperation(this.runtime, operationId);
       throw new SchoolCalendarWorkflowError(
         state === "applying"
           ? "School calendar plan is already being applied."
@@ -990,6 +1060,7 @@ export class SchoolCalendarWorkflow {
           : "SCHOOL_CALENDAR_RUN_NOT_APPLICABLE",
       );
     }
+    let effectUncertain = false;
     try {
       const plan = parseApprovalPlan(parseJsonRecord(row.plan_json));
       const configured = (await this.status(config.sourceId)).config;
@@ -1056,6 +1127,7 @@ export class SchoolCalendarWorkflow {
             "SCHOOL_CALENDAR_APPLY_IN_PROGRESS",
           );
         }
+        effectUncertain = true;
         if (change.kind === "add") {
           const result = await args.gateway.create(args.requestUrl, {
             grantId: config.targetGrantId,
@@ -1124,6 +1196,7 @@ export class SchoolCalendarWorkflow {
             result,
           );
         }
+        effectUncertain = false;
       }
       const completedAt = this.now().toISOString();
       const completed = await executeRawSql(
@@ -1152,6 +1225,8 @@ export class SchoolCalendarWorkflow {
       // error-policy:J2 Restore the exact owned apply leases, then rethrow a
       // typed failure with the provider or persistence error preserved.
       await this.releaseApplyForRetry(args.runId, applyToken, error);
+      if (!effectUncertain)
+        await settleFamilyWorkspaceOperation(this.runtime, operationId);
       const code =
         error instanceof SchoolCalendarWorkflowError
           ? error.code

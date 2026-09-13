@@ -558,5 +558,12 @@ operation identity. Direct packet creation and draft edits also hold active-stat
 admission through their database commit. Approval requests retain a durable claim
 until both canonical persistence and reminder surfacing finish; an uncertain
 completion leaves its packet/version identity available for reconciliation.
+School configuration writes participate in the same active-state transaction.
+Manual and scheduled school ingestion and calendar application retain a durable
+source/run claim through extraction, delivery, and final receipt persistence.
+The run records the canonical PDF identity before storing bytes. An acknowledged
+failure with no uncertain external effect releases the claim; lost storage or
+provider acknowledgements preserve it for reconciliation. Expired execution
+leases do not settle these claims.
 These internal guards do not themselves expose a delete endpoint or establish a
 backup-retention policy.

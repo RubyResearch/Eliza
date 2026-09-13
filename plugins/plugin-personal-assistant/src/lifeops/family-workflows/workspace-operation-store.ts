@@ -20,6 +20,14 @@ const uploadId = z.string().regex(/^hagu_[0-9a-f-]{36}$/);
 const operationTarget = z.discriminatedUnion("kind", [
   z
     .object({
+      kind: z.literal("school-calendar-work"),
+      sourceId: z.string().min(1),
+      runId: z.string().min(1),
+      phase: z.enum(["ingest", "apply"]),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("family-packet-approval"),
       packetId: z.string().min(1),
       draftVersion: z.number().int().positive(),
