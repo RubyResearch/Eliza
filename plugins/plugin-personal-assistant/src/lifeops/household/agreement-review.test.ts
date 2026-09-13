@@ -69,6 +69,7 @@ describe("agreement review model output", () => {
   });
 
   it.each([
+    { $schema: "https://json-schema.org/draft/2020-12/schema" },
     { complete: false },
     { reviewedPages: [1] },
     { reviewedPages: [2, 1] },

@@ -33,6 +33,33 @@ describe("redactTrajectoryText", () => {
 });
 
 describe("normalizeLlmCallPayload redaction", () => {
+  it("preserves parseable PDF coordinates while redacting card-shaped text", () => {
+    const source = {
+      nativePositionedText: [
+        { x: 48, y: 740, width: 328.31999999999994, height: 16 },
+        { x: -0.1234567890123456, y: 300.1234567890123, width: 612 },
+      ],
+      text: "Synthetic card: 4111111111111111. Contact user@example.com.",
+    };
+    const result = normalizeLlmCallPayload([
+      {
+        stepId: "pdf-source",
+        model: "test-model",
+        purpose: "agreement-review",
+        actionType: "reply",
+        userPrompt: JSON.stringify(source),
+        response: "Review required.",
+      },
+    ]);
+    if (!result || typeof result.params.userPrompt !== "string") {
+      throw new Error("The recorder must retain the source prompt");
+    }
+    expect(JSON.parse(result.params.userPrompt)).toEqual({
+      ...source,
+      text: "Synthetic card: <CARD>. Contact <EMAIL>.",
+    });
+  });
+
   it("redacts known sensitive fields in the payload", () => {
     const result = normalizeLlmCallPayload([
       {
