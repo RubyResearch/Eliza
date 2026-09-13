@@ -177,8 +177,10 @@ describe("AuthorizeContent", () => {
     });
     expect(authorizeButton.className).toContain("hover:bg-accent-hover");
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-    expect(window.localStorage.getItem(APP_AUTH_RETURN_TO_KEY)).toBe(
-      "http://localhost/",
+    await waitFor(() =>
+      expect(window.localStorage.getItem(APP_AUTH_RETURN_TO_KEY)).toBe(
+        "http://localhost/",
+      ),
     );
   });
 

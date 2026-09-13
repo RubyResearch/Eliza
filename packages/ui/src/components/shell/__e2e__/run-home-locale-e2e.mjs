@@ -12,7 +12,7 @@
  *
  * Run: bun run --cwd packages/ui test:home-locale-e2e
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -21,10 +21,13 @@ import {
   stubElizaCore,
   stubNodeBuiltins,
 } from "../../../testing/e2e-runner/esbuild-stubs.ts";
-import { FILE_FIXTURE_BOOTSTRAP } from "../../../testing/e2e-runner/fixture-bundle.ts";
+import {
+  compileTailwindTheme,
+  FILE_FIXTURE_BOOTSTRAP,
+} from "../../../testing/e2e-runner/fixture-bundle.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const stylesDir = join(here, "../../../styles");
+const uiRoot = join(here, "../../../..");
 const outDir = join(here, "../../../../tmp/home-locale-e2e");
 await mkdir(outDir, { recursive: true });
 
@@ -35,8 +38,10 @@ function assert(cond, msg) {
   return cond;
 }
 
-const baseCss = await readFile(join(stylesDir, "base.css"), "utf8");
-const TOKEN_SHIM = `.text-accent{color:#ffd8a8}.text-accent\\/90{color:#ffd8a8e6}`;
+const themeCss = await compileTailwindTheme({
+  uiRoot,
+  sources: [join(uiRoot, "src"), here],
+});
 
 // The real `../../state` app-store graph pulls Node-only deps into the browser
 // bundle; stub it to a minimal selector that keeps the time tile shown.
@@ -66,16 +71,19 @@ const stubWeatherDeps = {
       path: "surface-realm-channel-stub",
       namespace: "home-locale-stub",
     }));
-    b.onLoad({ filter: /^logger-stub$/, namespace: "home-locale-stub" }, () => ({
-      contents:
-        "export const logger = { warn() {}, error() {}, info() {}, debug() {} };",
-      loader: "js",
-    }));
+    b.onLoad(
+      { filter: /^logger-stub$/, namespace: "home-locale-stub" },
+      () => ({
+        contents:
+          "export const logger = { warn() {}, error() {}, info() {}, debug() {} };",
+        loader: "js",
+      }),
+    );
     b.onLoad(
       { filter: /^api-client-stub$/, namespace: "home-locale-stub" },
       () => ({
         contents:
-          "export const client = { getBaseUrl: () => '', fetch: async () => ({ lat: 37.77, lon: -122.42 }) };" +
+          "export const client = { getBaseUrl: () => '', getAuthorityRevision: () => 0, onAuthorityChange: () => () => {}, fetch: async () => ({ lat: 37.77, lon: -122.42 }) };" +
           "export function ElizaClient() { return client; }",
         loader: "js",
       }),
@@ -107,10 +115,11 @@ const result = await build({
   write: false,
 });
 const js = result.outputFiles[0].text;
+// HomeScreen normally selects a date variant; this standalone widget host uses the full date.
 const html = `<!doctype html><html class="dark"><head><meta charset="utf-8"><title>home locale e2e</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<style>${baseCss}</style><style>${TOKEN_SHIM}</style>
-<style>html,body{margin:0;height:100%}</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>${themeCss}</style>
+<style>html,body{margin:0;height:100%}[data-home-clock-date-compact]{display:none}</style>
 <script>${FILE_FIXTURE_BOOTSTRAP};window.global=window.global||window;</script>
 </head><body><div id="root"></div><script>${js}</script></body></html>`;
 const htmlPath = join(outDir, "home-locale.html");
@@ -157,52 +166,56 @@ try {
     await ctx.clock.install({ time: new Date("2026-06-25T14:30:00Z") });
     const page = await ctx.newPage();
     const errors = [];
-    page.on("pageerror", (e) => errors.push(String(e)));
-    await page.goto(`file://${htmlPath}`);
-    // The clock is the headline locale signal; wait for it to resolve (useNow's
-    // mount effect reads the fixed 14:30 clock).
-    await page.waitForFunction(
-      () =>
-        (
-          document.querySelector('[data-testid="home-time-widget"]')
-            ?.textContent ?? ""
-        ).includes(":30"),
-      { timeout: 8000 },
-    );
-    // Best-effort: let the mocked weather resolve to a real reading; if it does
-    // the unit assertion runs, otherwise the tile shows the tap-to-enable state.
-    await page
-      .waitForSelector(
-        '[data-testid="home-weather"][data-status="ready"]',
-        { timeout: 4000 },
-      )
-      .catch(() => {});
+    let rejectPageError;
+    const pageError = new Promise((_, reject) => {
+      rejectPageError = reject;
+    });
+    page.on("pageerror", (error) => {
+      errors.push(String(error));
+      rejectPageError(
+        new Error(`[${name}] fixture page error: ${error.message}`, {
+          cause: error,
+        }),
+      );
+    });
+    await Promise.race([
+      pageError,
+      (async () => {
+        await page.goto(`file://${htmlPath}`);
+        await page.waitForFunction(
+          () =>
+            (
+              document.querySelector('[data-testid="home-time-widget"]')
+                ?.textContent ?? ""
+            ).includes(":30"),
+          undefined,
+          { timeout: 8000 },
+        );
+        await page.waitForSelector(
+          '[data-testid="home-weather"][data-status="ready"]',
+          { timeout: 8000 },
+        );
+      })(),
+    ]);
     const text = await page
       .locator('[data-testid="default-home-widgets"]')
       .innerText();
-    const weatherReady =
-      (await page
-        .locator('[data-testid="home-weather"]')
-        .getAttribute("data-status")) === "ready";
+
+    const temperature = await page
+      .locator("[data-home-weather-temperature]")
+      .innerText();
+    const normalizedTemperature = temperature.replace(/\s+/g, "");
 
     if (expect24h) {
       assert(text.includes("14:30"), `[${name}] 24-hour clock shows 14:30`);
       assert(!/\bPM\b/.test(text), `[${name}] no AM/PM suffix`);
-      if (weatherReady) {
-        assert(text.includes("°C"), `[${name}] temperature in °C`);
-        assert(!text.includes("°F"), `[${name}] not °F`);
-      } else {
-        console.log(`  · [${name}] weather unavailable (tap-to-enable shown)`);
-      }
+      assert(normalizedTemperature === "20°C", `[${name}] temperature is 20°C`);
+      assert(!text.includes("°F"), `[${name}] not °F`);
     } else {
       assert(text.includes("2:30"), `[${name}] 12-hour clock shows 2:30`);
       assert(/\bPM\b/.test(text), `[${name}] has PM suffix`);
-      if (weatherReady) {
-        assert(text.includes("°F"), `[${name}] temperature in °F`);
-        assert(!text.includes("°C"), `[${name}] not °C`);
-      } else {
-        console.log(`  · [${name}] weather unavailable (tap-to-enable shown)`);
-      }
+      assert(normalizedTemperature === "68°F", `[${name}] temperature is 68°F`);
+      assert(!text.includes("°C"), `[${name}] not °C`);
     }
     assert(errors.length === 0, `[${name}] no page errors (${errors.length})`);
     for (const e of errors) console.log("  ERR:", e);

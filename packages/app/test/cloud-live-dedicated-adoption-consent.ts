@@ -125,16 +125,18 @@ function exactVisibleConsentLines(
 ): string[] {
   const disposition =
     quote.stateDisposition === "verified_backup_present"
-      ? "restore its reviewed backup"
+      ? "Your verified backup will be restored."
       : quote.stateDisposition === "fresh_boot_no_verified_backup"
-        ? "start fresh because no verified backup is available"
-        : "keep its current state without a reviewed restore";
+        ? "This starts fresh; no verified backup is available."
+        : "Your current data stays. No verified Cloud backup is available.";
   return [
     "Use your existing Dedicated agent?",
-    `Current status: ${quote.status}.`,
-    `Hosting: $${quote.hourlyRateUsd.toFixed(2)}/hour ($${quote.dailyRateUsd.toFixed(2)}/day).`,
-    `Balance: $${quote.balanceUsd.toFixed(2)}; minimum required: $${quote.minimumBalanceUsd.toFixed(2)} (${quote.minimumRunwayDays} days of runway); deficit: $${quote.deficitUsd.toFixed(2)}.`,
-    `This action ${quote.startsCompute ? "starts Dedicated compute" : "does not start new compute"} and will ${disposition}.`,
+    `$${quote.dailyRateUsd.toFixed(2)}/day ($${quote.hourlyRateUsd.toFixed(2)}/hour).`,
+    `Balance: $${quote.balanceUsd.toFixed(2)}; $${quote.minimumBalanceUsd.toFixed(2)} required.`,
+    ...(quote.deficitUsd > 0
+      ? [`Add $${quote.deficitUsd.toFixed(2)} to start.`]
+      : []),
+    disposition,
   ];
 }
 
@@ -253,7 +255,9 @@ export function installDedicatedAdoptionConsentProof(
             ? quote.startsCompute
               ? "Start Dedicated"
               : "Continue Dedicated setup"
-            : "Confirm and continue",
+            : quote.startsCompute
+              ? "Start Dedicated"
+              : "Connect",
         );
         if (!confirmationControlMatches || !(await confirm.isEnabled())) {
           throw new CloudLiveDedicatedAdoptionConsentProofError("control");

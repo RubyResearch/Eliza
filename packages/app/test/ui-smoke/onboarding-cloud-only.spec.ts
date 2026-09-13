@@ -142,9 +142,9 @@ test.describe("cloud-only onboarding (production default)", () => {
     await expectNoCharacterSelectLanding(page);
   });
 
-  test("an existing Dedicated row shows status, balance, and runway before one confirmed POST", async ({
+  test("an existing Dedicated row requires visible hosting terms before one confirmed POST", async ({
     page,
-  }) => {
+  }, testInfo) => {
     await injectCloudAuthToken(page);
     await installHomeRoutes(page);
     await installCloudRoutes(page);
@@ -268,6 +268,9 @@ test.describe("cloud-only onboarding (production default)", () => {
       await expect(confirm).toBeVisible({ timeout: 20_000 });
       expect(adoptionPosts).toBe(0);
 
+      await page.screenshot({
+        path: testInfo.outputPath("existing-consent.png"),
+      });
       await dedicatedAdoptionProof.confirmVisibleConsent(confirm);
       await expect.poll(() => adoptionPosts).toBe(1);
       await expect(page.getByTestId("home-screen")).toBeVisible({
@@ -281,7 +284,7 @@ test.describe("cloud-only onboarding (production default)", () => {
 
   test("an activation redirect surfaces existing Dedicated adoption and completes cutover", async ({
     page,
-  }) => {
+  }, testInfo) => {
     await injectCloudAuthToken(page);
     await installHomeRoutes(page);
     await installCloudRoutes(page);
@@ -405,7 +408,16 @@ test.describe("cloud-only onboarding (production default)", () => {
             success: true,
             data: {
               quoteId: "a".repeat(64),
+              sourceAgentId: PERSONAL_ELIZA_ID,
+              hourlyRateUsd: 0.01,
+              dailyRateUsd: 0.24,
+              minimumBalanceUsd: 0.72,
+              minimumRunwayDays: 3,
+              balanceUsd: 115.54059,
+              deficitUsd: 0,
               canActivate: true,
+              requiresConfirmation: true,
+              action: "activate_dedicated",
               activation: { state: "available" },
             },
           }),
@@ -413,6 +425,10 @@ test.describe("cloud-only onboarding (production default)", () => {
         return;
       }
       activationPosts += 1;
+      expect(JSON.parse(route.request().postData() ?? "{}")).toEqual({
+        action: "activate_dedicated",
+        quoteId: "a".repeat(64),
+      });
       await route.fulfill({
         status: 409,
         contentType: "application/json",
@@ -426,9 +442,6 @@ test.describe("cloud-only onboarding (production default)", () => {
     await seedAppStorage(page, {
       "eliza:first-run-complete": "",
       "eliza:enable-runtime-chooser": "0",
-      steward_session_token: "ui-smoke-onboarding-cloud-token",
-      steward_session_token_scope: "eliza-cloud:production",
-      steward_session_active_scope: "eliza-cloud:production",
     });
 
     const dedicatedAdoptionProof = installDedicatedAdoptionConsentProof(page);
@@ -438,10 +451,25 @@ test.describe("cloud-only onboarding (production default)", () => {
     );
     try {
       await expect(confirm).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByText("Start your Dedicated Eliza?")).toBeVisible();
+      expect(activationPosts).toBe(0);
+      expect(adoptionQuoteGets).toBe(0);
+      expect(adoptionPosts).toBe(0);
+      await page.screenshot({
+        path: testInfo.outputPath("activation-consent.png"),
+      });
+      await confirm.click();
+      await expect.poll(() => adoptionQuoteGets).toBe(1);
+      await expect(
+        page.getByText("Use your existing Dedicated agent?"),
+      ).toBeVisible();
       expect(activationPosts).toBe(1);
       expect(adoptionQuoteGets).toBe(1);
       expect(adoptionPosts).toBe(0);
 
+      await page.screenshot({
+        path: testInfo.outputPath("redirect-adoption-consent.png"),
+      });
       await dedicatedAdoptionProof.confirmVisibleConsent(confirm);
       await expect.poll(() => adoptionPosts).toBe(1);
       await expect.poll(() => cutoverPosts).toBe(1);
