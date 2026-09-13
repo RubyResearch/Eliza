@@ -1214,7 +1214,7 @@ function KnowledgeDocumentsViewForAuthority({
       value={scopeFilter}
       onValueChange={(value) => setScopeFilter(value as DocumentScopeFilter)}
       triggerClassName="h-10 w-[9.5rem] rounded-[10px] border-[color:var(--settings-border)] bg-[var(--settings-secondary)] px-3 text-[13px] text-[color:var(--settings-foreground)]"
-      contentClassName="border-[color:var(--settings-border)] bg-[var(--settings-panel)]"
+      contentClassName="min-w-52 [&_[data-radix-select-viewport]]:min-w-full [&_[data-radix-select-viewport]]:max-w-none"
     >
       {SCOPE_FILTER_OPTIONS.map(({ value, labelKey, defaultLabel }) => (
         <FormSelectItem key={value} value={value}>

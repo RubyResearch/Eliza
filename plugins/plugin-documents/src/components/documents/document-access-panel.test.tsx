@@ -1,6 +1,7 @@
 /** Exercises the real reader editor with controlled HTTP responses, including stale reviews and retained unknown identities. */
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -124,4 +125,32 @@ it("does not turn an unavailable directory into an empty reader list", async () 
   await screen.findByRole("alert");
   expect(screen.queryByRole("checkbox")).toBeNull();
   expect(api.updateDocumentAccess).not.toHaveBeenCalled();
+});
+
+it("keeps a committed save unconfirmed until readback succeeds and surfaces a failed confirmation", async () => {
+  await selectReader();
+  let rejectReadback!: (cause: Error) => void;
+  const readback = new Promise((_resolve, reject) => {
+    rejectReadback = reject;
+  });
+  api.getDocumentAccess.mockReturnValueOnce(readback);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save reviewed readers" }),
+  );
+  await waitFor(() => expect(api.getDocumentAccess).toHaveBeenCalledTimes(2));
+  expect(
+    screen.queryByRole("button", { name: "Save reviewed readers" }),
+  ).toBeNull();
+  expect(
+    screen.queryByText("Sharing saved. Current readers are shown below."),
+  ).toBeNull();
+  await act(async () => {
+    rejectReadback(new Error("Readback unavailable"));
+  });
+  await screen.findByRole("alert");
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(api.updateDocumentAccess).toHaveBeenCalledTimes(1);
+  expect(
+    screen.queryByText("Sharing saved. Current readers are shown below."),
+  ).toBeNull();
 });

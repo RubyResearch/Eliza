@@ -72,6 +72,8 @@ function ReaderEditor({ documentId }: { documentId: string }) {
         directGrantEntityIds: selected,
         expectedAccessRevision: state.access.accessRevision,
       });
+      setState({ phase: "loading" });
+      setReviewing(false);
       setSaved(true);
       setReload((value) => value + 1);
     } catch (error) {

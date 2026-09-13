@@ -51,6 +51,7 @@ electrobun-wgpu {
 @source "../../../ui/src";
 @source "../../../../plugins/app-lifeops/src";
 @source "../../../../plugins/plugin-calendar/src";
+@source "../../../../plugins/plugin-documents/src";
 @source "../../../../plugins/plugin-maps/src";
 
 /* Memories sits beside a persistent filter rail in short landscape, where the

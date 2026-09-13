@@ -1,6 +1,7 @@
 /** Exercises the real pin editor's review, retained chat placement, conflict recovery and failed readback over controlled API responses. */
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -100,13 +101,30 @@ it("requires a new read and review after a conflict", async () => {
     }),
   );
 });
-it("does not report a confirmed save if readback fails", async () => {
+it("hides the old review while readback is pending and does not confirm a failed readback", async () => {
   await selectPins();
-  api.getDocumentPins.mockRejectedValue(new Error("offline"));
+  let rejectReadback!: (reason: Error) => void;
+  api.getDocumentPins.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        rejectReadback = reject;
+      }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "Save reviewed pins" }));
+  await screen.findByText("Loading document pins…");
+  expect(
+    screen.queryByRole("button", { name: "Save reviewed pins" }),
+  ).toBeNull();
+  expect(
+    screen.queryByText("Pins saved. Current settings are shown below."),
+  ).toBeNull();
+  await act(async () => {
+    rejectReadback(new Error("offline"));
+  });
   await screen.findByRole("alert");
   expect(
     screen.queryByText("Pins saved. Current settings are shown below."),
   ).toBeNull();
   expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(api.updateDocumentPins).toHaveBeenCalledTimes(1);
 });

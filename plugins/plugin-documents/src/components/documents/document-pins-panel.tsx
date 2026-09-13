@@ -72,6 +72,8 @@ function PinEditor({ documentId }: { documentId: string }) {
         roomIds: rooms,
         expectedPinRevision: state.pins.pinRevision,
       });
+      setState({ phase: "loading" });
+      setReview(false);
       setSaved(true);
       setReload((value) => value + 1);
     } catch (cause) {
