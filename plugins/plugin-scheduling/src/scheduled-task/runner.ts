@@ -192,6 +192,8 @@ export interface ScheduledTaskStore {
     taskId: string;
     firedAtIso: string;
     expected?: ScheduledTaskClaimExpectation;
+    /** Metadata observed by host admission; a changed row must be admitted again. */
+    expectedMetadata?: NonNullable<ScheduledTask["metadata"]>;
   }): Promise<ScheduledTaskClaimResult>;
   /**
    * Persist one receipt-anchored mutation only when this task does not already
@@ -231,9 +233,15 @@ export function createInMemoryScheduledTaskStore(): ScheduledTaskStore {
       map.set(task.taskId, structuredClone(task));
       return true;
     },
-    async claimForFire({ taskId, firedAtIso, expected }) {
+    async claimForFire({ taskId, firedAtIso, expected, expectedMetadata }) {
       const existing = map.get(taskId);
       if (!existing) return { kind: "raced" };
+      if (
+        expectedMetadata !== undefined &&
+        JSON.stringify(existing.metadata ?? {}) !==
+          JSON.stringify(expectedMetadata)
+      )
+        return { kind: "raced" };
       const cutoverStatus = (
         existing.metadata?.sharedCutoverImport as
           | { status?: unknown }
@@ -443,6 +451,11 @@ export interface ScheduledTaskRunnerDeps {
   activity: ActivitySignalBusView;
   subjectStore: SubjectStoreView;
   dispatcher: ScheduledTaskDispatcher;
+  /** Host admission spans claim, dispatch, receipt persistence, and follow-up work. */
+  executionBoundary?: (
+    task: ScheduledTask,
+    execute: () => Promise<ScheduledTaskFireResult>,
+  ) => Promise<ScheduledTaskFireResult>;
   /**
    * Lookup of registered `ChannelRegistry` keys. When supplied, `schedule()`
    * validates each `escalation.steps[].channelKey` against this set and
@@ -2108,6 +2121,26 @@ export function createScheduledTaskRunner(
   ): Promise<ScheduledTaskFireResult> {
     const task = await deps.store.get(taskId);
     if (!task) throw new Error(`fire: task ${taskId} not found`);
+    const expectedMetadata = deps.executionBoundary
+      ? structuredClone(task.metadata ?? {})
+      : undefined;
+    return deps.executionBoundary
+      ? deps.executionBoundary(task, () =>
+          fireLoadedTaskWithResult(task, args, expectedMetadata),
+        )
+      : fireLoadedTaskWithResult(task, args, expectedMetadata);
+  }
+
+  async function fireLoadedTaskWithResult(
+    task: ScheduledTask,
+    args?: {
+      eventPayload?: unknown;
+      allowTerminalRefire?: boolean;
+      recoverFiredAtIso?: string;
+    },
+    expectedMetadata?: NonNullable<ScheduledTask["metadata"]>,
+  ): Promise<ScheduledTaskFireResult> {
+    const taskId = task.taskId;
     const hasEventPayload =
       Object.hasOwn(args ?? {}, "eventPayload") &&
       args?.eventPayload !== undefined;
@@ -2271,6 +2304,7 @@ export function createScheduledTaskRunner(
     const claim = await deps.store.claimForFire({
       taskId: task.taskId,
       firedAtIso: fireAtIso,
+      ...(expectedMetadata !== undefined ? { expectedMetadata } : {}),
       ...(refireClaim || recoveryClaim
         ? {
             expected: {

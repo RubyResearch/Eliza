@@ -11,6 +11,11 @@ import {
   ServiceType,
 } from "@elizaos/core";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
+import {
+  beginFamilyWorkspaceOperation,
+  type FamilyWorkspaceOperationTarget,
+  settleFamilyWorkspaceOperation,
+} from "../family-workflows/workspace-operation-store.js";
 import { AgreementKnowledgeError } from "./agreement-knowledge.js";
 import { AGREEMENT_UPLOAD_CHUNK_BYTES } from "./agreement-upload-limits.js";
 
@@ -62,6 +67,29 @@ async function withUploadMutationLock<T>(
     if (uploadMutationTails.get(uploadId) === tail) {
       uploadMutationTails.delete(uploadId);
     }
+  }
+}
+
+async function withStagedUploadMutation<T>(
+  runtime: IAgentRuntime,
+  target: Exclude<FamilyWorkspaceOperationTarget, { kind: "agreement-upload" }>,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const operationId = await beginFamilyWorkspaceOperation(runtime, target);
+  try {
+    const result = await mutate();
+    await settleFamilyWorkspaceOperation(runtime, operationId);
+    return result;
+  } catch (cause) {
+    // error-policy:J2 Persistence may have committed before its acknowledgement failed; retain the claim.
+    const failure = new AgreementKnowledgeError(
+      "Upload persistence needs reconciliation before retrying or deleting its sources.",
+      "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+      { operationId, target },
+      cause,
+    );
+    runtime.reportError("AgreementUpload.mutation", failure);
+    throw failure;
   }
 }
 
@@ -173,8 +201,14 @@ export async function beginAgreementUpload(
     status: "uploading",
     artifactId: null,
   };
-  await save(runtime, manifest);
-  return manifest;
+  return withStagedUploadMutation(
+    runtime,
+    { kind: "agreement-upload-begin", uploadId: manifest.uploadId },
+    async () => {
+      await save(runtime, manifest);
+      return manifest;
+    },
+  );
 }
 
 export async function acceptAgreementChunk(input: {
@@ -243,18 +277,44 @@ async function acceptAgreementChunkUnlocked(input: {
     }
     return manifest;
   }
-  const stored = await files(input.runtime).storePrivate(
-    input.bytes,
-    "application/octet-stream",
+  return withStagedUploadMutation(
+    input.runtime,
+    {
+      kind: "agreement-upload-chunk",
+      uploadId: input.uploadId,
+      index: input.index,
+      contentSha256: sha256,
+    },
+    async () => {
+      const stored = await files(input.runtime).storePrivate(
+        input.bytes,
+        "application/octet-stream",
+      );
+      if (
+        stored.hash !== sha256 ||
+        stored.size !== input.bytes.length ||
+        !stored.fileName.startsWith(`${sha256}.`)
+      ) {
+        throw new AgreementKnowledgeError(
+          "Private chunk storage returned metadata that does not match its bytes",
+          "AGREEMENT_INVALID_CONTRACT",
+          {
+            uploadId: input.uploadId,
+            index: input.index,
+            expectedSha256: sha256,
+          },
+        );
+      }
+      manifest.chunks.push({
+        index: input.index,
+        size: input.bytes.length,
+        sha256,
+        fileName: stored.fileName,
+      });
+      await save(input.runtime, manifest);
+      return manifest;
+    },
   );
-  manifest.chunks.push({
-    index: input.index,
-    size: input.bytes.length,
-    sha256,
-    fileName: stored.fileName,
-  });
-  await save(input.runtime, manifest);
-  return manifest;
 }
 
 function agreementUploadContentIdentity(
@@ -308,8 +368,6 @@ async function assembleAgreementUploadUnlocked(input: {
     chunks,
     input.contentIdentity,
   );
-  manifest.status = "committing";
-  await save(input.runtime, manifest);
   const parts: Buffer[] = [];
   for (const chunk of chunks) {
     const bytes = await files(input.runtime).readPrivate(chunk.fileName);
@@ -413,17 +471,33 @@ export async function commitAgreementUpload<
     }
 
     const assembled = await assembleAgreementUploadUnlocked(input);
-    let artifact: TArtifact;
-    let created = true;
-    try {
-      artifact = await input.createArtifact(assembled);
-    } catch (error) {
-      const artifactId = duplicateArtifactId(error);
-      if (!artifactId) throw error;
-      artifact = await input.readArtifact(artifactId);
-      created = false;
-    }
-    await finishAgreementUpload(input.runtime, assembled.manifest, artifact.id);
-    return { artifact, created };
+    return withStagedUploadMutation(
+      input.runtime,
+      {
+        kind: "agreement-upload-commit",
+        uploadId: input.uploadId,
+        contentIdentity: input.contentIdentity,
+      },
+      async () => {
+        assembled.manifest.status = "committing";
+        await save(input.runtime, assembled.manifest);
+        let artifact: TArtifact;
+        let created = true;
+        try {
+          artifact = await input.createArtifact(assembled);
+        } catch (error) {
+          const artifactId = duplicateArtifactId(error);
+          if (!artifactId) throw error;
+          artifact = await input.readArtifact(artifactId);
+          created = false;
+        }
+        await finishAgreementUpload(
+          input.runtime,
+          assembled.manifest,
+          artifact.id,
+        );
+        return { artifact, created };
+      },
+    );
   });
 }

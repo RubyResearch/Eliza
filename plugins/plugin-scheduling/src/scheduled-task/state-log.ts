@@ -30,6 +30,8 @@ export interface ScheduledTaskLogStore {
   rollupOlderThan(args: {
     agentId: string;
     olderThanIso: string;
+    /** Restrict maintenance to these task identities; an empty set changes no rows. */
+    taskIds?: readonly string[];
   }): Promise<{ rolledUp: number; deletedRaw: number }>;
 }
 
@@ -59,10 +61,11 @@ export function createInMemoryScheduledTaskLogStore(): ScheduledTaskLogStore {
       }
       return view.map((r) => ({ ...r }));
     },
-    async rollupOlderThan({ agentId, olderThanIso }) {
+    async rollupOlderThan({ agentId, olderThanIso, taskIds }) {
       const expired = rows.filter(
         (r) =>
           r.agentId === agentId &&
+          (taskIds === undefined || taskIds.includes(r.taskId)) &&
           !r.rolledUp &&
           r.transition !== "scheduled" &&
           typeof r.detail?.receiptKey !== "string" &&

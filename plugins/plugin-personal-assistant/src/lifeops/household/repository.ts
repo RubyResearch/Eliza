@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import type { IAgentRuntime } from "@elizaos/core";
 import { toWellFormedUnicode, truncateWellFormed } from "@elizaos/core";
 import type { LifeOpsCommitmentLedgerRecord } from "../commitments/index.js";
+import { withActiveFamilyWorkspaceTransaction } from "../family-workflows/workspace-operation-store.js";
 import {
   asObject,
   executeRawSql,
@@ -444,6 +445,19 @@ export class HouseholdCoordinationRepository {
     await this.grantExpiryWarningSchemaReady;
   }
 
+  private executeWarningMutation(statement: string) {
+    return withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_access_grants",
+        "app_lifeops.life_household_grant_expiry_warning_claims",
+      ],
+      (tx) => executeRawSqlTx(tx, statement),
+      this.agentId,
+    );
+  }
+
   async appendAudit(event: AuditWrite): Promise<void> {
     await insertAudit(this.runtime, this.agentId, event);
   }
@@ -453,10 +467,17 @@ export class HouseholdCoordinationRepository {
     audit: AuditWrite,
   ): Promise<void> {
     await this.ensureGrantExpiryWarningSchema();
-    await withTransaction(this.runtime, async (tx) => {
-      await executeRawSqlTx(
-        tx,
-        `INSERT INTO app_lifeops.life_household_access_grants (
+    await withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_access_grants",
+        "app_lifeops.life_household_grant_expiry_warning_claims",
+      ],
+      async (tx) => {
+        await executeRawSqlTx(
+          tx,
+          `INSERT INTO app_lifeops.life_household_access_grants (
           id, agent_id, household_id, principal_entity_id, relationship_id, role,
           subject_entity_ids_json, scopes_json, issued_by_entity_id,
           expires_at, revoked_at, revoked_by_entity_id, revocation_reason,
@@ -478,11 +499,11 @@ export class HouseholdCoordinationRepository {
           ${sqlQuote(grant.createdAt)},
           ${sqlQuote(grant.updatedAt)}
         )`,
-      );
-      if (grant.expiresAt) {
-        await executeRawSqlTx(
-          tx,
-          `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
+        );
+        if (grant.expiresAt) {
+          await executeRawSqlTx(
+            tx,
+            `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
              agent_id, grant_id, attempt_token, lease_expires_at,
              scheduled_task_id, warning_at, expires_at, cancelled_at, updated_at
            ) VALUES (
@@ -490,10 +511,12 @@ export class HouseholdCoordinationRepository {
              ${sqlQuote(`pending:${grant.id}`)}, ${sqlQuote(grant.createdAt)},
              NULL, NULL, NULL, NULL, ${sqlQuote(grant.createdAt)}
            )`,
-        );
-      }
-      await insertAudit(tx, this.agentId, audit);
-    });
+          );
+        }
+        await insertAudit(tx, this.agentId, audit);
+      },
+      this.agentId,
+    );
   }
 
   async getGrant(id: string): Promise<HouseholdAccessGrant | null> {
@@ -537,10 +560,17 @@ export class HouseholdCoordinationRepository {
     reason: string;
   }): Promise<HouseholdAccessGrant> {
     await this.ensureGrantExpiryWarningSchema();
-    return await withTransaction(this.runtime, async (tx) => {
-      const rows = await executeRawSqlTx(
-        tx,
-        `UPDATE app_lifeops.life_household_access_grants
+    return await withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_access_grants",
+        "app_lifeops.life_household_grant_expiry_warning_claims",
+      ],
+      async (tx) => {
+        const rows = await executeRawSqlTx(
+          tx,
+          `UPDATE app_lifeops.life_household_access_grants
             SET revoked_at = ${sqlQuote(input.revokedAt)},
                 revoked_by_entity_id = ${sqlQuote(input.revokedByEntityId)},
                 revocation_reason = ${sqlQuote(input.reason)},
@@ -549,35 +579,35 @@ export class HouseholdCoordinationRepository {
             AND id = ${sqlQuote(input.id)}
             AND revoked_at IS NULL
         RETURNING *`,
-      );
-      const row = rows[0];
-      if (!row) {
-        throw new HouseholdCoordinationError(
-          `Grant ${input.id} is missing or already revoked`,
-          "HOUSEHOLD_GRANT_REVOKED",
-          { grantId: input.id },
         );
-      }
-      const grant = grantFromRow(row);
-      await insertAudit(tx, this.agentId, {
-        kind: "household_grant_revoked",
-        ownerId: grant.id,
-        reason: input.reason,
-        inputs: {
-          householdId: grant.householdId,
-          principalEntityId: grant.principalEntityId,
-          scopes: grant.scopes,
-        },
-        decision: {
-          revokedAt: grant.revokedAt,
-          revokedByEntityId: grant.revokedByEntityId,
-        },
-        actor: "user",
-        createdAt: input.revokedAt,
-      });
-      await executeRawSqlTx(
-        tx,
-        `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
+        const row = rows[0];
+        if (!row) {
+          throw new HouseholdCoordinationError(
+            `Grant ${input.id} is missing or already revoked`,
+            "HOUSEHOLD_GRANT_REVOKED",
+            { grantId: input.id },
+          );
+        }
+        const grant = grantFromRow(row);
+        await insertAudit(tx, this.agentId, {
+          kind: "household_grant_revoked",
+          ownerId: grant.id,
+          reason: input.reason,
+          inputs: {
+            householdId: grant.householdId,
+            principalEntityId: grant.principalEntityId,
+            scopes: grant.scopes,
+          },
+          decision: {
+            revokedAt: grant.revokedAt,
+            revokedByEntityId: grant.revokedByEntityId,
+          },
+          actor: "user",
+          createdAt: input.revokedAt,
+        });
+        await executeRawSqlTx(
+          tx,
+          `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
            agent_id, grant_id, attempt_token, lease_expires_at,
            scheduled_task_id, warning_at, expires_at, cancelled_at,
            cancellation_completed_at, cancellation_attempt_count,
@@ -594,9 +624,11 @@ export class HouseholdCoordinationRepository {
                  EXCLUDED.cancelled_at
                ),
                updated_at = EXCLUDED.updated_at`,
-      );
-      return grant;
-    });
+        );
+        return grant;
+      },
+      this.agentId,
+    );
   }
 
   async getGrantExpiryWarningTaskId(grantId: string): Promise<string | null> {
@@ -679,8 +711,7 @@ export class HouseholdCoordinationRepository {
     await this.ensureGrantExpiryWarningSchema();
     const completed = await this.getGrantExpiryWarningTaskId(input.grantId);
     if (completed) return { kind: "complete", scheduledTaskId: completed };
-    const inserted = await executeRawSql(
-      this.runtime,
+    const inserted = await this.executeWarningMutation(
       `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
          agent_id, grant_id, attempt_token, lease_expires_at, scheduled_task_id,
          warning_at, expires_at, cancelled_at, updated_at
@@ -693,8 +724,7 @@ export class HouseholdCoordinationRepository {
        RETURNING attempt_token`,
     );
     if (inserted[0]) return { kind: "claimed" };
-    const reclaimed = await executeRawSql(
-      this.runtime,
+    const reclaimed = await this.executeWarningMutation(
       `UPDATE app_lifeops.life_household_grant_expiry_warning_claims
           SET attempt_token = ${sqlQuote(input.attemptToken)},
               lease_expires_at = ${sqlQuote(input.leaseExpiresAt)},
@@ -706,8 +736,7 @@ export class HouseholdCoordinationRepository {
       RETURNING attempt_token`,
     );
     if (reclaimed[0]) return { kind: "claimed" };
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeWarningMutation(
       `SELECT lease_expires_at
          FROM app_lifeops.life_household_grant_expiry_warning_claims
         WHERE agent_id = ${sqlQuote(this.agentId)}
@@ -739,8 +768,7 @@ export class HouseholdCoordinationRepository {
     { kind: "linked"; scheduledTaskId: string } | { kind: "cancelled" }
   > {
     await this.ensureGrantExpiryWarningSchema();
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeWarningMutation(
       `UPDATE app_lifeops.life_household_grant_expiry_warning_claims
           SET scheduled_task_id = ${sqlQuote(input.scheduledTaskId)},
               warning_at = ${sqlQuote(input.warningAt)},
@@ -797,8 +825,7 @@ export class HouseholdCoordinationRepository {
     releasedAt: string;
   }): Promise<void> {
     await this.ensureGrantExpiryWarningSchema();
-    await executeRawSql(
-      this.runtime,
+    await this.executeWarningMutation(
       `UPDATE app_lifeops.life_household_grant_expiry_warning_claims
           SET lease_expires_at = ${sqlQuote(input.releasedAt)},
               updated_at = ${sqlQuote(input.releasedAt)}
@@ -814,8 +841,7 @@ export class HouseholdCoordinationRepository {
     cancelledAt: string,
   ): Promise<string | null> {
     await this.ensureGrantExpiryWarningSchema();
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeWarningMutation(
       `INSERT INTO app_lifeops.life_household_grant_expiry_warning_claims (
          agent_id, grant_id, attempt_token, lease_expires_at, scheduled_task_id,
          warning_at, expires_at, cancelled_at, cancellation_completed_at,
@@ -842,8 +868,7 @@ export class HouseholdCoordinationRepository {
     completedAt: string;
   }): Promise<void> {
     await this.ensureGrantExpiryWarningSchema();
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeWarningMutation(
       `UPDATE app_lifeops.life_household_grant_expiry_warning_claims
           SET cancellation_completed_at = ${sqlQuote(input.completedAt)},
               cancellation_last_error = NULL,
@@ -868,8 +893,7 @@ export class HouseholdCoordinationRepository {
     error: string;
   }): Promise<void> {
     await this.ensureGrantExpiryWarningSchema();
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeWarningMutation(
       `UPDATE app_lifeops.life_household_grant_expiry_warning_claims
           SET cancellation_attempt_count = cancellation_attempt_count + 1,
               cancellation_last_error = ${sqlQuote(truncateWellFormed(toWellFormedUnicode(input.error), 512))},

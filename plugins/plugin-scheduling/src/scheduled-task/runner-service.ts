@@ -79,6 +79,7 @@ import {
   createInMemoryScheduledTaskStore,
   createScheduledTaskRunner,
   type ScheduledTaskDispatcher,
+  type ScheduledTaskRunnerDeps,
   type ScheduledTaskRunnerHandle,
   type ScheduledTaskStore,
 } from "./runner.js";
@@ -115,6 +116,7 @@ export interface ScheduledTaskRunnerDepsBundle {
   store: ScheduledTaskStore;
   logStore: ScheduledTaskLogStore;
   dispatcher: ScheduledTaskDispatcher;
+  executionBoundary?: ScheduledTaskRunnerDeps["executionBoundary"];
   ownerFacts: () => OwnerFactsView | Promise<OwnerFactsView>;
   globalPause: GlobalPauseView;
   activity: ActivitySignalBusView;
@@ -598,6 +600,9 @@ function buildRunner(
     activity: deps.activity,
     subjectStore: deps.subjectStore,
     dispatcher,
+    ...(deps.executionBoundary
+      ? { executionBoundary: deps.executionBoundary }
+      : {}),
     ...(channelKeys ? { channelKeys } : {}),
     ...(channelAvailable ? { channelAvailable } : {}),
     ...(deps.hostCapabilities

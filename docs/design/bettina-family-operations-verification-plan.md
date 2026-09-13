@@ -64,7 +64,7 @@ Node executable or a manual download.
 
 | Requirements | Automated proof | Local/live proof |
 | --- | --- | --- |
-| KNOW-1–KNOW-4 | Real media-store plus PGlite ingestion tests retain exact original bytes, binary/content hashes, page maps and immutable version lineage; failed byte storage rolls back metadata. Resumable-upload tests cover out-of-order chunks, exact replay, missing ranges, per-chunk and whole-file hash mismatch, and a document above the former 20 MiB ceiling. Complete-extraction tests cover native, image-bearing, text-empty, and verified-blank pages and reject one-page OCR/vision failure without partial success. | Upload born-digital, scanned, and mixed PDFs through the app; interrupt and resume one upload; restart, download and hash identical bytes; confirm early, middle, and final page canaries are searchable with their extraction method. |
+| KNOW-1–KNOW-4 | Real media-store plus PGlite ingestion tests retain exact original bytes, binary/content hashes, page maps and immutable version lineage; failed byte storage rolls back metadata, and rejected document/fragment/artifact writes remove only that upload's private sources. Concurrent duplicate rejection must preserve the winning version; uncertain commits preserve sources for reconciliation, and incomplete cleanup remains an explicit failure. Resumable-upload tests cover out-of-order chunks, exact replay, missing ranges, per-chunk and whole-file hash mismatch, and a document above the former 20 MiB ceiling. Complete-extraction tests cover native, image-bearing, text-empty, and verified-blank pages and reject one-page OCR/vision failure without partial success. | Upload born-digital, scanned, and mixed PDFs through the app; interrupt and resume one upload; restart, download and hash identical bytes; confirm early, middle, and final page canaries are searchable with their extraction method. |
 | KNOW-5–KNOW-7 | Obligation lifecycle tests validate page/source citations and proposed/approved/rejected transitions. Pin tests prove only approved obligations are active and raw-PDF activation warns. | Review obligations in the UI and inspect agent context with and without each pin. |
 | KNOW-8 | Manifest export test re-hashes original bytes, citations, obligations, pins, grants and audit entries. | Download and inspect the export. |
 | ACL-1–ACL-3 | Agent/chat/household pin-target tests include cross-room denial and prove pinning never grants access. | Change a chat pin and show no recipient permissions changed. |
@@ -134,8 +134,11 @@ manifest rather than assuming a script exists.
 4. Owner uses Eliza Calendar without Google.
 5. Owner connects the Google test calendar and proves bidirectional CRUD,
    conflict, duplicate notification, unknown outcome and disconnect behavior.
-6. Owner creates and manually runs the Concord workflow, approves the first
-   import, reruns the same bytes as a no-op, then reviews a changed fixture.
+6. Owner creates the Concord workflow in the selected automatic mode, runs a
+   validated first import and changed revision without per-run approval, then
+   reruns identical bytes as a recorded no-op. Verify unrelated events remain
+   unchanged and ambiguous sources stay quarantined. Separately select review
+   mode and prove a changed plan waits for exact-plan approval.
 7. Owner generates a monthly packet and neutral draft with no expense data.
 8. Owner reviews the exact recipient/disclosure/card envelope and sends through
    the configured iMessage edge; the recipient replies and the same thread is

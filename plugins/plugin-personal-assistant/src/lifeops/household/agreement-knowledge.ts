@@ -85,6 +85,12 @@ const agreementExtractionSchema = z.strictObject({
   ),
 });
 
+import {
+  beginFamilyWorkspaceOperation,
+  settleFamilyWorkspaceOperation,
+  withActiveFamilyWorkspaceTransaction,
+} from "../family-workflows/workspace-operation-store.js";
+
 export const HOUSEHOLD_AGREEMENT_KNOWLEDGE_SERVICE =
   "lifeops_household_agreement_knowledge";
 
@@ -458,6 +464,20 @@ export class AgreementKnowledgeRepository {
     private readonly agentId: string,
   ) {}
 
+  private async executeAgreementMutation(statement: string) {
+    return withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_agreement_artifacts",
+        "app_lifeops.life_household_agreement_obligations",
+        "app_lifeops.life_household_knowledge_pins",
+        "app_lifeops.life_household_knowledge_grants",
+      ],
+      (tx) => executeRawSqlTx(tx, statement),
+    );
+  }
+
   /** All mutable export records are read from one PostgreSQL statement snapshot. */
   async readExportSnapshot(artifactId: string) {
     const scoped = `agent_id = ${sqlQuote(this.agentId)}`;
@@ -707,8 +727,7 @@ export class AgreementKnowledgeRepository {
   async insertObligation(
     obligation: ParentingAgreementObligation,
   ): Promise<ParentingAgreementObligation> {
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       this.obligationInsertSql(obligation),
     );
     const row = rows[0];
@@ -725,35 +744,45 @@ export class AgreementKnowledgeRepository {
   async insertOwnerProposalOnce(
     obligation: ParentingAgreementObligation,
   ): Promise<{ obligation: ParentingAgreementObligation; created: boolean }> {
-    return withTransaction(this.runtime, async (tx) => {
-      const artifacts = await executeRawSqlTx(
-        tx,
-        `SELECT id FROM app_lifeops.life_household_agreement_artifacts
+    return withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_agreement_artifacts",
+        "app_lifeops.life_household_agreement_obligations",
+        "app_lifeops.life_household_knowledge_pins",
+        "app_lifeops.life_household_knowledge_grants",
+      ],
+      async (tx) => {
+        const artifacts = await executeRawSqlTx(
+          tx,
+          `SELECT id FROM app_lifeops.life_household_agreement_artifacts
          WHERE agent_id = ${sqlQuote(this.agentId)} AND id = ${sqlQuote(obligation.artifactId)} FOR UPDATE`,
-      );
-      if (artifacts.length !== 1)
-        throw new AgreementKnowledgeError(
-          "Agreement source is unavailable",
-          "AGREEMENT_ARTIFACT_NOT_FOUND",
         );
-      const existing = await executeRawSqlTx(
-        tx,
-        `SELECT * FROM app_lifeops.life_household_agreement_obligations
+        if (artifacts.length !== 1)
+          throw new AgreementKnowledgeError(
+            "Agreement source is unavailable",
+            "AGREEMENT_ARTIFACT_NOT_FOUND",
+          );
+        const existing = await executeRawSqlTx(
+          tx,
+          `SELECT * FROM app_lifeops.life_household_agreement_obligations
          WHERE agent_id = ${sqlQuote(this.agentId)} AND artifact_id = ${sqlQuote(obligation.artifactId)} AND id = ${sqlQuote(obligation.id)}`,
-      );
-      if (existing[0])
-        return { obligation: obligationFromRow(existing[0]), created: false };
-      const inserted = await executeRawSqlTx(
-        tx,
-        this.obligationInsertSql(obligation),
-      );
-      if (inserted.length !== 1 || !inserted[0])
-        throw new AgreementKnowledgeError(
-          "Owner proposal did not persist",
-          "AGREEMENT_STORAGE_UNAVAILABLE",
         );
-      return { obligation: obligationFromRow(inserted[0]), created: true };
-    });
+        if (existing[0])
+          return { obligation: obligationFromRow(existing[0]), created: false };
+        const inserted = await executeRawSqlTx(
+          tx,
+          this.obligationInsertSql(obligation),
+        );
+        if (inserted.length !== 1 || !inserted[0])
+          throw new AgreementKnowledgeError(
+            "Owner proposal did not persist",
+            "AGREEMENT_STORAGE_UNAVAILABLE",
+          );
+        return { obligation: obligationFromRow(inserted[0]), created: true };
+      },
+    );
   }
 
   async readPreparedReview(
@@ -793,57 +822,67 @@ export class AgreementKnowledgeRepository {
         "AGREEMENT_INVALID_CONTRACT",
       );
     }
-    return withTransaction(this.runtime, async (tx) => {
-      const artifacts = await executeRawSqlTx(
-        tx,
-        `SELECT id FROM app_lifeops.life_household_agreement_artifacts
+    return withActiveFamilyWorkspaceTransaction(
+      this.runtime,
+      [
+        "app_lifeops.life_audit_events",
+        "app_lifeops.life_household_agreement_artifacts",
+        "app_lifeops.life_household_agreement_obligations",
+        "app_lifeops.life_household_knowledge_pins",
+        "app_lifeops.life_household_knowledge_grants",
+      ],
+      async (tx) => {
+        const artifacts = await executeRawSqlTx(
+          tx,
+          `SELECT id FROM app_lifeops.life_household_agreement_artifacts
         WHERE agent_id = ${sqlQuote(this.agentId)} AND id = ${sqlQuote(record.artifactId)} FOR UPDATE`,
-      );
-      if (artifacts.length !== 1)
-        throw new AgreementKnowledgeError(
-          "Agreement source is unavailable",
-          "AGREEMENT_ARTIFACT_NOT_FOUND",
         );
-      const existing = await executeRawSqlTx(
-        tx,
-        `SELECT decision_json FROM app_lifeops.life_audit_events
+        if (artifacts.length !== 1)
+          throw new AgreementKnowledgeError(
+            "Agreement source is unavailable",
+            "AGREEMENT_ARTIFACT_NOT_FOUND",
+          );
+        const existing = await executeRawSqlTx(
+          tx,
+          `SELECT decision_json FROM app_lifeops.life_audit_events
         WHERE agent_id = ${sqlQuote(this.agentId)} AND owner_type = 'parenting_agreement'
           AND owner_id = ${sqlQuote(record.artifactId)} AND event_type = 'agreement_review_prepared'`,
-      );
-      if (existing.length === 1)
-        return preparedReviewFromJson(existing[0]?.decision_json);
-      if (existing.length > 1)
-        throw new AgreementKnowledgeError(
-          "Agreement has conflicting prepared review records",
-          "AGREEMENT_INVALID_CONTRACT",
         );
-      for (const obligation of obligations) {
-        const inserted = await executeRawSqlTx(
-          tx,
-          this.obligationInsertSql(obligation),
-        );
-        if (inserted.length !== 1)
+        if (existing.length === 1)
+          return preparedReviewFromJson(existing[0]?.decision_json);
+        if (existing.length > 1)
           throw new AgreementKnowledgeError(
-            "Review proposal did not persist",
-            "AGREEMENT_STORAGE_UNAVAILABLE",
+            "Agreement has conflicting prepared review records",
+            "AGREEMENT_INVALID_CONTRACT",
           );
-      }
-      const saved = await executeRawSqlTx(
-        tx,
-        `INSERT INTO app_lifeops.life_audit_events
+        for (const obligation of obligations) {
+          const inserted = await executeRawSqlTx(
+            tx,
+            this.obligationInsertSql(obligation),
+          );
+          if (inserted.length !== 1)
+            throw new AgreementKnowledgeError(
+              "Review proposal did not persist",
+              "AGREEMENT_STORAGE_UNAVAILABLE",
+            );
+        }
+        const saved = await executeRawSqlTx(
+          tx,
+          `INSERT INTO app_lifeops.life_audit_events
         (id, agent_id, event_type, owner_type, owner_id, reason, inputs_json, decision_json, actor, created_at)
         VALUES (${sqlQuote(`agreement_review_${crypto.randomUUID()}`)}, ${sqlQuote(this.agentId)}, 'agreement_review_prepared',
           'parenting_agreement', ${sqlQuote(record.artifactId)}, 'Unapproved cited proposals prepared for owner review',
           ${sqlQuote(JSON.stringify({ sourceSha256: record.sourceSha256, extractionSha256: record.extractionSha256 }))},
           ${sqlQuote(JSON.stringify(record))}, 'owner', ${sqlQuote(record.generatedAt)}) RETURNING id`,
-      );
-      if (saved.length !== 1)
-        throw new AgreementKnowledgeError(
-          "Prepared review did not persist",
-          "AGREEMENT_STORAGE_UNAVAILABLE",
         );
-      return record;
-    });
+        if (saved.length !== 1)
+          throw new AgreementKnowledgeError(
+            "Prepared review did not persist",
+            "AGREEMENT_STORAGE_UNAVAILABLE",
+          );
+        return record;
+      },
+    );
   }
 
   async decideObligation(input: {
@@ -853,8 +892,7 @@ export class AgreementKnowledgeRepository {
     decisionReason: string;
     decidedAt: string;
   }): Promise<ParentingAgreementObligation> {
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       agreementMutationSql(
         `UPDATE app_lifeops.life_household_agreement_obligations
           SET status = ${sqlQuote(input.status)},
@@ -916,8 +954,7 @@ export class AgreementKnowledgeRepository {
     pinnedAt: string;
   }): Promise<HouseholdKnowledgePin> {
     const id = `hkpin_${crypto.randomUUID()}`;
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       agreementMutationSql(
         `INSERT INTO app_lifeops.life_household_knowledge_pins (
          id, agent_id, artifact_id, target_type, target_id,
@@ -991,8 +1028,7 @@ export class AgreementKnowledgeRepository {
     unpinnedByEntityId: string;
     unpinnedAt: string;
   }): Promise<HouseholdKnowledgePin> {
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       agreementMutationSql(
         `UPDATE app_lifeops.life_household_knowledge_pins
           SET unpinned_at = ${sqlQuote(input.unpinnedAt)}
@@ -1020,8 +1056,7 @@ export class AgreementKnowledgeRepository {
   }
 
   async upsertGrant(input: HouseholdKnowledgeGrant) {
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       agreementMutationSql(
         `INSERT INTO app_lifeops.life_household_knowledge_grants (
          id, agent_id, household_id, artifact_id, principal_entity_id,
@@ -1094,8 +1129,7 @@ export class AgreementKnowledgeRepository {
     reason: string;
     revokedAt: string;
   }): Promise<HouseholdKnowledgeGrant> {
-    const rows = await executeRawSql(
-      this.runtime,
+    const rows = await this.executeAgreementMutation(
       agreementMutationSql(
         `UPDATE app_lifeops.life_household_knowledge_grants
           SET revoked_at = ${sqlQuote(input.revokedAt)},
@@ -1406,6 +1440,27 @@ export class AgreementKnowledgeService {
     }
   }
 
+  private async settleIngestionOperation(
+    operationId: string,
+    priorFailure?: unknown,
+  ): Promise<void> {
+    try {
+      await settleFamilyWorkspaceOperation(this.deps.runtime, operationId);
+    } catch (cause) {
+      // error-policy:J2 A failed settlement cannot be reported as a completed upload.
+      const failure = new AgreementKnowledgeError(
+        "The ingestion operation could not be settled. Reconcile its claim before deletion or retry.",
+        "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+        { operationId },
+        priorFailure === undefined
+          ? cause
+          : new AggregateError([priorFailure, cause]),
+      );
+      this.deps.runtime.reportError("AgreementKnowledge.ingestion", failure);
+      throw failure;
+    }
+  }
+
   private async requireArtifact(id: string) {
     const artifact = await this.deps.repository.getArtifact(
       normalizeHouseholdIdentifier(id, "artifactId"),
@@ -1507,6 +1562,12 @@ export class AgreementKnowledgeService {
         },
       );
     }
+    const artifactId = `hag_${crypto.randomUUID()}`;
+    const operationId = await beginFamilyWorkspaceOperation(this.deps.runtime, {
+      kind: "agreement-upload",
+      artifactId,
+      contentSha256: expectedSha256,
+    });
     let extracted: PdfCompleteDocument;
     try {
       const ocr = await resolveAgreementOcr();
@@ -1524,7 +1585,8 @@ export class AgreementKnowledgeService {
           : undefined,
       });
     } catch (error) {
-      // error-policy:J2 keep extraction dependency failures distinct from invalid document input.
+      // error-policy:J2 Extraction has settled without creating persistent sources.
+      await this.settleIngestionOperation(operationId, error);
       if (
         error instanceof ElizaError &&
         error.code === "PDF_PAGE_TRANSCRIPTION_UNAVAILABLE"
@@ -1553,8 +1615,20 @@ export class AgreementKnowledgeService {
       .createHash("sha256")
       .update(extractionJson)
       .digest("hex");
-    const artifactId = `hag_${crypto.randomUUID()}`;
-    const stored = await fileStorage.storePrivate(bytes, "application/pdf");
+    let stored: Awaited<ReturnType<IFileStorageService["storePrivate"]>>;
+    try {
+      stored = await fileStorage.storePrivate(bytes, "application/pdf");
+    } catch (cause) {
+      // error-policy:J2 A lost acknowledgement may follow a durable write; retain its claim and source.
+      const failure = new AgreementKnowledgeError(
+        "Private PDF persistence could not be confirmed. Reconcile the source identity before retrying or deleting its claim.",
+        "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
+        { operationId, artifactId, contentSha256: expectedSha256 },
+        cause,
+      );
+      this.deps.runtime.reportError("AgreementKnowledge.ingestion", failure);
+      throw failure;
+    }
     let documentId: UUID | null = null;
     try {
       if (
@@ -1607,7 +1681,7 @@ export class AgreementKnowledgeService {
         },
       });
       documentId = document.storedDocumentMemoryId;
-      return await this.deps.repository.insertArtifact({
+      const artifact = await this.deps.repository.insertArtifact({
         id: artifactId,
         agentId: this.deps.agentId,
         householdId,
@@ -1626,6 +1700,8 @@ export class AgreementKnowledgeService {
         extractionSha256,
         createdAt: this.now().toISOString(),
       });
+      await this.settleIngestionOperation(operationId);
+      return artifact;
     } catch (error) {
       // error-policy:J2 Roll back only this attempt; preserve committed or uncertain sources.
       if (documentId) {
@@ -1637,7 +1713,12 @@ export class AgreementKnowledgeService {
           const failure = new AgreementKnowledgeError(
             "Upload persistence could not be reconciled. Inspect the artifact before retrying or deleting its sources.",
             "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
-            { artifactId, documentId, mediaFileName: stored.fileName },
+            {
+              artifactId,
+              documentId,
+              mediaFileName: stored.fileName,
+              operationId,
+            },
             new AggregateError([error, reconciliationError]),
           );
           this.deps.runtime.reportError(
@@ -1650,7 +1731,12 @@ export class AgreementKnowledgeService {
           const failure = new AgreementKnowledgeError(
             "The agreement was persisted but the upload did not finish normally. Review the existing version before retrying.",
             "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED",
-            { artifactId, documentId, mediaFileName: stored.fileName },
+            {
+              artifactId,
+              documentId,
+              mediaFileName: stored.fileName,
+              operationId,
+            },
             error,
           );
           this.deps.runtime.reportError(
@@ -1681,7 +1767,12 @@ export class AgreementKnowledgeService {
         const failure = new AgreementKnowledgeError(
           "The upload failed and its private-source cleanup is incomplete. Resolve the reported storage failures before retrying.",
           "AGREEMENT_INGESTION_CLEANUP_FAILED",
-          { artifactId, documentId, mediaFileName: stored.fileName },
+          {
+            artifactId,
+            documentId,
+            mediaFileName: stored.fileName,
+            operationId,
+          },
           new AggregateError([
             error,
             ...failures.map((result) => result.reason),
@@ -1690,6 +1781,7 @@ export class AgreementKnowledgeService {
         this.deps.runtime.reportError("AgreementKnowledge.ingestion", failure);
         throw failure;
       }
+      await this.settleIngestionOperation(operationId, error);
       throw error;
     }
   }

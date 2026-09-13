@@ -5,7 +5,7 @@
  * service rather than request-provided role headers.
  */
 
-import { readRequestBodyBuffer } from "@elizaos/core";
+import { ElizaError, readRequestBodyBuffer } from "@elizaos/core";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
 import {
   AgreementKnowledgeError,
@@ -79,6 +79,8 @@ function statusFor(error: { code: string }): number {
       return 403;
     case "AGREEMENT_ARTIFACT_NOT_FOUND":
       return 404;
+    case "FAMILY_WORKSPACE_FENCED":
+    case "FAMILY_OPERATION_UNSETTLED":
     case "AGREEMENT_OBLIGATION_CONFLICT":
     case "AGREEMENT_DUPLICATE_CONTENT":
       return 409;
@@ -536,7 +538,10 @@ export async function handleAgreementKnowledgeRoutes(
   } catch (error) {
     if (
       error instanceof AgreementKnowledgeError ||
-      isAgreementReviewError(error)
+      isAgreementReviewError(error) ||
+      (error instanceof ElizaError &&
+        (error.code === "FAMILY_WORKSPACE_FENCED" ||
+          error.code === "FAMILY_OPERATION_UNSETTLED"))
     ) {
       ctx.json(
         ctx.res,

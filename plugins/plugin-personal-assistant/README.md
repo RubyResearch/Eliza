@@ -542,3 +542,17 @@ hashes and restores their document references. A missing or changed historical
 source fails explicitly and requires recovery of its exact original bytes.
 New PDFs gain their reference before a run can complete, including hash no-ops.
 The workflow does not create another file store, collector, or reference counter.
+
+Family lifecycle admission wraps the canonical scheduling SQL stores. It resolves
+monthly tasks, grant warnings, and family approval reminders through typed task
+metadata and persisted domain references. Canonical approval payloads retain that
+classification before a household approval link is acknowledged. The deletion
+snapshot uses the same predicates and includes those tasks and their history.
+Task mutations inspect both stored and proposed metadata inside the transaction;
+removing a family marker cannot evade an active deletion fence. Unrelated tasks
+and approvals remain usable, and history maintenance preserves fenced family
+records. Scheduled family execution holds a durable operation through final
+receipt persistence. A rejected execution retains its claim for reconciliation;
+typed domain errors remain unchanged for callers and diagnostics record the
+operation identity. These internal guards do not themselves expose a delete
+endpoint or establish a backup-retention policy.

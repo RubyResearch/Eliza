@@ -43,8 +43,6 @@ import {
   createConsolidationRegistry,
   createEscalationLadderRegistry,
   createScheduledTaskRunner,
-  createSchedulingSqlScheduledTaskLogStore,
-  createSchedulingSqlScheduledTaskStore,
   createTaskGateRegistry,
   getAnchorRegistry,
   getScheduledTaskRunner,
@@ -73,6 +71,8 @@ import {
   FAMILY_MONTHLY_SYSTEM_OPERATION,
   getFamilyWorkflowRuntimeService,
 } from "../family-workflows/index.js";
+import { withFamilyScheduledExecution } from "../family-workflows/scheduled-execution.js";
+import { createFamilySchedulingStores } from "../family-workflows/scheduled-store.js";
 import { resolveGlobalPauseStore } from "../global-pause/store.js";
 import { registerHouseholdGrantExpiryWarningGate } from "../household/grant-expiry-warning.js";
 import { HouseholdCoordinationRepository } from "../household/repository.js";
@@ -317,10 +317,7 @@ function makeRepositoryBackedStores(
   runtime: IAgentRuntime,
   agentId: string,
 ): RepositoryBackedStores {
-  return {
-    store: createSchedulingSqlScheduledTaskStore({ runtime, agentId }),
-    logStore: createSchedulingSqlScheduledTaskLogStore({ runtime, agentId }),
-  };
+  return createFamilySchedulingStores(runtime, agentId);
 }
 
 function defaultOwnerFactsProvider(
@@ -1214,6 +1211,8 @@ function buildLifeOpsRunnerDeps(
 
   return {
     store: stores.store,
+    executionBoundary: (task, execute) =>
+      withFamilyScheduledExecution(opts.runtime, task, execute, opts.agentId),
     logStore: stores.logStore,
     gates,
     completionChecks,
@@ -1277,6 +1276,9 @@ export function createRuntimeScheduledTaskRunner(
       ? { hostCapabilities: deps.hostCapabilities }
       : {}),
     dispatcher: deps.dispatcher,
+    ...(deps.executionBoundary
+      ? { executionBoundary: deps.executionBoundary }
+      : {}),
   });
 }
 

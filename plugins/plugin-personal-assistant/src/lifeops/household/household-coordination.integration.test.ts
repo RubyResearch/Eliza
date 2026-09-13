@@ -29,8 +29,14 @@ import { householdCoordinationAction } from "../../actions/household-coordinatio
 import { resolveRequestAction } from "../../actions/resolve-request.js";
 import { createApprovalQueue } from "../approval-queue.js";
 import type { ApprovalQueue } from "../approval-queue.types.js";
+import { fenceFamilyWorkspace } from "../family-workflows/workspace-operation-store.js";
 import { LifeOpsRepository } from "../repository.js";
-import { executeRawSql, sqlInteger, sqlQuote } from "../sql.js";
+import {
+  executeRawSql,
+  sqlInteger,
+  sqlQuote,
+  withTransaction,
+} from "../sql.js";
 import { HOUSEHOLD_GRANT_EXPIRY_WARNING_GATE } from "./grant-expiry-warning.js";
 import { HouseholdCoordinationRepository } from "./repository.js";
 import {
@@ -1761,6 +1767,11 @@ describe("household coordination — real PGlite", () => {
     await expect(runner.fireWithResult(task.taskId)).rejects.toMatchObject({
       code: "HOUSEHOLD_INVALID_CONTRACT",
     });
+    await expect(
+      withTransaction(runtime, (tx) =>
+        fenceFamilyWorkspace(tx, runtime.agentId),
+      ),
+    ).rejects.toMatchObject({ code: "FAMILY_DELETION_WORK_UNSETTLED" });
     await runner.apply(task.taskId, "edit", { metadata: originalMetadata });
 
     const originalIdentity = originalMetadata?.householdGrantExpiryWarning;

@@ -13,6 +13,12 @@ import {
   readAgreementUpload,
 } from "./agreement-upload-session.js";
 
+// Admission is a collaborator here; the PGlite suite exercises the real deletion fence.
+vi.mock("../family-workflows/workspace-operation-store.js", () => ({
+  beginFamilyWorkspaceOperation: vi.fn(async () => crypto.randomUUID()),
+  settleFamilyWorkspaceOperation: vi.fn(async () => undefined),
+}));
+
 function sha256(bytes: Buffer): string {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
@@ -63,6 +69,7 @@ function harness() {
       return true;
     }),
     getService: vi.fn(() => fileStorage),
+    reportError: vi.fn(),
   } as unknown as IAgentRuntime;
   return { runtime, fileStorage };
 }
@@ -281,7 +288,7 @@ describe("agreement upload session", () => {
     expect(readArtifact).toHaveBeenCalledTimes(2);
   });
 
-  it("recovers a prior artifact when retrying after creation outlived manifest finalization", async () => {
+  it("returns an existing artifact when identical agreement content is already committed", async () => {
     const { runtime } = harness();
     const bytes = Buffer.from("%PDF-recovered");
     const manifest = await beginAgreementUpload(runtime, {

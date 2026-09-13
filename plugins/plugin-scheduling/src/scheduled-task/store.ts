@@ -387,9 +387,12 @@ export function createSchedulingSqlScheduledTaskStore(
       taskId: string;
       firedAtIso: string;
       expected?: ScheduledTaskClaimExpectation;
+      expectedMetadata?: NonNullable<ScheduledTask["metadata"]>;
     }): Promise<ScheduledTaskClaimResult> {
       const now = isoNow();
       const expected = args.expected;
+      // Admission observes parseScheduledTaskRow's metadata, including its
+      // createdAtIso projection when the raw metadata does not contain a string.
       const stateGuard = expected
         ? `AND (state_json::jsonb ->> 'status') = ${sqlQuote(expected.status)}
             AND ${
@@ -417,6 +420,14 @@ export function createSchedulingSqlScheduledTaskStore(
           WHERE agent_id = ${sqlQuote(agentId)}
             AND id = ${sqlQuote(args.taskId)}
             AND transfer_status IS NULL
+            ${
+              args.expectedMetadata === undefined
+                ? ""
+                : `AND (CASE WHEN jsonb_typeof(metadata_json::jsonb->'createdAtIso') = 'string'
+              THEN metadata_json::jsonb
+              ELSE metadata_json::jsonb || jsonb_build_object('createdAtIso', created_at)
+              END) = ${sqlJson(args.expectedMetadata)}::jsonb`
+            }
             AND COALESCE(
               metadata_json::jsonb #>> '{sharedCutoverImport,status}',
               ''
@@ -715,10 +726,16 @@ export function createSchedulingSqlScheduledTaskLogStore(
       return rows.map(parseScheduledTaskLogRow);
     },
     async rollupOlderThan(args) {
+      if (args.taskIds?.length === 0) return { rolledUp: 0, deletedRaw: 0 };
+      const taskScope =
+        args.taskIds === undefined
+          ? ""
+          : `AND task_id IN (${args.taskIds.map((id) => sqlQuote(id)).join(",")})`;
       const rows = await executeSql(
         `SELECT *
            FROM ${LOG_TABLE}
           WHERE agent_id = ${sqlQuote(agentId)}
+            ${taskScope}
             AND rolled_up = FALSE
             AND transition <> 'scheduled'
             AND NOT (
@@ -757,6 +774,7 @@ export function createSchedulingSqlScheduledTaskLogStore(
       await executeSql(
         `DELETE FROM ${LOG_TABLE}
           WHERE agent_id = ${sqlQuote(agentId)}
+            ${taskScope}
             AND rolled_up = FALSE
             AND transition <> 'scheduled'
             AND NOT (

@@ -54,6 +54,7 @@ import {
   familyPacketCalendarWindow,
   nextFamilyPacketPeriod,
 } from "./period.js";
+import { ensureFamilyWorkflowRunStore } from "./run-store.js";
 
 export const FAMILY_WORKFLOW_RUNTIME_SERVICE = "lifeops_family_workflows";
 export interface FamilyEmailOptions {
@@ -89,16 +90,6 @@ export const FAMILY_MONTHLY_SYSTEM_OPERATION =
   "family.monthlyCoordination" as const;
 
 const RUN_LEASE_MS = 10 * 60_000;
-const RUN_SCHEMA = [
-  `CREATE SCHEMA IF NOT EXISTS app_lifeops`,
-  `CREATE TABLE IF NOT EXISTS app_lifeops.life_family_workflow_runs (
-    agent_id TEXT NOT NULL, period_key TEXT NOT NULL, run_id TEXT NOT NULL,
-    state TEXT NOT NULL, trigger_kind TEXT NOT NULL, lease_token TEXT,
-    lease_expires_at TEXT, result_json TEXT, error_message TEXT,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    PRIMARY KEY (agent_id, period_key)
-  )`,
-] as const;
 
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -213,8 +204,7 @@ export class FamilyWorkflowRuntimeService extends Service {
 
   private async ensureSchema(): Promise<void> {
     if (this.initialized) return;
-    for (const statement of RUN_SCHEMA)
-      await executeRawSql(this.runtime, statement);
+    await ensureFamilyWorkflowRunStore(this.runtime);
     this.initialized = true;
   }
 

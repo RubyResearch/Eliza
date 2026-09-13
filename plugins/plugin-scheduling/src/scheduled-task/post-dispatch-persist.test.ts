@@ -49,6 +49,7 @@ function carveOutDatabase(pg: PGlite): CarveOutDatabase {
 import {
   createInMemoryScheduledTaskStore,
   createScheduledTaskRunner,
+  type ScheduledTaskRunnerDeps,
   type ScheduledTaskRunnerHandle,
 } from "./runner.js";
 import { createInMemoryScheduledTaskLogStore } from "./state-log.js";
@@ -76,7 +77,9 @@ interface RaceHarness {
   failDispatch(error: Error): void;
 }
 
-function makeRaceHarness(): RaceHarness {
+function makeRaceHarness(
+  executionBoundary?: ScheduledTaskRunnerDeps["executionBoundary"],
+): RaceHarness {
   const ownerFacts: OwnerFactsView = {
     timezone: "UTC",
     morningWindow: { start: "07:00", end: "10:00" },
@@ -96,6 +99,7 @@ function makeRaceHarness(): RaceHarness {
   let counter = 0;
   const runner = createScheduledTaskRunner({
     agentId: "test-agent",
+    ...(executionBoundary ? { executionBoundary } : {}),
     store,
     logStore,
     gates,
@@ -145,6 +149,86 @@ const baseInput = {
   createdBy: "tester",
   ownerVisible: true,
 };
+
+describe("host execution admission", () => {
+  it("rejects before claiming a task when its host denies admission", async () => {
+    const denied = new Error("workspace fenced");
+    const h = makeRaceHarness(async () => {
+      throw denied;
+    });
+    const task = await h.runner.schedule(baseInput);
+    await expect(h.runner.fireWithResult(task.taskId)).rejects.toBe(denied);
+    expect((await h.store.get(task.taskId))?.state.status).toBe("scheduled");
+  });
+
+  it("retries admission when task metadata changes before the fire claim", async () => {
+    let h!: RaceHarness;
+    h = makeRaceHarness(async (task, execute) => {
+      await h.store.upsert({
+        ...task,
+        metadata: { systemOperation: "family.monthlyCoordination" },
+      });
+      return execute();
+    });
+    const task = await h.runner.schedule(baseInput);
+    const firing = h.runner.fireWithResult(task.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.releaseDispatch();
+    expect((await firing).kind).toBe("raced");
+    expect((await h.store.get(task.taskId))?.state.status).toBe("scheduled");
+  });
+
+  it("keeps host admission until the dispatch result is persisted", async () => {
+    let admitted = false;
+    const h = makeRaceHarness(async (_task, execute) => {
+      admitted = true;
+      try {
+        return await execute();
+      } finally {
+        admitted = false;
+      }
+    });
+    const task = await h.runner.schedule(baseInput);
+    const original = h.store.upsertIfStatus.bind(h.store);
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPersist = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const resumePersist = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.store.upsertIfStatus = async (next, options) => {
+      if (next.metadata?.lastDispatchResult) {
+        entered();
+        await resumePersist;
+      }
+      return original(next, options);
+    };
+    const firing = h.runner.fireWithResult(task.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.releaseDispatch();
+    try {
+      await Promise.race([
+        enteredPersist,
+        firing.then(() => {
+          throw new Error("Execution bypassed final persistence");
+        }),
+      ]);
+      expect(admitted).toBe(true);
+      expect(
+        (await h.store.get(task.taskId))?.metadata?.lastDispatchResult,
+      ).toBeUndefined();
+    } finally {
+      release();
+    }
+    expect((await firing).kind).toBe("fired");
+    expect(
+      (await h.store.get(task.taskId))?.metadata?.lastDispatchResult,
+    ).toMatchObject({ ok: true });
+    expect(admitted).toBe(false);
+  });
+});
 
 describe("post-dispatch persist vs concurrent user verbs (in-memory)", () => {
   it("keeps a complete that lands while the dispatch is in flight", async () => {
@@ -304,6 +388,48 @@ describe("upsertIfStatus guard (SQL store, PGlite)", () => {
       await pg.close();
     }
   }, 15_000);
+
+  it("claims only the task metadata that the host actually admitted", async () => {
+    const pg = new PGlite();
+    try {
+      await migrateSchedulingTables(carveOutDatabase(pg));
+      const store = createSchedulingSqlScheduledTaskStore({
+        agentId: "agent-admission",
+        executeSql: async (statement) =>
+          (await pg.query<Record<string, unknown>>(statement)).rows,
+      });
+      const task: ScheduledTask = {
+        ...baseInput,
+        taskId: "admission-race",
+        state: { status: "scheduled", followupCount: 0 },
+      };
+      await store.upsert(task);
+      const observed = await store.get(task.taskId);
+      if (!observed) throw new Error("Scheduled task disappeared");
+      const metadata = { systemOperation: "family.monthlyCoordination" };
+      await store.upsert({ ...task, metadata });
+      expect(
+        await store.claimForFire({
+          taskId: task.taskId,
+          firedAtIso: "2026-05-09T12:00:00.000Z",
+          expectedMetadata: observed.metadata ?? {},
+        }),
+      ).toEqual({ kind: "raced" });
+      expect((await store.get(task.taskId))?.state.status).toBe("scheduled");
+      expect(
+        (
+          await store.claimForFire({
+            taskId: task.taskId,
+            firedAtIso: "2026-05-09T12:00:00.000Z",
+            expectedMetadata: (await store.get(task.taskId))?.metadata ?? {},
+          })
+        ).kind,
+      ).toBe("fired");
+      expect((await store.get(task.taskId))?.metadata).toMatchObject(metadata);
+    } finally {
+      await pg.close();
+    }
+  });
 
   // A guarded write must not resurrect a row a concurrent writer deleted.
   // Reusing the upsert here took the INSERT branch on a missing row and
