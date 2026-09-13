@@ -1,4 +1,4 @@
-/** Proves Steward account creation receives the fixed opening credit exactly once. */
+/** Proves Steward account creation starts unfunded without an automatic credit grant. */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
@@ -17,7 +17,7 @@ const createdOrg = {
   id: "org-new-1",
   name: "alice's Organization",
   slug: "alice-abc123",
-  credit_balance: "5.00",
+  credit_balance: "0.00",
 };
 const createdUser = {
   id: "user-new-1",
@@ -165,7 +165,7 @@ const baseParams = {
   name: "alice",
 };
 
-describe("syncUserFromSteward — fixed signup credit", () => {
+describe("syncUserFromSteward — zero signup credit", () => {
   beforeEach(() => {
     addCreditsCalls.length = 0;
     orgCreateCalls.length = 0;
@@ -178,13 +178,13 @@ describe("syncUserFromSteward — fixed signup credit", () => {
     };
   });
 
-  test("creates the account with $5 without a second credit transaction", async () => {
+  test("creates the account with $0 and no credit transaction", async () => {
     const { syncUserFromSteward } = await import("./steward-sync");
 
     const result = await syncUserFromSteward(baseParams);
 
     expect(addCreditsCalls).toHaveLength(0);
-    expect(orgCreateCalls).toEqual([expect.objectContaining({ credit_balance: "5.00" })]);
+    expect(orgCreateCalls).toEqual([expect.objectContaining({ credit_balance: "0.00" })]);
     expect(
       orgUpdateCalls.filter((c) => (c.data as { credit_balance?: string }).credit_balance),
     ).toHaveLength(0);
@@ -192,8 +192,8 @@ describe("syncUserFromSteward — fixed signup credit", () => {
     expect(loggerErrorCalls).toHaveLength(0);
     expect(result).toMatchObject({
       ...finalUserWithOrg,
-      initialCreditsGranted: true,
-      initialFreeCreditsUsd: 5,
+      initialCreditsGranted: false,
+      initialFreeCreditsUsd: 0,
     });
   });
 });

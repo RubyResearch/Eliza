@@ -4,7 +4,6 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { SIGNUP_CREDIT_POLICY } from "../../signup-credits";
 
 process.env.DATABASE_URL = "pglite://memory";
 process.env.TEST_DATABASE_URL = "pglite://memory";
@@ -126,7 +125,7 @@ describe("wallet signup atomic opening-balance creation", () => {
   });
 
   test(
-    "EVM signup rolls back the organization when owner creation fails, then grants on retry",
+    "EVM signup rolls back the organization when owner creation fails, then creates an unfunded account on retry",
     async () => {
       if (!pgliteReady) throw pgliteError;
 
@@ -142,20 +141,18 @@ describe("wallet signup atomic opening-balance creation", () => {
 
       expect(retry.isNewAccount).toBe(true);
       expect(retry.user.role).toBe("owner");
-      expect(retry.initialCreditsGranted).toBe(true);
-      expect(retry.initialFreeCreditsUsd).toBe(SIGNUP_CREDIT_POLICY.automaticGrantUsd);
+      expect(retry.initialCreditsGranted).toBe(false);
+      expect(retry.initialFreeCreditsUsd).toBe(0);
       expect(await countRows("organizations")).toBe(1);
       expect(await countRows("users")).toBe(1);
       expect(await countRows("credit_transactions")).toBe(0);
-      expect(await orgBalanceBySlug(`wallet-${EVM_ADDRESS.toLowerCase()}`)).toBe(
-        SIGNUP_CREDIT_POLICY.automaticGrantUsd,
-      );
+      expect(await orgBalanceBySlug(`wallet-${EVM_ADDRESS.toLowerCase()}`)).toBe(0);
     },
     PGLITE_TIMEOUT,
   );
 
   test(
-    "Solana signup rolls back the organization when owner creation fails, then grants on retry",
+    "Solana signup rolls back the organization when owner creation fails, then creates an unfunded account on retry",
     async () => {
       if (!pgliteReady) throw pgliteError;
 
@@ -173,20 +170,18 @@ describe("wallet signup atomic opening-balance creation", () => {
 
       expect(retry.isNewAccount).toBe(true);
       expect(retry.user.role).toBe("owner");
-      expect(retry.initialCreditsGranted).toBe(true);
-      expect(retry.initialFreeCreditsUsd).toBe(SIGNUP_CREDIT_POLICY.automaticGrantUsd);
+      expect(retry.initialCreditsGranted).toBe(false);
+      expect(retry.initialFreeCreditsUsd).toBe(0);
       expect(await countRows("organizations")).toBe(1);
       expect(await countRows("users")).toBe(1);
       expect(await countRows("credit_transactions")).toBe(0);
-      expect(await orgBalanceBySlug(`wallet-solana-${SOLANA_ADDRESS}`)).toBe(
-        SIGNUP_CREDIT_POLICY.automaticGrantUsd,
-      );
+      expect(await orgBalanceBySlug(`wallet-solana-${SOLANA_ADDRESS}`)).toBe(0);
     },
     PGLITE_TIMEOUT,
   );
 
   test(
-    "a legacy zero-balance wallet organization is adopted with canonical funding but no ledger transaction",
+    "a legacy zero-balance wallet organization is adopted without adding signup funds",
     async () => {
       if (!pgliteReady) throw pgliteError;
 
@@ -201,12 +196,29 @@ describe("wallet signup atomic opening-balance creation", () => {
       expect(result.isNewAccount).toBe(true);
       expect(result.user.role).toBe("owner");
       expect(result.user.organization?.slug).toBe(slug);
-      expect(result.initialCreditsGranted).toBe(true);
-      expect(result.initialFreeCreditsUsd).toBe(SIGNUP_CREDIT_POLICY.automaticGrantUsd);
+      expect(result.initialCreditsGranted).toBe(false);
+      expect(result.initialFreeCreditsUsd).toBe(0);
       expect(await countRows("organizations")).toBe(1);
       expect(await countRows("users")).toBe(1);
       expect(await countRows("credit_transactions")).toBe(0);
-      expect(await orgBalanceBySlug(slug)).toBe(SIGNUP_CREDIT_POLICY.automaticGrantUsd);
+      expect(await orgBalanceBySlug(slug)).toBe(0);
+    },
+    PGLITE_TIMEOUT,
+  );
+
+  test.each(["5.00", "42.25"])(
+    "adopting an existing wallet organization preserves its %s balance without a new grant",
+    async (balance) => {
+      if (!pgliteReady) throw pgliteError;
+      const slug = `wallet-${EVM_ADDRESS_2.toLowerCase()}`;
+      await dbWrite.execute(
+        `INSERT INTO organizations (name, slug, credit_balance) VALUES ('Funded', '${slug}', '${balance}');`,
+      );
+      const result = await walletSignup.findOrCreateUserByWalletAddress(EVM_ADDRESS_2);
+      expect(result.initialCreditsGranted).toBe(false);
+      expect(result.initialFreeCreditsUsd).toBe(0);
+      expect(await orgBalanceBySlug(slug)).toBe(Number(balance));
+      expect(await countRows("credit_transactions")).toBe(0);
     },
     PGLITE_TIMEOUT,
   );

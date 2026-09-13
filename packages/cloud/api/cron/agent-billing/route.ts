@@ -4,8 +4,8 @@
  * The hourly processor:
  * - Charges organizations hourly for running agents ($0.01/hour)
  * - Charges for idle/stopped agents with snapshots ($0.0025/hour)
- * - Sends 48-hour shutdown warnings when credits are insufficient
- * - Shuts down agents that have been in warning state for 48+ hours
+ * - Immediately queues a durable stop when accrued compute cannot be paid
+ * - Rechecks funding under the lifecycle lock before committing the stop
  *
  * Schedule: Runs every hour at minute 0 (0 * * * *)
  * Protected by CRON_SECRET.
@@ -20,7 +20,6 @@ import {
   agentBillingRepository,
 } from "@/db/repositories/agent-billing";
 import { agentBillingRunRepository } from "@/db/repositories/agent-billing-runs";
-import { usersRepository } from "@/db/repositories/users";
 import type {
   AgentBillingRun,
   AgentBillingRunErrorSample,
@@ -41,7 +40,7 @@ import {
   scheduledCronInvocationId,
 } from "@/lib/cron/cloudflare-cron";
 import { safeFetch } from "@/lib/security/safe-fetch";
-import { emailService } from "@/lib/services/email";
+import { enqueueAgentUnfundedStopForRun } from "@/lib/services/agent-unfunded-stop";
 import {
   listRecoverableAgentComputeStopIntents,
   provisioningJobService,
@@ -148,19 +147,6 @@ async function recoverAgentStops(
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-async function getOrgUserEmail(organizationId: string): Promise<string | null> {
-  try {
-    const users = await usersRepository.listByOrganization(organizationId);
-    return users.length > 0 && users[0].email ? users[0].email : null;
-  } catch (error) {
-    logger.error("[Agent Billing] Failed to get org user email", {
-      organizationId,
-      error,
-    });
-    return null;
-  }
-}
-
 async function getOrgBalance(organizationId: string): Promise<number | null> {
   try {
     return await agentBillingRepository.getOrganizationCreditBalance(
@@ -190,7 +176,6 @@ function getHourlyRate(status: string): number {
 async function processSandboxBilling(
   sandbox: AgentBillingSandbox,
   org: AgentBillingOrganization,
-  appUrl: string,
   now: Date,
   runAuthority: { runId: string; leaseToken: string },
 ): Promise<BillingResult> {
@@ -210,134 +195,24 @@ async function processSandboxBilling(
   const amountDue =
     hourlyRate * ((now.getTime() - periodStart.getTime()) / (60 * 60 * 1000));
 
-  async function queueShutdownWarning(): Promise<BillingResult> {
-    if (
-      sandbox.billing_status === "shutdown_pending" ||
-      sandbox.shutdown_warning_sent_at
-    ) {
-      return {
-        sandboxId,
-        agentName,
-        organizationId,
-        action: "skipped",
-        error: "Waiting for scheduled shutdown",
-      };
-    }
-
-    const liveBalance = (await getOrgBalance(organizationId)) ?? currentBalance;
-    if (liveBalance >= amountDue) {
-      logger.info(
-        `[Agent Billing] Skipping shutdown warning for ${agentName}; balance recovered before warning`,
-        {
-          sandboxId,
-          amountDue,
-          liveBalance,
-        },
-      );
-      return {
-        sandboxId,
-        agentName,
-        organizationId,
-        action: "skipped",
-        error: "Balance recovered before warning could be sent",
-      };
-    }
-
-    const shutdownTime = new Date(
-      now.getTime() + AGENT_PRICING.GRACE_PERIOD_HOURS * 60 * 60 * 1000,
-    );
-
-    // Deliver before stamping: the sandbox transition, the armed shutdown,
-    // and the durable `warning_sent` item commit atomically only after the
-    // provider accepted delivery. A crash before that commit changes nothing,
-    // so a retried invocation redelivers instead of recording a false skip.
-    const recipientEmail =
-      org.billing_email || (await getOrgUserEmail(organizationId));
-    if (recipientEmail) {
-      // Reuse the container shutdown warning email template — content is generic enough
-      let sent: boolean;
-      try {
-        sent = await emailService.sendContainerShutdownWarningEmail({
-          email: recipientEmail,
-          organizationName: org.name,
-          containerName: `Agent Agent: ${agentName}`,
-          projectName: "Eliza Cloud",
-          dailyCost: hourlyRate * 24,
-          monthlyCost: hourlyRate * 24 * 30,
-          currentBalance: liveBalance,
-          requiredCredits: amountDue,
-          minimumRecommended: hourlyRate * 24 * 7, // 1 week
-          shutdownTime: shutdownTime.toLocaleString("en-US", {
-            weekday: "long",
-            year: "numeric",
-            month: "long",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-            timeZoneName: "short",
-          }),
-          billingUrl: `${appUrl}/cloud/billing`,
-          dashboardUrl: `${appUrl}/cloud/agents`,
-        });
-      } catch (cause) {
-        // error-policy:J2 provider failure gains stable billing context while
-        // preserving the original rejection for the outer J1 boundary.
-        throw new ElizaError("Shutdown warning email failed", {
-          code: "AGENT_BILLING_WARNING_EMAIL_FAILED",
-          cause,
-          context: { sandboxId, organizationId },
-          severity: "ephemeral",
-        });
-      }
-      if (!sent) {
-        throw new ElizaError(
-          "Shutdown warning email was not accepted by the provider",
-          {
-            code: "AGENT_BILLING_WARNING_EMAIL_NOT_ACCEPTED",
-            context: { sandboxId, organizationId },
-            severity: "ephemeral",
-          },
-        );
-      }
-
-      logger.info(
-        `[Agent Billing] Sent shutdown warning for ${agentName} to ${recipientEmail}`,
-      );
-    }
-
-    const warningCommitted =
-      await agentBillingRepository.commitShutdownWarningForRun({
-        ...runAuthority,
-        sandboxId,
-        organizationId,
-        agentName,
-        now,
-        shutdownTime,
-      });
-    if (!warningCommitted) {
-      return {
-        sandboxId,
-        agentName,
-        organizationId,
-        action: "skipped",
-        error: "Shutdown warning was no longer applicable",
-      };
-    }
-
-    await notifyWaifuCreditWebhook(sandbox, "credits.low", {
-      eventId: `agent-billing:${sandboxId}:credits.low:${now.toISOString()}`,
-      creditsRemaining: liveBalance,
-      requiredCredits: amountDue,
-      scheduledShutdownAt: shutdownTime.toISOString(),
-    });
-
-    return {
+  async function queueUnfundedStop(): Promise<BillingResult> {
+    const item = await enqueueAgentUnfundedStopForRun({
+      ...runAuthority,
       sandboxId,
-      agentName,
       organizationId,
-      action: "warning_sent",
-      amount: amountDue,
-    };
+      agentName,
+      now,
+    });
+    if (item.action === "shutdown") {
+      await notifyWaifuCreditWebhook(sandbox, "credits.depleted", {
+        eventId: `agent-billing:${sandboxId}:credits.depleted:${item.id}`,
+        creditsRemaining:
+          (await getOrgBalance(organizationId)) ?? currentBalance,
+        requiredCredits: amountDue,
+        scheduledShutdownAt: now.toISOString(),
+      });
+    }
+    return resultFromRunItem(item);
   }
 
   logger.info(`[Agent Billing] Processing ${agentName}`, {
@@ -349,31 +224,9 @@ async function processSandboxBilling(
     billingStatus: sandbox.billing_status,
   });
 
-  // ── Scheduled shutdown check ────────────────────────────────────
-  if (
-    sandbox.billing_status === "shutdown_pending" &&
-    sandbox.scheduled_shutdown_at &&
-    new Date(sandbox.scheduled_shutdown_at) <= now
-  ) {
-    logger.info(
-      `[Agent Billing] Shutting down agent ${agentName} due to insufficient credits`,
-    );
-
-    await provisioningJobService.enqueueAgentSuspendOnce({
-      agentId: sandboxId,
-      organizationId,
-      userId: sandbox.user_id,
-      authorization: "billing_request",
-    });
-
-    await notifyWaifuCreditWebhook(sandbox, "credits.depleted", {
-      eventId: `agent-billing:${sandboxId}:credits.depleted:${sandbox.scheduled_shutdown_at.toISOString()}`,
-      creditsRemaining: 0,
-      requiredCredits: amountDue,
-      scheduledShutdownAt: sandbox.scheduled_shutdown_at.toISOString(),
-    });
-
-    return { sandboxId, agentName, organizationId, action: "shutdown" };
+  // Previously warned agents are rechecked immediately; no unpaid grace remains.
+  if (sandbox.billing_status === "shutdown_pending") {
+    return queueUnfundedStop();
   }
 
   // ── Sufficient credits — bill the hour ──────────────────────────
@@ -410,7 +263,7 @@ async function processSandboxBilling(
   }
 
   if (billingResult.status === "insufficient_credits") {
-    return queueShutdownWarning();
+    return queueUnfundedStop();
   }
 
   logger.info(
@@ -871,7 +724,6 @@ async function handleAgentBilling(c: AppContext): Promise<Response> {
     const rebillCutoff = new Date(
       now.getTime() - REBILL_GUARD_MINUTES * 60_000,
     );
-    const appUrl = c.env.NEXT_PUBLIC_APP_URL || "https://cloud.eliza.app";
 
     logger.info("[Agent Billing] Starting hourly billing run", {
       runId: run.id,
@@ -938,7 +790,7 @@ async function handleAgentBilling(c: AppContext): Promise<Response> {
       }
 
       try {
-        const result = await processSandboxBilling(sandbox, org, appUrl, now, {
+        const result = await processSandboxBilling(sandbox, org, now, {
           runId: run.id,
           leaseToken,
         });
@@ -1030,6 +882,18 @@ async function handleAgentBilling(c: AppContext): Promise<Response> {
           },
         );
         applyRunItem(item);
+      }
+    }
+
+    if (sandboxesShutdown > 0) {
+      try {
+        await provisioningJobService.triggerImmediate(c.env);
+      } catch (error) {
+        // error-policy:J7 dispatch diagnostics must not erase durable stop receipts;
+        // daemon polling and recoverAgentStops retry the committed jobs.
+        logger.warn("[Agent Billing] Immediate stop dispatch failed", {
+          error,
+        });
       }
     }
 

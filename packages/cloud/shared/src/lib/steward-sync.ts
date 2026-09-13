@@ -1112,9 +1112,8 @@ export async function syncUserFromSteward(params: StewardSyncParams): Promise<St
     throw new Error(`Failed to create organization for Steward user ${stewardUserId}`);
   }
 
-  // The organization insert above atomically establishes the fixed signup
-  // balance. Purchased credits remain exclusive to explicit funding paths.
-  const initialCreditsGranted = true;
+  // Identity creation cannot fund compute or inference.
+  const initialCreditsGranted = false;
   const initialFreeCreditsUsd = SIGNUP_CREDIT_POLICY.automaticGrantUsd;
 
   // Create user, handle race conditions

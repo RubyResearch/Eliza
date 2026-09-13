@@ -6,6 +6,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
 import { closeDatabaseConnectionsForTests, dbWrite } from "../../db/client";
 import { type AgentSandbox, agentSandboxesRepository } from "../../db/repositories/agent-sandboxes";
@@ -238,6 +239,13 @@ beforeAll(async () => {
     for (const ddl of PROVISIONING_JOB_TEST_TABLES) {
       await dbWrite.execute(sql.raw(ddl));
     }
+    const heartbeatMigration = readFileSync(
+      new URL("../../db/migrations/0386_agent_heartbeat_lifecycle_revision.sql", import.meta.url),
+      "utf8",
+    );
+    for (const statement of heartbeatMigration.split("--> statement-breakpoint")) {
+      if (statement.trim()) await dbWrite.execute(sql.raw(statement));
+    }
     const { getPgliteClientForTests } = await import("../../db/client");
     await installOrganizationPolicyTestSchema((query) => getPgliteClientForTests().exec(query));
   } catch {
@@ -370,6 +378,37 @@ describe("ElizaSandboxService snapshot initial authority", () => {
 });
 
 describe("ElizaSandboxService snapshot post-capture authority", () => {
+  test("a heartbeat during capture preserves the backup and its metadata", async () => {
+    const sandbox = await seedSandbox();
+    const capturedState = state({ config: { heartbeatDuringCapture: true } });
+    const heartbeatAt = new Date("2026-09-13T00:01:00Z");
+    globalThis.fetch = installSnapshotFetch({
+      responseState: capturedState,
+      beforeResponse: async () => {
+        await dbWrite
+          .update(agentSandboxes)
+          .set({ last_heartbeat_at: heartbeatAt, updated_at: heartbeatAt })
+          .where(eq(agentSandboxes.id, sandbox.id));
+      },
+    });
+    const result = await new ElizaSandboxService().snapshot(
+      sandbox.id,
+      sandbox.organization_id,
+      "manual",
+    );
+    expect(result).toMatchObject({ success: true, backup: { state_data: capturedState } });
+    expect(await backupCount(sandbox.id)).toBe(1);
+    const [after] = await dbWrite
+      .select({
+        heartbeatAt: agentSandboxes.last_heartbeat_at,
+        backupAt: agentSandboxes.last_backup_at,
+      })
+      .from(agentSandboxes)
+      .where(eq(agentSandboxes.id, sandbox.id));
+    expect(after.heartbeatAt).toEqual(heartbeatAt);
+    expect(after.backupAt).toBeInstanceOf(Date);
+  });
+
   test("tier loss after fetch wins over every later authority field", async () => {
     await expectPostFetchRefusal(async (sandbox) => {
       await dbWrite

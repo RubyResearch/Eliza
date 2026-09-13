@@ -4,7 +4,7 @@
  * handling are consistent. WHY one path: avoids drift between SIWE/topup/wallet-auth.
  */
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getAddress } from "viem";
 import type { DbTransaction } from "../../db/client";
 import { writeTransaction } from "../../db/helpers";
@@ -32,25 +32,12 @@ export interface FindOrCreateWalletOptions {
   walletProven?: boolean;
 }
 
-type WalletSignupResult =
-  | {
-      user: UserWithOrganization;
-      isNewAccount: false;
-      initialCreditsGranted: false;
-      initialFreeCreditsUsd: 0;
-    }
-  | {
-      user: UserWithOrganization;
-      isNewAccount: true;
-      initialCreditsGranted: true;
-      initialFreeCreditsUsd: typeof SIGNUP_CREDIT_POLICY.automaticGrantUsd;
-    }
-  | {
-      user: UserWithOrganization;
-      isNewAccount: true;
-      initialCreditsGranted: false;
-      initialFreeCreditsUsd: 0;
-    };
+type WalletSignupResult = {
+  user: UserWithOrganization;
+  isNewAccount: boolean;
+  initialCreditsGranted: false;
+  initialFreeCreditsUsd: 0;
+};
 
 /**
  * Unique-violation detection that survives driver wrapping: drizzle raises
@@ -83,7 +70,7 @@ async function createOrFindWalletOrg(params: {
   tx: DbTransaction;
   slug: string;
   name: string;
-}): Promise<{ organization: Organization; initialCreditsGranted: boolean }> {
+}): Promise<Organization> {
   const [created] = await params.tx
     .insert(organizations)
     .values({
@@ -93,39 +80,15 @@ async function createOrFindWalletOrg(params: {
     })
     .onConflictDoNothing()
     .returning();
-  if (created) {
-    return {
-      organization: created,
-      initialCreditsGranted: true,
-    };
-  }
+  if (created) return created;
 
-  // A wallet slug can be reserved before its owner row exists (for example by
-  // an older x402/provisioning path). Adopt an untouched legacy-zero row into
-  // the same canonical opening balance as a newly inserted signup; otherwise
-  // the result would claim the grant while returning an unfunded organization.
-  const [adoptedLegacyOpeningBalance] = await params.tx
-    .update(organizations)
-    .set({ credit_balance: SIGNUP_CREDIT_POLICY.openingBalanceUsd })
-    .where(
-      and(
-        eq(organizations.slug, params.slug),
-        eq(organizations.credit_balance, String(SIGNUP_CREDIT_POLICY.legacyOpeningBalanceUsd)),
-        eq(organizations.balance_revision, 0),
-      ),
-    )
-    .returning();
-  const org = adoptedLegacyOpeningBalance ?? (await findOrgBySlugForWrite(params.tx, params.slug));
+  // A pre-existing wallet organization may already carry purchased or historical
+  // credits. Adopting its owner must neither add signup funds nor replace them.
+  const org = await findOrgBySlugForWrite(params.tx, params.slug);
   if (!org) {
     throw new Error("Organization creation failed and could not find existing org");
   }
-  return {
-    organization: org,
-    // A conflict can mean a concurrent creator won with the canonical opening
-    // balance. Report the balance the adopted organization actually carries;
-    // legacy zero-dollar orphan rows must not be presented as credited.
-    initialCreditsGranted: Number(org.credit_balance) === SIGNUP_CREDIT_POLICY.automaticGrantUsd,
-  };
+  return org;
 }
 
 async function findEvmUserForWrite(
@@ -180,7 +143,7 @@ async function raiseWalletProof(
  * Find user by wallet, or create org + user and return.
  * Address can be any case; stored and slug use lowercase.
  * Used by SIWE, wallet header auth, and x402 topup. New personal organizations
- * receive the fixed signup balance; top-ups and promotion codes stay separate.
+ * start unfunded; top-ups and promotion codes stay separate.
  *
  * `walletProven` decides `users.wallet_verified` and defaults to false — see the
  * option's own note for why the caller must say so explicitly.
@@ -217,7 +180,7 @@ export async function findOrCreateUserByWalletAddress(
         };
       }
 
-      const { organization: org, initialCreditsGranted } = await createOrFindWalletOrg({
+      const org = await createOrFindWalletOrg({
         tx,
         slug,
         name: `Wallet ${address.slice(0, 6)}...${address.slice(-4)}`,
@@ -253,19 +216,12 @@ export async function findOrCreateUserByWalletAddress(
       }
 
       const user: UserWithOrganization = { ...created, organization: org };
-      return initialCreditsGranted
-        ? {
-            user,
-            isNewAccount: true,
-            initialCreditsGranted: true,
-            initialFreeCreditsUsd: SIGNUP_CREDIT_POLICY.automaticGrantUsd,
-          }
-        : {
-            user,
-            isNewAccount: true,
-            initialCreditsGranted: false,
-            initialFreeCreditsUsd: 0,
-          };
+      return {
+        user,
+        isNewAccount: true,
+        initialCreditsGranted: false,
+        initialFreeCreditsUsd: 0,
+      };
     });
   } catch (e) {
     // error-policy:J3 unique-violation race recovery — the losing concurrent
@@ -320,7 +276,7 @@ export async function findOrCreateSolanaUserByWalletAddress(
         };
       }
 
-      const { organization: org, initialCreditsGranted } = await createOrFindWalletOrg({
+      const org = await createOrFindWalletOrg({
         tx,
         slug,
         name: `Solana Wallet ${address.slice(0, 6)}...${address.slice(-4)}`,
@@ -353,19 +309,12 @@ export async function findOrCreateSolanaUserByWalletAddress(
       }
 
       const user: UserWithOrganization = { ...created, organization: org };
-      return initialCreditsGranted
-        ? {
-            user,
-            isNewAccount: true,
-            initialCreditsGranted: true,
-            initialFreeCreditsUsd: SIGNUP_CREDIT_POLICY.automaticGrantUsd,
-          }
-        : {
-            user,
-            isNewAccount: true,
-            initialCreditsGranted: false,
-            initialFreeCreditsUsd: 0,
-          };
+      return {
+        user,
+        isNewAccount: true,
+        initialCreditsGranted: false,
+        initialFreeCreditsUsd: 0,
+      };
     });
   } catch (e) {
     // error-policy:J3 unique-violation race recovery — the losing concurrent

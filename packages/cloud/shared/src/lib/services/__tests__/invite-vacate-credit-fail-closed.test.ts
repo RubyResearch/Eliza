@@ -298,15 +298,16 @@ describe("acceptInvite solo-org vacate — corrupt credit_balance fails closed (
   );
 
   test(
-    "an untouched current five-dollar signup balance still vacates",
+    "an existing five-dollar balance is preserved instead of treated as a new signup allowance",
     async () => {
       expect(pgliteReady).toBe(true);
       const seeded = await seedInviteScenario();
-
-      const accepted = await invitesService.acceptInvite(seeded.token, seeded.inviteeUserId);
-      expect(accepted.status).toBe("accepted");
-      expect((await readUser(seeded.inviteeUserId)).organization_id).toBe(seeded.inviterOrgId);
-      expect(await orgExists(seeded.inviteeOrgId)).toBe(false);
+      await expect(invitesService.acceptInvite(seeded.token, seeded.inviteeUserId)).rejects.toThrow(
+        SOLO_ORG_CREDITS_BLOCK_MESSAGE,
+      );
+      expect((await readUser(seeded.inviteeUserId)).organization_id).toBe(seeded.inviteeOrgId);
+      expect(await readOrgBalance(seeded.inviteeOrgId)).toBe("5.000000");
+      expect(await orgExists(seeded.inviteeOrgId)).toBe(true);
     },
     PGLITE_TIMEOUT,
   );

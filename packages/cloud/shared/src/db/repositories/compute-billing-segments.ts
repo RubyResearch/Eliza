@@ -32,6 +32,7 @@ export async function settleComputeRateSegments(
   if (input.periodEnd <= input.periodStart) return { amount: new Decimal(0), segments: [] };
   const history = await tx
     .select({
+      lifecycle_revision: computeBillingRateSegments.lifecycle_revision,
       billing_state: computeBillingRateSegments.billing_state,
       rate_per_hour: computeBillingRateSegments.rate_per_hour,
       effective_at: computeBillingRateSegments.effective_at,
@@ -57,8 +58,16 @@ export async function settleComputeRateSegments(
     const firstEntry = history[0];
     if (
       firstEntry &&
-      firstEntry.effective_at.getTime() - input.periodStart.getTime() <=
-        INITIAL_RATE_SEGMENT_TRIGGER_GAP_MS
+      (firstEntry.effective_at.getTime() - input.periodStart.getTime() <=
+        INITIAL_RATE_SEGMENT_TRIGGER_GAP_MS ||
+        // A new workload's revision-zero, non-billable segment proves it had
+        // no billable runtime before the INSERT trigger. Transaction start
+        // (created_at) can precede that trigger by more than five seconds under
+        // load. Extend only this explicit zero-rate creation state backward;
+        // later revisions or running states cannot fill missing history.
+        (firstEntry.lifecycle_revision === 0 &&
+          firstEntry.billing_state === "not_billable" &&
+          new Decimal(firstEntry.rate_per_hour).isZero()))
     ) {
       baseIndex = 0;
     }

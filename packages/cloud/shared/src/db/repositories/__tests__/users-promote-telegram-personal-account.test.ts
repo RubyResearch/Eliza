@@ -80,7 +80,7 @@ describe("UsersRepository Telegram account promotion (real PGlite)", () => {
     await closeDatabaseConnectionsForTests();
   });
 
-  test("promotes the continuation-bound account without replacing its user, org, or $5 balance", async () => {
+  test("promotes the continuation-bound account without replacing its user, org, or zero balance", async () => {
     const telegramId = "100000201";
     const provisional = await createTelegramAccount(telegramId);
 
@@ -95,7 +95,7 @@ describe("UsersRepository Telegram account promotion (real PGlite)", () => {
     if (result.status !== "promoted") return;
     expect(result.user.id).toBe(provisional.user.id);
     expect(result.organization.id).toBe(provisional.organization.id);
-    expect(result.organization.credit_balance).toBe("5.000000");
+    expect(result.organization.credit_balance).toBe("0.000000");
     expect(result.user.telegram_id).toBe(telegramId);
 
     const [projection] = await dbWrite

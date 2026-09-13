@@ -47,6 +47,6 @@ export const AGENT_PRICING = {
   },
   /** Warn user when balance drops below this. */
   LOW_CREDIT_WARNING: 2.0,
-  /** Hours between warning and forced shutdown. */
-  GRACE_PERIOD_HOURS: 48,
+  /** No unpaid grace: insufficient funds queue a stop immediately. */
+  GRACE_PERIOD_HOURS: 0,
 } as const;

@@ -51,10 +51,17 @@ const getOrganizationCreditBalance = mock(async () => 0);
 const scheduleShutdownWarning = mock(async () => undefined);
 const suspendSandboxForInsufficientCredits = mock(async () => undefined);
 const shutdownSandbox = mock(async () => ({ success: true }));
-const enqueueAgentSuspendOnce = mock(async () => ({
-  job: { id: "stop-job" },
-  created: true,
-}));
+const enqueueAgentSuspendOnce = mock(
+  async (_input?: {
+    agentId: string;
+    organizationId: string;
+    userId: string;
+    authorization: "billing_request";
+  }) => ({
+    job: { id: "stop-job" },
+    created: true,
+  }),
+);
 const listRecoverableAgentComputeStopIntents = mock(async () => []);
 const rearmRecoverableAgentComputeStopIntentOnce = mock(async () => ({
   id: "recovered-stop-job",
@@ -154,15 +161,31 @@ const recordBillingRunItem = mock(
     return { item, created: true };
   },
 );
-const commitShutdownWarningForRun = mock(
-  async (_input: {
+const enqueueAgentUnfundedStopForRun = mock(
+  async (input: {
     runId: string;
     leaseToken: string;
     sandboxId: string;
     organizationId: string;
     agentName: string;
     now: Date;
-  }) => true,
+  }) => {
+    await enqueueAgentSuspendOnce({
+      agentId: input.sandboxId,
+      organizationId: input.organizationId,
+      userId: runningSandbox.user_id,
+      authorization: "billing_request",
+    });
+    return (
+      await recordBillingRunItem(input, {
+        sandboxId: input.sandboxId,
+        organizationId: input.organizationId,
+        agentName: input.agentName,
+        action: "shutdown",
+        completedAt: input.now,
+      })
+    ).item;
+  },
 );
 const renewBillingRunLease = mock(
   async (runId: string, leaseToken: string, leaseDurationMs: number) => {
@@ -230,7 +253,6 @@ mock.module("@/db/repositories/agent-billing", () => ({
     recordHourlyBilling,
     getOrganizationCreditBalance,
     scheduleShutdownWarning,
-    commitShutdownWarningForRun,
     suspendSandboxForInsufficientCredits,
   },
 }));
@@ -255,6 +277,10 @@ mock.module("@/db/repositories/users", () => ({
   usersRepository: {
     listByOrganization: mock(async () => []),
   },
+}));
+
+mock.module("@/lib/services/agent-unfunded-stop", () => ({
+  enqueueAgentUnfundedStopForRun,
 }));
 
 mock.module("@/lib/services/email", () => ({
@@ -297,7 +323,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
     recordHourlyBilling.mockClear();
     getOrganizationCreditBalance.mockClear();
     scheduleShutdownWarning.mockClear();
-    commitShutdownWarningForRun.mockClear();
+    enqueueAgentUnfundedStopForRun.mockClear();
     suspendSandboxForInsufficientCredits.mockClear();
     shutdownSandbox.mockClear();
     enqueueAgentSuspendOnce.mockClear();
@@ -382,7 +408,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
     });
   });
 
-  test("sends a signed credits.low webhook when an agent runs out of billable balance", async () => {
+  test("queues an immediate stop and signs credits.depleted when balance is insufficient", async () => {
     const response = await app.fetch(
       new Request("https://api.example.test/", {
         headers: { authorization: "Bearer cron-secret" },
@@ -398,12 +424,13 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
       success: true,
       data: {
         sandboxesProcessed: 1,
-        warningsSent: 1,
-        sandboxesShutdown: 0,
+        warningsSent: 0,
+        sandboxesShutdown: 1,
       },
     });
     expect(recordHourlyBilling).toHaveBeenCalledTimes(1);
-    expect(commitShutdownWarningForRun).toHaveBeenCalledTimes(1);
+    expect(enqueueAgentUnfundedStopForRun).toHaveBeenCalledTimes(1);
+    expect(triggerImmediate).toHaveBeenCalledTimes(1);
     expect(webhookFetch).toHaveBeenCalledTimes(1);
 
     const [url, init] = webhookFetch.mock.calls[0] ?? [];
@@ -413,7 +440,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
     const bodyText = String((init as RequestInit).body);
     const body = JSON.parse(bodyText);
     expect(body).toMatchObject({
-      event: "credits.low",
+      event: "credits.depleted",
       cloudAgentId: runningSandbox.id,
       elizaCloudAgentId: runningSandbox.id,
       agentId: "waifu-agent-1",
@@ -434,7 +461,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
     expectSignedWebhook(init as RequestInit, body.timestamp, bodyText);
   });
 
-  test("enqueues suspension and sends credits.depleted webhook after the grace window expires", async () => {
+  test("rechecks previously scheduled shutdowns and signs the durable stop event", async () => {
     const scheduledShutdownAt = new Date(Date.now() - 60_000);
     listBillableSandboxes.mockImplementationOnce(async () => ({
       runningSandboxes: [
@@ -487,7 +514,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
     const body = JSON.parse(bodyText);
     expect(body).toMatchObject({
       event: "credits.depleted",
-      eventId: `agent-billing:${runningSandbox.id}:credits.depleted:${scheduledShutdownAt.toISOString()}`,
+      eventId: expect.stringMatching(/^agent-billing:.*:credits.depleted:/),
       cloudAgentId: runningSandbox.id,
       elizaCloudAgentId: runningSandbox.id,
       agentId: "waifu-agent-1",
@@ -503,7 +530,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
       requiredCredits: 0.01,
       billingStatus: "shutdown_pending",
       status: "running",
-      scheduledShutdownAt: scheduledShutdownAt.toISOString(),
+      scheduledShutdownAt: expect.any(String),
     });
     expectSignedWebhook(init as RequestInit, body.timestamp, bodyText);
   });

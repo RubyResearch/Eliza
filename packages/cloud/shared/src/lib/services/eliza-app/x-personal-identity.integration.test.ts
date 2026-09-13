@@ -70,7 +70,7 @@ async function seedMatureUser(userId: string, suffix: string) {
 }
 
 describe("X personal identity", () => {
-  test("creates one $5 account and reuses it for a retried DM", async () => {
+  test("creates one unfunded account and reuses it for a retried DM", async () => {
     const created = await findOrCreateXPersonalAccount({
       twitterUserId: "111",
       username: "alice",
@@ -84,7 +84,7 @@ describe("X personal identity", () => {
     expect(created.isNew).toBe(true);
     expect(replayed.isNew).toBe(false);
     expect(replayed.user.id).toBe(created.user.id);
-    expect(Number(created.organization.credit_balance)).toBe(5);
+    expect(Number(created.organization.credit_balance)).toBe(0);
     expect(created.user.steward_user_id).toBe("x:111");
     const links = await dbWrite
       .select()

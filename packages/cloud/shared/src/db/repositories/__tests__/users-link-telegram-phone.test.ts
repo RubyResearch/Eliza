@@ -112,7 +112,7 @@ describe("UsersRepository.linkTelegramAndPhoneIdentity (real PGlite)", () => {
     await closeDatabaseConnectionsForTests();
   });
 
-  test("concurrent trusted first texts create one personal account with $5", async () => {
+  test("concurrent trusted first texts create one personal unfunded account", async () => {
     const phone = "+14155550100";
     const attempts = await Promise.all(
       Array.from({ length: 8 }, (_, index) =>
@@ -129,7 +129,7 @@ describe("UsersRepository.linkTelegramAndPhoneIdentity (real PGlite)", () => {
       new Set([attempts[0]?.user.id]),
     );
     expect(attempts.filter((result) => result.isNew)).toHaveLength(1);
-    expect(attempts[0]?.organization.credit_balance).toBe("5.000000");
+    expect(attempts[0]?.organization.credit_balance).toBe("0.000000");
     expect(await dbWrite.select().from(users)).toHaveLength(1);
     expect(await dbWrite.select().from(userIdentities)).toHaveLength(1);
     expect(await dbWrite.select().from(organizations)).toHaveLength(1);

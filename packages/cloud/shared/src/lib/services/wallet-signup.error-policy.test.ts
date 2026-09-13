@@ -133,10 +133,10 @@ describe("wallet-signup fail-closed error policy", () => {
     expect(res.isNewAccount).toBe(true);
     expect(res.user.organization).toBe(racedOrg as never);
     expect(res.user.organization_id).toBe("org-raced");
-    expect(organizationInput).toEqual(expect.objectContaining({ credit_balance: "5.00" }));
-    expect(orgUpdateInput).toEqual(expect.objectContaining({ credit_balance: "5.00" }));
-    expect(res.initialCreditsGranted).toBe(true);
-    expect(res.initialFreeCreditsUsd).toBe(5);
+    expect(organizationInput).toEqual(expect.objectContaining({ credit_balance: "0.00" }));
+    expect(orgUpdateInput).toBeUndefined();
+    expect(res.initialCreditsGranted).toBe(false);
+    expect(res.initialFreeCreditsUsd).toBe(0);
   });
 
   test("internal DB failure during user creation PROPAGATES", async () => {

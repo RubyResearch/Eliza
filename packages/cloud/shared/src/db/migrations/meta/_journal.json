@@ -2584,6 +2584,13 @@
       "when": 1796083200012,
       "tag": "0385_subscription_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 369,
+      "version": "7",
+      "when": 1796083200013,
+      "tag": "0386_agent_heartbeat_lifecycle_revision",
+      "breakpoints": true
     }
   ]
 }

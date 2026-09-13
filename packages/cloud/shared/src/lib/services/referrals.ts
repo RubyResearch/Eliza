@@ -14,7 +14,6 @@ import {
 import { usersRepository } from "../../db/repositories/users";
 import { referralCodes, referralSignups } from "../../db/schemas/referrals";
 import { logger } from "../utils/logger";
-import { creditsService } from "./credits";
 
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
@@ -57,18 +56,18 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 /**
- * Referral and social share rewards service.
+ * Referral attribution, paid-purchase revenue splits and historical rewards.
  *
  * WHY two concepts in one module: Referral codes drive signups and tie revenue to
- * a 50/40/10 split on purchase; social share rewards are also growth incentives
- * and share the same credit/org plumbing. Keeps all "growth reward" logic in one place.
+ * a 50/40/10 split on purchase. Historical social rewards remain readable, but
+ * unpaid acquisition events no longer create credit.
  */
 
 /**
  * Context for app-specific operations.
  * WHY appOwnerId/creatorId: When a user signs up via a miniapp or embed, we need to
  * attribute the 40% and 10% shares to the app owner and creator for calculateRevenueSplits.
- * When appId is set, referred-user bonus goes to app balance instead of org balance.
+ * App context does not authorize a signup or share credit grant.
  */
 interface AppContext {
   appId?: string;
@@ -77,19 +76,18 @@ interface AppContext {
 }
 
 /**
- * Reward amounts (in dollars/credits). WHY minted not carved: Signup/qualified bonuses
- * are customer acquisition cost; we don't deduct them from any purchase so we never
- * risk over-allocating revenue. Revenue share for referrers is handled by the 50/40/10
- * split in calculateRevenueSplits, not by a separate commission.
+ * Unpaid acquisition events never fund hosted compute. Referral attribution and
+ * revenue splits on actual purchases remain available; signup, social linking
+ * and share clicks grant no spendable credit. Historical earnings are retained.
  */
 const REWARDS = {
-  SIGNUP_BONUS: 1.0, // Referrer gets $1 (one cloud credit) on signup.
-  REFERRED_BONUS: 0.5, // New user gets $0.50 (0.5 cloud credit).
-  QUALIFIED_BONUS: 0.5, // Referrer gets $0.50 after social-account qualification.
-  SHARE_X: 0.25,
-  SHARE_FARCASTER: 0.25,
-  SHARE_TELEGRAM: 0.25,
-  SHARE_DISCORD: 0.25,
+  SIGNUP_BONUS: 0,
+  REFERRED_BONUS: 0,
+  QUALIFIED_BONUS: 0,
+  SHARE_X: 0,
+  SHARE_FARCASTER: 0,
+  SHARE_TELEGRAM: 0,
+  SHARE_DISCORD: 0,
 } as const;
 
 /**
@@ -205,7 +203,7 @@ export class ReferralsService {
 
   async applyReferralCode(
     referredUserId: string,
-    organizationId: string,
+    _organizationId: string,
     code: string,
     appContext?: AppContext,
   ): Promise<{ success: boolean; message: string; bonusAmount?: number }> {
@@ -241,7 +239,7 @@ export class ReferralsService {
       };
     }
 
-    // Get referrer's organization to credit them
+    // Require a valid referrer organization for attribution.
     const referrer = await usersRepository.findById(referralCode.user_id);
     if (!referrer?.organization_id) {
       logger.warn("[Referrals] Referrer has no organization", {
@@ -251,9 +249,8 @@ export class ReferralsService {
     }
 
     // Create the signup record
-    let signup: ReferralSignup;
     try {
-      signup = await referralSignupsRepository.create({
+      await referralSignupsRepository.create({
         referral_code_id: referralCode.id,
         referrer_user_id: referralCode.user_id,
         referred_user_id: referredUserId,
@@ -272,37 +269,9 @@ export class ReferralsService {
       throw error;
     }
 
-    // Award bonus to referred user. Always the org balance — the single
-    // ledger app inference debits (#8253); a per-app pool reward would be
-    // unspendable.
-    await creditsService.addCredits({
-      organizationId,
-      amount: REWARDS.REFERRED_BONUS,
-      description: "Referral signup bonus",
-      metadata: {
-        referral_code: normalizedCode,
-        type: "referral_bonus",
-        ...(appContext?.appId && { app_id: appContext.appId }),
-      },
-    });
-
-    // Award signup bonus to referrer (always goes to org balance - referrer is cloud user)
-    await creditsService.addCredits({
-      organizationId: referrer.organization_id,
-      amount: REWARDS.SIGNUP_BONUS,
-      description: "Referral signup bonus - new user joined",
-      metadata: {
-        referred_user_id: referredUserId,
-        type: "referral_signup_bonus",
-      },
-    });
-
-    // PERFORMANCE: Mark signup bonus as credited and update stats in parallel
-    await Promise.all([
-      referralSignupsRepository.markBonusCredited(signup.id, REWARDS.SIGNUP_BONUS),
-      referralCodesRepository.incrementReferrals(referralCode.id),
-      referralCodesRepository.addSignupEarnings(referralCode.id, REWARDS.SIGNUP_BONUS),
-    ]);
+    // Attribution is independent of funding. Do not mint credit or record an
+    // awarded bonus merely because another account supplied a referral code.
+    await referralCodesRepository.incrementReferrals(referralCode.id);
 
     logger.info("[Referrals] Referral code applied", {
       referredUserId,
@@ -315,7 +284,7 @@ export class ReferralsService {
 
     return {
       success: true,
-      message: `You received ${Math.round(REWARDS.REFERRED_BONUS * 100)} bonus credits!`,
+      message: "Referral code applied. Add funds to use hosted agents.",
       bonusAmount: REWARDS.REFERRED_BONUS,
     };
   }
@@ -504,10 +473,9 @@ export class ReferralsService {
 
   /**
    * Check and qualify a referral when the referred user links a social account.
-   * Awards the referrer a qualified bonus.
+   * Retains qualification attribution without awarding unpaid credit.
    *
    * Call this when a user links Farcaster, Twitter, or a wallet.
-   * Note: Qualified bonus always goes to referrer's org balance (they're a cloud user).
    */
   async checkAndQualifyReferral(
     referredUserId: string,
@@ -519,10 +487,10 @@ export class ReferralsService {
       return { qualified: false };
     }
 
-    // Get referrer's organization to credit them
+    // Require a valid referrer organization for qualification attribution.
     const referrer = await usersRepository.findById(signup.referrer_user_id);
     if (!referrer?.organization_id) {
-      logger.warn("[Referrals] Referrer has no organization for qualified bonus", {
+      logger.warn("[Referrals] Referrer has no organization for qualification", {
         referrerId: signup.referrer_user_id,
       });
       return { qualified: false };
@@ -536,22 +504,6 @@ export class ReferralsService {
       return { qualified: false };
     }
 
-    // Award qualified bonus to referrer (always org balance - referrer is cloud user)
-    await creditsService.addCredits({
-      organizationId: referrer.organization_id,
-      amount: REWARDS.QUALIFIED_BONUS,
-      description: "Referral qualified bonus - referred user linked social account",
-      metadata: {
-        referred_user_id: referredUserId,
-        type: "referral_qualified_bonus",
-      },
-    });
-
-    await referralCodesRepository.addQualifiedEarnings(
-      signup.referral_code_id,
-      REWARDS.QUALIFIED_BONUS,
-    );
-
     logger.info("[Referrals] Referral qualified", {
       referredUserId,
       referrerId: signup.referrer_user_id,
@@ -564,82 +516,26 @@ export class ReferralsService {
 
 export class SocialRewardsService {
   /**
-   * Record a share intent and award credits immediately.
-   *
-   * This follows Feed's pattern:
-   * 1. User clicks share button
-   * 2. We record the intent and award credits server-side
-   * 3. Share window opens (client-side)
-   * 4. Daily limit prevents abuse (one share per platform per day)
-   *
-   * Uses atomic check-and-insert to prevent race conditions from concurrent requests.
+   * Sharing is not payment and cannot create spendable credit. Keep the public
+   * response boundary for existing clients, with no reward record or ledger write.
    */
   async claimShareReward(
-    userId: string,
-    organizationId: string,
-    platform: SocialPlatform,
-    shareType: ShareType,
-    shareUrl?: string,
-    appContext?: AppContext,
+    _userId: string,
+    _organizationId: string,
+    _platform: SocialPlatform,
+    _shareType: ShareType,
+    _shareUrl?: string,
+    _appContext?: AppContext,
   ): Promise<{
     success: boolean;
     message: string;
     amount?: number;
     alreadyAwarded?: boolean;
   }> {
-    const rewardAmount = this.getRewardAmount(platform);
-
-    // Atomically check if claimed today and create record if not
-    // This prevents race conditions where multiple concurrent requests could both pass the check
-    const shareRecord = await socialShareRewardsRepository.createIfNotClaimedToday(
-      userId,
-      platform,
-      {
-        share_type: shareType,
-        share_url: shareUrl,
-        credits_awarded: String(rewardAmount),
-      },
-    );
-
-    if (!shareRecord) {
-      return {
-        success: false,
-        message: `Already claimed ${platform} share reward today. Try again tomorrow!`,
-        alreadyAwarded: true,
-      };
-    }
-
-    // Award credits. Always the org balance — the single ledger app
-    // inference debits (#8253); a per-app pool reward would be unspendable.
-    await creditsService.addCredits({
-      organizationId,
-      amount: rewardAmount,
-      description: `Social share reward (${platform})`,
-      metadata: {
-        platform,
-        share_type: shareType,
-        share_url: shareUrl,
-        share_record_id: shareRecord.id,
-        ...(appContext?.appId && { app_id: appContext.appId }),
-      },
-    });
-
-    // Mark as verified (since we're awarding immediately)
-    await socialShareRewardsRepository.markVerified(shareRecord.id);
-
-    logger.info("[Social Rewards] Share reward claimed", {
-      userId,
-      platform,
-      shareType,
-      amount: rewardAmount,
-      shareRecordId: shareRecord.id,
-      appId: appContext?.appId,
-    });
-
     return {
-      success: true,
-      message: `You earned ${Math.round(rewardAmount * 100)} credits for sharing on ${platform}!`,
-      amount: rewardAmount,
+      success: false,
+      message: "Share credit rewards are unavailable. Add funds to use hosted agents.",
+      amount: 0,
       alreadyAwarded: false,
     };
   }
@@ -671,21 +567,6 @@ export class SocialRewardsService {
 
   async getRewardHistory(userId: string, limit = 50): Promise<SocialShareReward[]> {
     return socialShareRewardsRepository.listByUserId(userId, limit);
-  }
-
-  private getRewardAmount(platform: SocialPlatform): number {
-    switch (platform) {
-      case "x":
-        return REWARDS.SHARE_X;
-      case "farcaster":
-        return REWARDS.SHARE_FARCASTER;
-      case "telegram":
-        return REWARDS.SHARE_TELEGRAM;
-      case "discord":
-        return REWARDS.SHARE_DISCORD;
-      default:
-        return 0;
-    }
   }
 }
 
