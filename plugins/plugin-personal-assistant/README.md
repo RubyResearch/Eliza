@@ -520,3 +520,17 @@ state across source categories after recipient filtering. A request already show
 under travel, school or scheduling receives a short follow-up entry; its original
 claim and source binding remain single records. Resolved requests leave that
 summary. Neither a prepared draft nor a successful extraction approves delivery.
+
+## School source retention
+
+School PDF bytes stay in the canonical media store. Each original PDF has a
+private source-link document whose media reference is visible to the existing
+media garbage collector. The record identifies the original PDF and its hash;
+it is not a transcription or an approved agreement obligation. Repeated checks
+reuse the same document instead of accumulating references.
+
+Before retrieving a source, the leased school workflow verifies historical PDF
+hashes and restores their document references. A missing or changed historical
+source fails explicitly and requires recovery of its exact original bytes.
+New PDFs gain their reference before a run can complete, including hash no-ops.
+The workflow does not create another file store, collector, or reference counter.

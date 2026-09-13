@@ -32,6 +32,8 @@ import {
 import type { PdfService } from "@elizaos/plugin-pdf";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { collectReferencedMedia } from "../../../../../packages/agent/src/api/media-runtime.ts";
+import { gcUnreferencedMedia } from "../../../../../packages/agent/src/api/media-store.ts";
 import { tryHandleRuntimePluginRoute } from "../../../../../packages/agent/src/api/runtime-plugin-routes.ts";
 import { LocalFileStorageService } from "../../../../../packages/agent/src/services/file-storage.js";
 import {
@@ -47,7 +49,10 @@ import {
 import { bindMachineAuthIdentityToEntity } from "../../routes/authenticated-entity-principal.js";
 import { MonthlyFamilyPacketService } from "../family-coordination/monthly-packet.js";
 import { exportFamilyWorkspace } from "../family-workflows/workspace-export.js";
-import { SchoolCalendarWorkflow } from "../school/calendar-workflow.js";
+import {
+  CONCORD_SCHOOL_CALENDAR_SOURCE,
+  SchoolCalendarWorkflow,
+} from "../school/calendar-workflow.js";
 import { executeRawSql, sqlQuote } from "../sql.js";
 import {
   AgreementKnowledgeError,
@@ -734,6 +739,37 @@ describe("parenting-agreement knowledge — real PGlite", () => {
         `INSERT INTO app_lifeops.life_school_calendar_runs (agent_id,run_id,source_id,state,trigger_kind,content_sha256,media_url,apply_lease_token,created_at,updated_at) VALUES (${sqlQuote(agentId)},${sqlQuote(runId)},${sqlQuote(sourceId)},'unchanged','manual',${sqlQuote(stored.hash)},${sqlQuote(stored.url)},'internal-executor-lease-canary',${sqlQuote(at)},${sqlQuote(at)})`,
       );
     }
+    await new SchoolCalendarWorkflow(runtime).retainRecordedSources();
+    await new SchoolCalendarWorkflow(runtime).retainRecordedSources();
+    const references = (await runtime.getAllMemories()).filter(
+      (memory) => memory.metadata?.mediaUrl === stored.url,
+    );
+    expect(references).toHaveLength(1);
+    const orphan = await storage.store(
+      pdf("Unreferenced source control"),
+      "application/pdf",
+    );
+    const stateDirectory = process.env.ELIZA_STATE_DIR;
+    if (!stateDirectory) throw new Error("Test state directory is unavailable");
+    const sourcePath = path.join(stateDirectory, "media", stored.fileName);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(sourcePath, old, old);
+    fs.utimesSync(
+      path.join(stateDirectory, "media", orphan.fileName),
+      old,
+      old,
+    );
+    try {
+      gcUnreferencedMedia(
+        collectReferencedMedia(await runtime.getAllMemories(), runtime),
+      );
+      expect(await storage.read(stored.fileName)).toEqual(bytes);
+      expect(await storage.read(orphan.fileName)).toBeNull();
+    } finally {
+      // Restore the fixture even when the retention regression fails, so later
+      // export tests do not inherit a missing source from this diagnostic.
+      await storage.store(bytes, "application/pdf");
+    }
     const exported = readStoredZip(
       (await exportFamilyWorkspace(runtime, SELF_ENTITY_ID)).bytes,
     );
@@ -755,9 +791,60 @@ describe("parenting-agreement knowledge — real PGlite", () => {
     try {
       await storage.delete(stored.url.replace("/api/media/", ""));
       await expect(
+        new SchoolCalendarWorkflow(runtime).retainRecordedSources(),
+      ).rejects.toMatchObject({ code: "SCHOOL_CALENDAR_SOURCE_INTEGRITY" });
+      await expect(
         exportFamilyWorkspace(runtime, SELF_ENTITY_ID),
       ).rejects.toMatchObject({ code: "FAMILY_EXPORT_SOURCE_INTEGRITY" });
       expect(await auditCount()).toEqual(before);
+    } finally {
+      await storage.store(bytes, "application/pdf");
+    }
+  });
+
+  it("retains a newly retrieved school PDF through the real source workflow and garbage collector", async () => {
+    const bytes = pdf("Newly retrieved synthetic school calendar");
+    const workflow = new SchoolCalendarWorkflow(runtime, {
+      lookupFn: async () => [{ address: "93.184.216.34", family: 4 }],
+      pinnedFetchImpl: async ({ url }) =>
+        url.pathname.endsWith(".pdf")
+          ? new Response(new Uint8Array(bytes), {
+              headers: { "content-type": "application/pdf" },
+            })
+          : new Response(
+              '<a href="https://resources.finalsite.net/CPSCCRSD2026-2027SchoolCalendar.pdf">Calendar</a>',
+              {
+                headers: { "content-type": "text/html" },
+              },
+            ),
+      extractPdfText: async () => "2026-09-01 | First day of school",
+    });
+    const result = await workflow.run({
+      ...CONCORD_SCHOOL_CALENDAR_SOURCE,
+      sourceId: "new-source-retention",
+    });
+    if (result.state !== "awaiting_approval")
+      throw new Error("Expected a source plan");
+    const stateDirectory = process.env.ELIZA_STATE_DIR;
+    if (!stateDirectory) throw new Error("Test state directory is unavailable");
+    const fileName = `${result.plan.contentSha256}.pdf`;
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(path.join(stateDirectory, "media", fileName), old, old);
+    const storage = runtime.getService<IFileStorageService>(
+      ServiceType.REMOTE_FILES,
+    );
+    if (!storage) throw new Error("Canonical file storage is unavailable");
+    try {
+      gcUnreferencedMedia(
+        collectReferencedMedia(await runtime.getAllMemories(), runtime),
+      );
+      const exported = readStoredZip(
+        (await exportFamilyWorkspace(runtime, SELF_ENTITY_ID)).bytes,
+      );
+      expect(exported.get(`school/${fileName}`)).toEqual(bytes);
+      expect(
+        (await workflow.status("new-source-retention")).lastRun?.state,
+      ).toBe("awaiting_approval");
     } finally {
       await storage.store(bytes, "application/pdf");
     }
