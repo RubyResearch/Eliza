@@ -16,6 +16,7 @@ import {
   truncateWellFormed,
 } from "@elizaos/core";
 import { PostBugReportRequestSchema } from "@elizaos/shared";
+import { sweepExpiredEntries } from "./memory-bounds.ts";
 
 export const DEFAULT_BUG_REPORT_REPO = "elizaOS/eliza";
 export const BUG_REPORT_REPO_ENV_KEY = "ELIZA_BUG_REPORT_REPO";
@@ -78,17 +79,6 @@ function getGithubNewIssueUrl(repo: string): string {
 const BUG_REPORT_WINDOW_MS = 10 * 60 * 1000;
 const BUG_REPORT_MAX_SUBMISSIONS = 5;
 const bugReportAttempts = new Map<string, { count: number; resetAt: number }>();
-
-function sweepExpiredEntries(
-  map: Map<string, { count: number; resetAt: number }>,
-  now: number,
-  threshold: number,
-): void {
-  if (map.size <= threshold) return;
-  for (const [key, value] of map) {
-    if (now > value.resetAt) map.delete(key);
-  }
-}
 
 export function rateLimitBugReport(ip: string | null): boolean {
   const key = ip ?? "unknown";

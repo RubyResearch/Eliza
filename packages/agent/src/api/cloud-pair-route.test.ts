@@ -15,6 +15,7 @@ import {
 } from "@elizaos/shared/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __cloudPairRateLimitBucketCountForTests,
   __resetCloudPairRateLimitForTests,
   handleStandaloneCloudPairRoute,
 } from "./cloud-pair-route.ts";
@@ -1001,5 +1002,127 @@ describe("handleStandaloneCloudPairRoute", () => {
       "https://cloud-staging.eliza.app/cloud/agents",
     );
     expect(harness.body()).not.toContain("www.elizacloud.ai");
+  });
+});
+
+describe("cloud-pair rate-limit bucket sweeping", () => {
+  it("evicts expired buckets once the map passes the sweep threshold (#29715)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Distinct admitted loopback peers each mint one bucket; none expire
+      // during the window, so the map grows past the 100-entry threshold.
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(new Response(JSON.stringify({}), { status: 410 })),
+      );
+      for (let host = 1; host <= 120; host++) {
+        const harness = fakeRes();
+        await handleStandaloneCloudPairRoute(
+          fakeReq({
+            pathname: "/pair",
+            search: "?token=pair-token",
+            ip: `127.0.0.${host}`,
+          }),
+          harness.res,
+        );
+      }
+      expect(__cloudPairRateLimitBucketCountForTests()).toBe(120);
+
+      // Past the 60s window every bucket is expired; the next consume
+      // sweeps them and leaves only the freshly minted bucket behind.
+      vi.advanceTimersByTime(61_000);
+      const harness = fakeRes();
+      await handleStandaloneCloudPairRoute(
+        fakeReq({
+          pathname: "/pair",
+          search: "?token=pair-token",
+          ip: "127.0.0.200",
+        }),
+        harness.res,
+      );
+      expect(__cloudPairRateLimitBucketCountForTests()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an unexpired bucket when the sweep threshold is not reached", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({}), { status: 410 })),
+    );
+    const harness = fakeRes();
+    await handleStandaloneCloudPairRoute(
+      fakeReq({
+        pathname: "/pair",
+        search: "?token=pair-token",
+        ip: "127.0.0.1",
+      }),
+      harness.res,
+    );
+    // Below the threshold nothing is evicted: small maps keep their state
+    // so the per-peer limit stays enforced within the window.
+    expect(__cloudPairRateLimitBucketCountForTests()).toBe(1);
+  });
+
+  it("pins the exact expiry instant: limiter resets at resetAt, sweep deletes only strictly past it", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(new Response(JSON.stringify({}), { status: 410 })),
+      );
+      for (let host = 1; host <= 120; host++) {
+        const harness = fakeRes();
+        await handleStandaloneCloudPairRoute(
+          fakeReq({
+            pathname: "/pair",
+            search: "?token=pair-token",
+            ip: `127.0.0.${host}`,
+          }),
+          harness.res,
+        );
+      }
+      expect(__cloudPairRateLimitBucketCountForTests()).toBe(120);
+
+      // At now === resetAt the limiter already treats the peer's bucket as
+      // expired (resetAt <= now mints a fresh window) while the sweep's
+      // strict now > resetAt predicate declines to delete it — the documented
+      // one-tick gap between the two checks.
+      vi.advanceTimersByTime(60_000);
+      const boundary = fakeRes();
+      await handleStandaloneCloudPairRoute(
+        fakeReq({
+          pathname: "/pair",
+          search: "?token=pair-token",
+          ip: "127.0.0.1",
+        }),
+        boundary.res,
+      );
+      expect(__cloudPairRateLimitBucketCountForTests()).toBe(120);
+
+      // One tick later the sweep deletes every strictly expired bucket; only
+      // the bucket 127.0.0.1 just reset survives, so the sweep does not
+      // over-exclude live state.
+      vi.advanceTimersByTime(1);
+      const after = fakeRes();
+      await handleStandaloneCloudPairRoute(
+        fakeReq({
+          pathname: "/pair",
+          search: "?token=pair-token",
+          ip: "127.0.0.1",
+        }),
+        after.res,
+      );
+      expect(__cloudPairRateLimitBucketCountForTests()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

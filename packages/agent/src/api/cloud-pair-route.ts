@@ -29,6 +29,7 @@ import {
   renderCloudPairHandoffHtml,
   resolveCloudPairAgentIdFromEnv,
 } from "@elizaos/shared/contracts";
+import { sweepExpiredEntries } from "./memory-bounds.ts";
 import { resolveDirectRequestOrigin } from "./request-origin.js";
 
 const RELAY_TIMEOUT_MS = 15_000;
@@ -46,8 +47,18 @@ export function __resetCloudPairRateLimitForTests(): void {
   rateBuckets.clear();
 }
 
+/** Test-only observation of bucket-map growth for the sweep regression. */
+export function __cloudPairRateLimitBucketCountForTests(): number {
+  return rateBuckets.size;
+}
+
 function rateLimitConsume(key: string | null): boolean {
   const now = Date.now();
+  // A peer that pairs once otherwise leaves its bucket for the process
+  // lifetime. Sweeping is gated on map size (threshold 100, the same as both
+  // sibling limiters); past that gate every consume scans the map — cheap at
+  // these sizes, and the trade the siblings already accept (#29715).
+  sweepExpiredEntries(rateBuckets, now, 100);
   const bucketKey = key || "unknown";
   const current = rateBuckets.get(bucketKey);
   if (!current || current.resetAt <= now) {
