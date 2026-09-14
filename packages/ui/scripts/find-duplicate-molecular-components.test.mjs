@@ -415,9 +415,57 @@ test("molecular artifact checks compare formatted JSON by schema and data", () =
     () =>
       assertMolecularArtifactsCurrent(report, {
         ...artifacts,
-        json: JSON.stringify({ ...report, scannedFiles: 1 }, null, 4),
+        json: JSON.stringify({ ...report, eligibleComponents: 1 }, null, 4),
       }),
     /artifacts are stale: json/,
+  );
+});
+
+// The scan count is a statistic of the tree, not a disposition. Comparing it
+// made the check fail for every PR that added or removed a React file until
+// someone regenerated the artifact, and the regeneration was then raced
+// (#30885). Only the reviewable content decides staleness.
+test("molecular artifact checks tolerate a drifted scan count but not drifted content", () => {
+  const report = {
+    canonicalContracts: [],
+    clusters: [],
+    eligibleComponents: 0,
+    scannedFiles: 907,
+  };
+  const artifacts = serializeMolecularReport(report);
+  const driftedCount = serializeMolecularReport({
+    ...report,
+    scannedFiles: 908,
+  });
+  assert.match(driftedCount.markdown, /Scanned 908 maintained React files\./);
+  assert.match(artifacts.markdown, /Scanned 907 maintained React files\./);
+
+  assert.doesNotThrow(() =>
+    assertMolecularArtifactsCurrent(report, driftedCount),
+  );
+  assert.doesNotThrow(() =>
+    assertMolecularArtifactsCurrent(report, {
+      json: driftedCount.json,
+      markdown: artifacts.markdown,
+    }),
+  );
+
+  const driftedContent = serializeMolecularReport({
+    ...report,
+    eligibleComponents: 1,
+    scannedFiles: 908,
+  });
+  assert.throws(
+    () => assertMolecularArtifactsCurrent(report, driftedContent),
+    /artifacts are stale: json, markdown/,
+  );
+  assert.throws(
+    () =>
+      assertMolecularArtifactsCurrent(report, {
+        json: artifacts.json,
+        markdown: driftedContent.markdown,
+      }),
+    /artifacts are stale: markdown/,
   );
 });
 

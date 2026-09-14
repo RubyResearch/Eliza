@@ -817,16 +817,44 @@ export function serializeMolecularReport(report) {
   };
 }
 
+// The scan count is a statistic of the tree, not a disposition: it moves
+// whenever any PR adds or removes a React file, and comparing it made
+// `--check` fail for every such PR until someone regenerated the artifact,
+// which two people then raced to land. Regeneration still records the real
+// count; the check compares only the reviewable content around it.
+const SCAN_COUNT_SENTENCE = /^Scanned \d+ maintained React files\./m;
+
+function withoutScanCount(report) {
+  if (typeof report !== "object" || report === null) return report;
+  const { scannedFiles: _scannedFiles, ...content } = report;
+  return content;
+}
+
+function withoutMarkdownScanCount(markdown) {
+  return markdown.replace(
+    SCAN_COUNT_SENTENCE,
+    "Scanned N maintained React files.",
+  );
+}
+
 export function assertMolecularArtifactsCurrent(report, artifacts) {
   const stale = [];
   try {
-    if (!isDeepStrictEqual(JSON.parse(artifacts.json), report)) {
+    if (
+      !isDeepStrictEqual(
+        withoutScanCount(JSON.parse(artifacts.json)),
+        withoutScanCount(report),
+      )
+    ) {
       stale.push("json");
     }
   } catch {
     stale.push("json");
   }
-  if (artifacts.markdown !== renderMolecularMarkdown(report)) {
+  if (
+    withoutMarkdownScanCount(artifacts.markdown) !==
+    withoutMarkdownScanCount(renderMolecularMarkdown(report))
+  ) {
     stale.push("markdown");
   }
   if (stale.length > 0) {
