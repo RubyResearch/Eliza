@@ -1,0 +1,17 @@
+{
+  "package": "@orkid-labs/plugin-orkid",
+  "repository": "github:orkid-labs/plugin-orkid",
+  "kind": "plugin",
+  "description": "Orkid gasless swap engine integration — quote, execute, dry-run, confirm, and track swaps via @orkid-labs/sdk",
+  "homepage": "https://github.com/orkid-labs/plugin-orkid",
+  "version": "2.0.4",
+  "tags": [
+    "orkid",
+    "swap",
+    "defi",
+    "base",
+    "ethereum",
+    "arbitrum",
+    "polygon"
+  ]
+}

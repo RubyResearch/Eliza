@@ -414,6 +414,53 @@
       "registryKind": "plugin",
       "directory": null
     },
+    "@orkid-labs/plugin-orkid": {
+      "git": {
+        "repo": "orkid-labs/plugin-orkid",
+        "v0": {
+          "branch": null
+        },
+        "v1": {
+          "branch": null
+        },
+        "v2": {
+          "branch": "main"
+        }
+      },
+      "npm": {
+        "repo": "@orkid-labs/plugin-orkid",
+        "v0": null,
+        "v1": null,
+        "v2": "2.0.4"
+      },
+      "supports": {
+        "v0": false,
+        "v1": false,
+        "v2": true
+      },
+      "description": "Orkid gasless swap engine integration — quote, execute, dry-run, confirm, and track swaps via @orkid-labs/sdk",
+      "homepage": "https://github.com/orkid-labs/plugin-orkid",
+      "topics": [
+        "orkid",
+        "swap",
+        "defi",
+        "base",
+        "ethereum",
+        "arbitrum",
+        "polygon"
+      ],
+      "stargazers_count": 0,
+      "language": "TypeScript",
+      "origin": "third-party",
+      "source": "community",
+      "support": "community",
+      "builtIn": false,
+      "firstParty": false,
+      "thirdParty": true,
+      "kind": "plugin",
+      "registryKind": "plugin",
+      "directory": null
+    },
     "@rati-osf/plugin-ruby-high": {
       "git": {
         "repo": "cenetex/plugin-ruby-high",
