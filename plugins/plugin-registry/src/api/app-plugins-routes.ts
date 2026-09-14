@@ -2008,7 +2008,8 @@ export async function handlePluginsCompatRoutes(
       (config.env as Record<string, string> | undefined)?.[key] ??
       null;
     // The env/config fallback may itself be a `vault://KEY` sentinel. Resolve
-    // it once. If the vault still misses, return null rather than the sentinel.
+    // it once. If the vault still misses, return null rather than the sentinel;
+    // any other vault failure is the same outage the outer lookup reports.
     if (typeof fallbackValue === "string" && isVaultRef(fallbackValue)) {
       const innerKey = parseVaultRef(fallbackValue);
       if (innerKey) {
@@ -2018,8 +2019,18 @@ export async function handlePluginsCompatRoutes(
             sendJsonResponse(res, 200, { ok: true, value: inner });
             return true;
           }
-        } catch {
-          // fall through to null
+        } catch (err) {
+          // error-policy:J1 only a genuine miss degrades to `value: null`;
+          // a locked or unreachable vault is answered as a structured 500.
+          if (!(err instanceof VaultMissError)) {
+            logger.warn(
+              `[api/plugins] Vault reveal failed for ${key} via ${fallbackValue}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            sendJsonErrorResponse(res, 500, "Vault reveal failed");
+            return true;
+          }
         }
       }
       sendJsonResponse(res, 200, { ok: true, value: null });

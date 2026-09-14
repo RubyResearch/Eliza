@@ -14,7 +14,11 @@ const mocks = vi.hoisted(() => ({
   saveElizaConfig: vi.fn(),
   sendJson: vi.fn(),
   sendJsonError: vi.fn(),
+  vaultGet: vi.fn(),
+  vaultReveal: vi.fn(),
 }));
+
+const VAULT_REF_PREFIX = "vault://";
 
 vi.mock("@elizaos/agent", () => ({
   applyPluginRuntimeMutation: vi.fn(),
@@ -26,9 +30,15 @@ vi.mock("@elizaos/agent", () => ({
   discoverPluginsFromManifest: vi.fn(() => []),
   findPrimaryEnvKey: vi.fn((keys: string[]) => keys[0] ?? null),
   isAdvancedCapabilityPluginId: vi.fn(() => false),
-  isVaultRef: vi.fn(() => false),
+  isVaultRef: (value: unknown) =>
+    typeof value === "string" &&
+    value.startsWith(VAULT_REF_PREFIX) &&
+    value.length > VAULT_REF_PREFIX.length,
   loadElizaConfig: mocks.loadElizaConfig,
-  parseVaultRef: vi.fn(),
+  parseVaultRef: (value: string) =>
+    value.startsWith(VAULT_REF_PREFIX)
+      ? value.slice(VAULT_REF_PREFIX.length)
+      : null,
   readBundledPluginPackageMetadata: vi.fn(),
   resolveAdvancedCapabilitiesEnabled: vi.fn(() => false),
   saveElizaConfig: mocks.saveElizaConfig,
@@ -56,7 +66,7 @@ vi.mock("@elizaos/registry/first-party", () => ({
 vi.mock("@elizaos/app-core/services/vault-mirror", () => ({
   _resetSharedVaultForTesting: vi.fn(),
   mirrorPluginSensitiveToVault: vi.fn(() => Promise.resolve({ failures: [] })),
-  sharedVault: {},
+  sharedVault: () => ({ get: mocks.vaultGet, reveal: mocks.vaultReveal }),
 }));
 
 vi.mock("@elizaos/core", async (importOriginal) => ({
@@ -92,9 +102,15 @@ vi.mock("@elizaos/shared", () => ({
 }));
 
 vi.mock("@elizaos/vault", () => ({
-  VaultMissError: class VaultMissError extends Error {},
+  VaultMissError: class VaultMissError extends Error {
+    constructor(readonly key: string) {
+      super(`vault: no entry for ${JSON.stringify(key)}`);
+      this.name = "VaultMissError";
+    }
+  },
 }));
 
+import { VaultMissError } from "@elizaos/vault";
 import {
   analyzePluginStateDrift,
   buildPluginListResponse,
@@ -203,6 +219,8 @@ describe("app plugin compatibility routes", () => {
     mocks.readCompatJsonBody.mockResolvedValue({});
     mocks.sendJson.mockClear();
     mocks.sendJsonError.mockClear();
+    mocks.vaultGet.mockReset();
+    mocks.vaultReveal.mockReset();
   });
 
   it("rejects undeclared config keys without saving", () => {
@@ -1258,5 +1276,61 @@ describe("app plugin compatibility routes", () => {
       "Invalid plugin path",
     );
     expect(mocks.saveElizaConfig).toHaveBeenCalledTimes(saveCallCount);
+  });
+
+  describe("POST /api/plugins/:id/reveal vault:// fallback", () => {
+    async function reveal(key: string) {
+      mocks.readCompatJsonBody.mockResolvedValue({ key });
+      return handlePluginsCompatRoutes(
+        { method: "POST", url: "/api/plugins/openai/reveal" } as never,
+        {} as never,
+        { current: null } as never,
+      );
+    }
+
+    beforeEach(() => {
+      delete process.env.OPENAI_API_KEY;
+      currentConfig.env = { OPENAI_API_KEY: "vault://INNER_OPENAI" };
+      mocks.vaultReveal.mockRejectedValue(new VaultMissError("OPENAI_API_KEY"));
+    });
+
+    it("answers 500 when the inner vault lookup fails for a reason other than a miss", async () => {
+      mocks.vaultGet.mockRejectedValue(
+        new Error("keychain locked: unlock the login keychain and retry"),
+      );
+
+      await expect(reveal("OPENAI_API_KEY")).resolves.toBe(true);
+
+      expect(mocks.vaultGet).toHaveBeenCalledWith("INNER_OPENAI");
+      expect(mocks.sendJson).not.toHaveBeenCalled();
+      expect(mocks.sendJsonError).toHaveBeenCalledWith(
+        expect.anything(),
+        500,
+        "Vault reveal failed",
+      );
+    });
+
+    it("answers value: null when both the outer and the inner lookups miss", async () => {
+      mocks.vaultGet.mockRejectedValue(new VaultMissError("INNER_OPENAI"));
+
+      await expect(reveal("OPENAI_API_KEY")).resolves.toBe(true);
+
+      expect(mocks.sendJsonError).not.toHaveBeenCalled();
+      expect(mocks.sendJson).toHaveBeenCalledWith(expect.anything(), 200, {
+        ok: true,
+        value: null,
+      });
+    });
+
+    it("answers the inner value when the vault:// fallback resolves", async () => {
+      mocks.vaultGet.mockResolvedValue("sk-inner");
+
+      await expect(reveal("OPENAI_API_KEY")).resolves.toBe(true);
+
+      expect(mocks.sendJson).toHaveBeenCalledWith(expect.anything(), 200, {
+        ok: true,
+        value: "sk-inner",
+      });
+    });
   });
 });
