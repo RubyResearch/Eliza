@@ -11,6 +11,7 @@ import {
   observeGatewayWake,
   refreshGatewayActivity,
   resolveGatewayAgentServer,
+  resolveKedaCooldownSeconds,
   wakeGatewayServer,
 } from "@elizaos/cloud-services-common/gateway-routing";
 import { reacquireAuthHeader } from "./auth";
@@ -18,7 +19,9 @@ import { getHashTargets, refreshHashRing } from "./hash-router";
 import { logger } from "./logger";
 import type { GatewayRedis } from "./redis";
 
-const KEDA_COOLDOWN_SECONDS = Number(process.env.KEDA_COOLDOWN_SECONDS ?? 900);
+const KEDA_COOLDOWN_SECONDS = resolveKedaCooldownSeconds(
+  process.env.KEDA_COOLDOWN_SECONDS,
+);
 const FORWARD_TIMEOUT_MS = 30_000;
 const MESSAGE_FORWARD_TIMEOUT_MS = 75_000;
 const RETRY_ATTEMPTS = 5;

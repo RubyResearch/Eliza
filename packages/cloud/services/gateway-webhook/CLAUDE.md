@@ -190,7 +190,8 @@ Other:
   agent-server pods.
 - `PORT` (default 3000; `dev`/`start` scripts set 3002), `POD_NAME` /
   `HOSTNAME`.
-- `KEDA_COOLDOWN_SECONDS` (default 900) — TTL on the KEDA activity key.
+- `KEDA_COOLDOWN_SECONDS` (default 900) — TTL on the KEDA activity key; must be
+  a positive integer, otherwise the router refuses to load at boot.
 - `TWILIO_PUBLIC_URL`, `TWILIO_SMS_COST_PER_SEGMENT_USD` — Twilio adapter /
   billing tuning.
 - Per-project secrets are read via `getProjectEnv(project, KEY)`: labeled k8s

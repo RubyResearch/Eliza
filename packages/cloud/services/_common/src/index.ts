@@ -16,12 +16,15 @@ export {
   postGatewayTarget,
 } from "./gateway-forward";
 export {
+  DEFAULT_KEDA_COOLDOWN_SECONDS,
   type GatewayRoutingRedis,
   type GatewayServerLookup,
   type GatewayWakeDependencies,
+  KEDA_COOLDOWN_ENV,
   observeGatewayWake,
   refreshGatewayActivity,
   resolveGatewayAgentServer,
+  resolveKedaCooldownSeconds,
   wakeGatewayServer,
 } from "./gateway-routing";
 export {
@@ -35,6 +38,11 @@ export {
   identityLinkReply,
   normalizeIdentityLinkCodeBody,
 } from "./identity-link-code";
+export {
+  invalidIntegerEnvError,
+  parseIntegerEnvValue,
+  parsePositiveIntegerEnvValue,
+} from "./integer-env";
 export {
   DEFAULT_K8S_WAKE_TIMEOUT_MS,
   type K8sDeploymentWakeOptions,

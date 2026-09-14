@@ -11,6 +11,7 @@ import {
   observeGatewayWake,
   refreshGatewayActivity,
   resolveGatewayAgentServer,
+  resolveKedaCooldownSeconds,
   wakeGatewayServer,
 } from "@elizaos/cloud-services-common/gateway-routing";
 
@@ -23,7 +24,9 @@ export interface GatewayRoutingRedis extends CommonGatewayRoutingRedis {
   expire(key: string, seconds: number): Promise<number>;
 }
 
-const KEDA_COOLDOWN_SECONDS = Number(process.env.KEDA_COOLDOWN_SECONDS ?? 900);
+const KEDA_COOLDOWN_SECONDS = resolveKedaCooldownSeconds(
+  process.env.KEDA_COOLDOWN_SECONDS,
+);
 const FORWARD_TIMEOUT_MS = 30_000;
 const RETRY_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 2_000;

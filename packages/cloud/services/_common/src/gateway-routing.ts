@@ -1,5 +1,6 @@
 /** Resolves Redis agent routes and performs observable Kubernetes wake requests for gateway hosts. */
 
+import { parsePositiveIntegerEnvValue } from "./integer-env";
 import { patchK8sDeploymentScale } from "./k8s-deployment-wake";
 import {
   readServiceAccountCaCert,
@@ -27,6 +28,23 @@ export async function resolveGatewayAgentServer(
   const serverUrl = await redis.get<string>(`server:${serverName}:url`);
   if (!serverUrl) return { kind: "unreachable", serverName };
   return { kind: "ready", serverName, serverUrl };
+}
+
+export const KEDA_COOLDOWN_ENV = "KEDA_COOLDOWN_SECONDS";
+export const DEFAULT_KEDA_COOLDOWN_SECONDS = 900;
+
+/**
+ * Resolve the KEDA activity TTL from the raw `KEDA_COOLDOWN_SECONDS` value.
+ * Unset applies the default; anything else must be a positive integer because
+ * `redis.expire` rejects `NaN` and a zero TTL expires the key immediately.
+ * Gateways call this at module load so a bad value stops boot, not routing.
+ */
+export function resolveKedaCooldownSeconds(value: string | undefined): number {
+  return parsePositiveIntegerEnvValue(
+    KEDA_COOLDOWN_ENV,
+    value,
+    DEFAULT_KEDA_COOLDOWN_SECONDS,
+  );
 }
 
 export async function refreshGatewayActivity(

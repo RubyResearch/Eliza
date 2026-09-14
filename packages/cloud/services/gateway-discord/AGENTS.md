@@ -89,7 +89,8 @@ Optional features / toggles:
 - `VOICE_MESSAGE_ENABLED` (`"false"` disables the voice path),
   `VOICE_AUDIO_TTL_SECONDS`, `VOICE_CLEANUP_INTERVAL_MS`,
   `CLOUD_API_BASE_URL`/`ELIZAOS_CLOUD_BASE_URL`, `BLOB_READ_WRITE_TOKEN` — voice upload.
-- `KEDA_COOLDOWN_SECONDS` (default 900).
+- `KEDA_COOLDOWN_SECONDS` (default 900) — TTL on the KEDA activity key; must be
+  a positive integer, otherwise the router refuses to load at boot.
 
 ## Conventions / gotchas
 

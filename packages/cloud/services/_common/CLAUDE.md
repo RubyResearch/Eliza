@@ -28,11 +28,18 @@ structured logging, and Kubernetes ServiceAccount helpers. Private
   signal with the operation deadline.
 - `src/identity-link-code.ts` (`./identity-link-code`) — canonical connector
   LINK-code recognition and user-facing confirmation results.
+- `src/integer-env.ts` (`./integer-env`) — lexical integer parsing for gateway
+  environment variables (`parseIntegerEnvValue`,
+  `parsePositiveIntegerEnvValue`); a present-but-invalid value throws a fatal
+  `ElizaError` (`INVALID_GATEWAY_INTEGER_ENV`) naming the variable instead of
+  becoming `NaN` or a default.
 - `src/gateway-auth.ts` (`./gateway-auth`) — strict short-lived gateway token
   response validation plus shared refresh and jittered retry timing.
 - `src/gateway-routing.ts` (`./gateway-routing`) — shared Redis route lookup,
-  KEDA activity refresh, and observed Kubernetes wake requests. Callers retain
-  their public missing-route result shape.
+  KEDA activity refresh, `resolveKedaCooldownSeconds` (the
+  `KEDA_COOLDOWN_SECONDS` boot-time parser, default 900), and observed
+  Kubernetes wake requests. Callers retain their public missing-route result
+  shape.
 - `src/gateway-forward.ts` (`./gateway-forward`) — target selection, fallback,
   wake-on-zero, and bounded HTTP POST attempts. Gateway facades supply response
   parsing, timeout replay policy, and any canonical ingress fallback.

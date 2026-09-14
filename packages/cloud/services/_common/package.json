@@ -12,6 +12,7 @@
     "./k8s-service-account": "./src/k8s-service-account.ts",
     "./k8s-deployment-wake": "./src/k8s-deployment-wake.ts",
     "./identity-link-code": "./src/identity-link-code.ts",
+    "./integer-env": "./src/integer-env.ts",
     "./gateway-auth": "./src/gateway-auth.ts",
     "./hash-router": "./src/hash-router.ts",
     "./personal-shared-failure": "./src/personal-shared-failure.ts",
