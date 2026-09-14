@@ -557,6 +557,98 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
     });
   });
 
+  it.each([
+    "unknown",
+    "sending",
+    "failed",
+    "sent-without-receipt",
+    "wrong-destination",
+  ])(
+    "keeps Discord %s delivery in durable reconciliation and refuses replay",
+    async (status) => {
+      const actual = await vi.importActual<
+        typeof import("../src/actions/lib/messaging-helpers.js")
+      >("../src/actions/lib/messaging-helpers.js");
+      const delivery = {
+        provider: "discord",
+        side: "owner",
+        ok: true,
+        channelId:
+          status === "wrong-destination"
+            ? "another-channel"
+            : "discord-test-channel",
+        deliveryStatus:
+          status === "sent-without-receipt" || status === "wrong-destination"
+            ? "sent"
+            : status,
+        providerMessageId:
+          status === "wrong-destination" ? "discord-observed-1" : null,
+        receipt: null,
+      };
+      const send = vi.fn(async () => delivery);
+      const prepared = await actual.prepareCrossChannelSend({
+        runtime,
+        service: {
+          getDiscordConnectorStatus: async () => ({
+            connected: true,
+            grantedCapabilities: ["discord.send"],
+          }),
+          sendDiscordMessage: send,
+        } as unknown as Parameters<
+          typeof actual.prepareCrossChannelSend
+        >[0]["service"],
+        channel: "discord",
+        target: "discord-test-channel",
+        body: "Synthetic calendar review",
+      });
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: "discord",
+        payload: {
+          action: "send_message",
+          recipient: "discord-test-channel",
+          body: "Synthetic calendar review",
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "approved synthetic test",
+      });
+      const attempt = () =>
+        runApprovalDispatch({
+          queue: realQueue,
+          request: approved,
+          subjectUserId: OWNER_A,
+          prepared: {
+            provider: "discord",
+            dispatch: async (key) => ({
+              value: null,
+              receipt: await prepared.dispatch(key),
+            }),
+          },
+        });
+      expect((await attempt()).kind).toBe("reconciliation_required");
+      const restartedQueue = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      expect(await restartedQueue.byId(request.id, OWNER_A)).toMatchObject({
+        state: "reconciliation_required",
+        execution: {
+          providerReceipt: {
+            provider: "discord",
+            channelId: delivery.channelId,
+            deliveryStatus: delivery.deliveryStatus,
+            messageId: delivery.providerMessageId,
+            receipt: null,
+          },
+        },
+      });
+      await expect(attempt()).rejects.toThrow();
+      expect(send).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("serializes a forced double-approve race to one dispatch", async () => {
     const request = await realQueue.enqueue(sendMessageInput());
     activeQueue = withDecisionBarrier(realQueue);
