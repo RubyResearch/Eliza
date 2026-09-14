@@ -42,6 +42,15 @@ function notFoundMessage(reference: string, available: string[]): string {
   return `${base} Your apps are: ${available.join(", ")}.`;
 }
 
+// Duck-typed view of the SDK CloudApiError `statusCode` (same shape as
+// cloudApiStatusCode in deploy-gate.ts) so the guard below does not need to
+// import the error class.
+function cloudApiStatusCode(err: unknown): number | null {
+  if (typeof err !== "object" || err === null) return null;
+  const value = (err as Record<string, unknown>).statusCode;
+  return typeof value === "number" ? value : null;
+}
+
 export const getAppAction: Action = {
   name: "GET_APP",
   similes: [
@@ -93,7 +102,26 @@ export const getAppAction: Action = {
     try {
       // Id-shaped reference → direct single-app fetch.
       if (looksLikeAppId(reference)) {
-        const { app } = await client.getApp(reference);
+        // A stale/foreign UUID makes getApp throw a 404/403; that must fall
+        // through to list-based resolution and its helpful which-app reply,
+        // not land in the outer catch as a generic error the user can never
+        // retry past. Mirrors resolveApp (#29908) and resolveDomainTargetApp.
+        // The try guards ONLY the fetch: formatting, delivery and the return
+        // stay outside, so a failed callback on the happy path still reaches
+        // the outer catch and reports failure (#29917).
+        let app: Awaited<ReturnType<typeof client.getApp>>["app"] | undefined;
+        try {
+          ({ app } = await client.getApp(reference));
+        } catch (err) {
+          // error-policy:J4 degrade ONLY the benign not-found/forbidden
+          // statuses to the list-based which-app reply. A 5xx from the id
+          // endpoint is an outage, not evidence the app is gone: reporting
+          // not_found there would tell the user their app does not exist
+          // (#29917 review). Anything else is re-raised into the outer catch.
+          const status = cloudApiStatusCode(err);
+          if (status !== 404 && status !== 403) throw err;
+          app = undefined;
+        }
         if (app) {
           const detail = formatAppDetail(app);
           await callback?.({ text: detail, actions: ["GET_APP"] });

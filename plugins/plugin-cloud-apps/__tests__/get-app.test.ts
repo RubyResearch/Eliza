@@ -187,4 +187,141 @@ describe("GET_APP", () => {
         .reason,
     ).toBe("error");
   });
+
+  it("REGRESSION (#29916): a stale/foreign UUID option → not_found which-app reply, not the generic error", async () => {
+    // The UUID must arrive as the planner-supplied option: inlined in the
+    // message text it never reaches the id path (extractAppReference returns
+    // the whole sentence and looksLikeAppId is false). A stale id makes
+    // getApp reject (CloudApiError 404); before the guard that rejection
+    // landed in the outer catch as a retry-never-helps "Cloud API returned
+    // an error" reply. It must now fall through to list-based resolution.
+    const STALE_UUID = "99999999-9999-4999-8999-999999999999";
+    setGetApp((id) => {
+      expect(id).toBe(STALE_UUID);
+      return Promise.reject(
+        Object.assign(new Error("HTTP 404"), {
+          name: "CloudApiError",
+          statusCode: 404,
+          errorBody: { success: false, error: "HTTP 404" },
+        }),
+      );
+    });
+    setListApps(() =>
+      Promise.resolve({
+        success: true,
+        apps: [makeApp({ name: "Acme Bot", slug: "acme-bot" })],
+      }),
+    );
+
+    const cb = captureCallback();
+    const result = await getAppAction.handler(
+      keyedRuntime(),
+      makeMessage("tell me about my app"),
+      undefined,
+      { app: STALE_UUID },
+      cb.fn,
+    );
+
+    expect(result?.success).toBe(false);
+    expect(
+      (requireDefined(result, "action result").data as { reason: string })
+        .reason,
+    ).toBe("not_found");
+    // The which-app reply lists the org's current app, never a retry hint.
+    const reply = cb.calls[0]?.text ?? "";
+    expect(reply).toContain("Acme Bot");
+    expect(reply).not.toContain("Cloud API returned an error");
+  });
+
+  it("REGRESSION (#29917 review): an id-endpoint 5xx is an error, not app-not-found", async () => {
+    // The degrade-to-list guard must be scoped to the benign 404/403 of a
+    // stale/foreign id. A 500 from the id endpoint is an outage; if it fell
+    // through to listApps the user would be told their app does not exist
+    // (with the org's app names listed) when the truth is "try again in a
+    // moment". The 500 must re-raise into the outer catch.
+    const uuid = "11111111-2222-3333-4444-555555555555";
+    let listCalled = false;
+    setListApps(() => {
+      listCalled = true;
+      return Promise.resolve({
+        success: true,
+        apps: [makeApp({ name: "Acme Bot", slug: "acme-bot" })],
+      });
+    });
+    setGetApp((id) => {
+      expect(id).toBe(uuid);
+      return Promise.reject(
+        Object.assign(new Error("HTTP 500"), {
+          name: "CloudApiError",
+          statusCode: 500,
+          errorBody: { success: false, error: "Internal Server Error" },
+        }),
+      );
+    });
+
+    const cb = captureCallback();
+    const result = await getAppAction.handler(
+      keyedRuntime(),
+      makeMessage("tell me about my app"),
+      undefined,
+      { app: uuid },
+      cb.fn,
+    );
+
+    expect(result?.success).toBe(false);
+    expect(
+      (requireDefined(result, "action result").data as { reason: string })
+        .reason,
+    ).toBe("error");
+    // No list-based resolution: the outage must not be cross-checked against
+    // the org's other apps.
+    expect(listCalled).toBe(false);
+    const errReply = cb.calls[0]?.text ?? "";
+    expect(errReply).toContain("Cloud API returned an error");
+    expect(errReply).not.toContain("Acme Bot");
+  });
+
+  it("REGRESSION (#29917 review): delivery failure on the happy id path reports error, not success", async () => {
+    // The stale-UUID guard must cover ONLY the getApp fetch. If the try also
+    // wrapped formatting/delivery/return, a rejecting callback after a
+    // successful fetch would be swallowed and degrade to list resolution —
+    // reporting success: true for a reply the user never received. The
+    // delivery failure must reach the outer catch, as it does at develop.
+    const uuid = "11111111-2222-3333-4444-555555555555";
+    let listCalled = false;
+    setListApps(() => {
+      listCalled = true;
+      return Promise.resolve({ success: true, apps: [] });
+    });
+    setGetApp((id) =>
+      Promise.resolve({
+        success: true,
+        app: makeApp({ id, name: "By Id App", slug: "by-id" }),
+      }),
+    );
+
+    let deliveries = 0;
+    const result = await getAppAction.handler(
+      keyedRuntime(),
+      makeMessage(uuid),
+      undefined,
+      undefined,
+      async () => {
+        deliveries += 1;
+        // Only the first delivery fails; the outer catch's ERROR_MESSAGE
+        // retry must go through so the action can report its error result.
+        if (deliveries === 1) throw new Error("delivery failed");
+      },
+    );
+
+    expect(result?.success).toBe(false);
+    expect(
+      (requireDefined(result, "action result").data as { reason: string })
+        .reason,
+    ).toBe("error");
+    // The happy id path must not degrade into list resolution; the failure
+    // surfaces through the outer catch's error reply instead.
+    expect(listCalled).toBe(false);
+    expect(deliveries).toBe(2);
+  });
 });
