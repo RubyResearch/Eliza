@@ -240,6 +240,67 @@ describe("deferredCredentialAdmissionGuard", () => {
     expect(assertInferenceCredentialActive).toHaveBeenCalledTimes(1);
   });
 
+  test("unwraps a revocation the disposal failure displaced into `suppressed`", async () => {
+    const credential = {
+      kind: "api_key" as const,
+      credentialId: "key-1",
+      userId: "user-1",
+    };
+
+    let caught: unknown;
+    try {
+      // The route body fails with the revocation first; disposal then throws
+      // its own error because no organization was resolved. `SuppressedError`
+      // keeps the NEWER disposal failure in `.error`, so the revocation is the
+      // one that got displaced.
+      await using _guard = deferredCredentialAdmissionGuard({
+        organizationId: () => undefined,
+        credential: () => credential,
+      });
+      throw new InferenceCredentialRevokedError("session_revoked");
+    } catch (error) {
+      // error-policy:J1 the test captures the route-boundary translation input.
+      caught = error;
+    }
+
+    const suppressedError = caught as Error & {
+      error?: unknown;
+      suppressed?: unknown;
+    };
+    expect(suppressedError.name).toBe("SuppressedError");
+    expect(suppressedError.error).not.toBeInstanceOf(
+      InferenceCredentialRevokedError,
+    );
+    expect(suppressedError.suppressed).toBeInstanceOf(
+      InferenceCredentialRevokedError,
+    );
+
+    // Without reading `.suppressed` this is null, and the route answers 500
+    // instead of the credential contract.
+    const denial = resolveInferenceCredentialAdmissionDenial(caught, {
+      route: "displaced-revocation-test",
+      traceId: "trace-displaced",
+    });
+    expect(denial?.status).toBe(401);
+    expect(denial?.reason).toBe("credential_inactive");
+
+    const mapped = asGenerativeCacheApiError(caught, {
+      route: "displaced-revocation-test",
+      traceId: "trace-displaced",
+    });
+    expect(mapped?.status).toBe(401);
+    expect(mapped?.details).toEqual({ reason: "credential_inactive" });
+    expect(loggerError).toHaveBeenCalledWith(
+      "[InferenceAuth] deferred revocation suppressed an earlier route failure",
+      {
+        route: "displaced-revocation-test",
+        traceId: "trace-displaced",
+        credentialReason: "session_revoked",
+        suppressedError: { name: "Error" },
+      },
+    );
+  });
+
   test("unwraps disposal revocation when it suppresses a body failure without logging secrets", async () => {
     const credential = {
       kind: "api_key" as const,
