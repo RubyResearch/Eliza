@@ -198,14 +198,12 @@ const CORE_ROUTE_PROBES: readonly RouteProbe[] = [
   {
     name: "rolodex",
     path: "/rolodex",
-    // Rolodex is a retired built-in route whose launcher entry canonicalizes
-    // to Relationships. Its retained deep link must remain a visible,
-    // recoverable unavailable state instead of presenting a healthy launcher.
-    readyChecks: [
-      {
-        selector: '[data-view-status="unavailable"][data-view-id="rolodex"]',
-      },
-    ],
+    // Rolodex is a legacy path of Relationships (`rolodex: { aliasOf:
+    // "relationships" }` in builtin-route-descriptors.ts): the retained deep
+    // link must land on the canonical Relationships route, not on an
+    // unavailable state or a healthy launcher.
+    expectedUrl: /\/apps\/relationships$/,
+    readyChecks: [{ selector: "main, [role='main']" }],
     timeoutMs: 60_000,
   },
   {
