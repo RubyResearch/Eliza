@@ -2,7 +2,7 @@
  * OCR-provider registry (register/select/list/unregister) and the iOS Vision
  * provider factory. Deterministic unit test over the provider seam.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IosComputerUseBridge } from "./ios-bridge.js";
 import {
   _resetOcrProvidersForTests,
@@ -127,5 +127,40 @@ describe("createIosVisionOcrProvider", () => {
     await expect(
       failing.recognize({ kind: "base64", data: "AAAA" }),
     ).rejects.toThrow(/VISION_ERR — no text/);
+  });
+});
+
+/**
+ * The package ships this module in two bundles (`dist/index.js` and the
+ * `mobile/ocr-provider` subpath plugin-vision imports). A registration made
+ * through one module instance must be visible to a second, independently
+ * evaluated instance, otherwise packaged builds never see plugin-vision's
+ * providers. `vi.resetModules()` produces exactly that second instance.
+ */
+describe("registry is shared across module instances", () => {
+  it("exposes providers and slots registered through another instance", async () => {
+    const first = await import("./ocr-provider.js");
+    first._resetOcrProvidersForTests();
+    first.registerOcrProvider(fakeProvider("cross-bundle", 5, true));
+    const coord = { name: "coord-probe", describe: async () => ({}) } as never;
+    const som = { name: "som-probe", describe: async () => ({}) } as never;
+    first.registerCoordOcrProvider(coord);
+    first.registerSetOfMarksProvider(som);
+
+    vi.resetModules();
+    const second = await import("./ocr-provider.js");
+    expect(second).not.toBe(first);
+    expect(second.listOcrProviders().map((p) => p.name)).toEqual([
+      "cross-bundle",
+    ]);
+    expect(second.getCoordOcrProvider()).toBe(coord);
+    expect(second.getSetOfMarksProvider()).toBe(som);
+
+    second.registerCoordOcrProvider(null);
+    second.registerSetOfMarksProvider(null);
+    expect(first.getCoordOcrProvider()).toBeNull();
+    expect(first.getSetOfMarksProvider()).toBeNull();
+    second._resetOcrProvidersForTests();
+    expect(first.listOcrProviders()).toEqual([]);
   });
 });

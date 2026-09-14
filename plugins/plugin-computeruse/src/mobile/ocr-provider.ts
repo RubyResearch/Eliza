@@ -15,6 +15,12 @@
  *   - `recognize()`  : async OCR call. Throws on hard failures so callers can
  *                      fall back to the next provider; never returns empty
  *                      lines silently.
+ *
+ * Registry state lives on a `globalThis` slot keyed by `Symbol.for`, not in
+ * module scope: the package bundles this module into both `dist/index.js` and
+ * the `mobile/ocr-provider` subpath, and plugin-vision registers through the
+ * subpath while the scene builder and `detect_elements` read from the index
+ * bundle. Module-scoped state would give each bundle its own empty registry.
  */
 
 import type {
@@ -66,18 +72,44 @@ export type OcrInput =
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
-const REGISTRY = new Map<string, OcrProvider>();
+const REGISTRY_KEY = Symbol.for(
+  "elizaos.plugin-computeruse.ocr-provider-registry",
+);
+
+interface OcrRegistryState {
+  readonly providers: Map<string, OcrProvider>;
+  coord: CoordOcrProvider | null;
+  setOfMarks: SetOfMarksProvider | null;
+}
+
+/**
+ * The process-wide registry. Read from `globalThis` on every access (no
+ * module-local cache) so every bundled copy of this module observes the same
+ * providers and the same coord-OCR / Set-of-Marks slots.
+ */
+function registryState(): OcrRegistryState {
+  const slot = globalThis as Record<PropertyKey, unknown>;
+  const existing = slot[REGISTRY_KEY];
+  if (existing !== undefined) return existing as OcrRegistryState;
+  const created: OcrRegistryState = {
+    providers: new Map<string, OcrProvider>(),
+    coord: null,
+    setOfMarks: null,
+  };
+  slot[REGISTRY_KEY] = created;
+  return created;
+}
 
 export function registerOcrProvider(provider: OcrProvider): void {
-  REGISTRY.set(provider.name, provider);
+  registryState().providers.set(provider.name, provider);
 }
 
 export function unregisterOcrProvider(name: string): void {
-  REGISTRY.delete(name);
+  registryState().providers.delete(name);
 }
 
 export function listOcrProviders(): readonly OcrProvider[] {
-  return [...REGISTRY.values()].sort((a, b) => {
+  return [...registryState().providers.values()].sort((a, b) => {
     const aPriority =
       typeof a.priority === "number" && Number.isFinite(a.priority)
         ? a.priority
@@ -200,7 +232,7 @@ function mapLine(line: VisionOcrLine): OcrLine {
  * in `beforeEach`.
  */
 export function _resetOcrProvidersForTests(): void {
-  REGISTRY.clear();
+  registryState().providers.clear();
 }
 
 // ── Coord-aware OCR provider slot ────────────────────────────────────────────
@@ -274,8 +306,6 @@ export interface CoordOcrProvider {
   describe(input: CoordOcrInput): Promise<CoordOcrResult>;
 }
 
-let registeredCoordOcrProvider: CoordOcrProvider | null = null;
-
 /**
  * Register the hierarchical / coord-aware OCR provider. Idempotent — last
  * call wins so a hot-reload of the bridge swaps cleanly. Pass `null` to
@@ -284,11 +314,11 @@ let registeredCoordOcrProvider: CoordOcrProvider | null = null;
 export function registerCoordOcrProvider(
   provider: CoordOcrProvider | null,
 ): void {
-  registeredCoordOcrProvider = provider;
+  registryState().coord = provider;
 }
 
 export function getCoordOcrProvider(): CoordOcrProvider | null {
-  return registeredCoordOcrProvider;
+  return registryState().coord;
 }
 
 // ── Set-of-Marks provider slot (#9170 M9) ────────────────────────────────────
@@ -336,8 +366,6 @@ export interface SetOfMarksProvider {
   describe(input: SetOfMarksInput): Promise<SetOfMarksResult>;
 }
 
-let registeredSetOfMarksProvider: SetOfMarksProvider | null = null;
-
 /**
  * Register the Set-of-Marks provider. Idempotent — last call wins. Pass `null`
  * to unregister.
@@ -345,9 +373,9 @@ let registeredSetOfMarksProvider: SetOfMarksProvider | null = null;
 export function registerSetOfMarksProvider(
   provider: SetOfMarksProvider | null,
 ): void {
-  registeredSetOfMarksProvider = provider;
+  registryState().setOfMarks = provider;
 }
 
 export function getSetOfMarksProvider(): SetOfMarksProvider | null {
-  return registeredSetOfMarksProvider;
+  return registryState().setOfMarks;
 }
