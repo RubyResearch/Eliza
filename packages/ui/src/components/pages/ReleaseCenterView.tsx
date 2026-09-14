@@ -13,7 +13,13 @@ import {
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useAgentElement } from "../../agent-surface";
 import {
   invokeDesktopBridgeRequest,
@@ -158,7 +164,18 @@ export function ReleaseCenterView() {
   const [releaseNotesUrl, setReleaseNotesUrl] = useState(
     defaultReleaseNotesUrl,
   );
-  const [releaseNotesUrlDirty, setReleaseNotesUrlDirty] = useState(false);
+  /**
+   * Has the user edited the release-notes URL, so an updater snapshot must not
+   * overwrite it?
+   *
+   * A ref rather than state, because every read happens *after* an `await` on
+   * the desktop bridge. A closure read there sees the value captured when the
+   * request was issued — always `false` if the user had not started typing yet
+   * — so editing the field while a check was in flight got overwritten by the
+   * snapshot when it landed. Nothing renders from this flag, so state bought a
+   * re-render and a stale read and nothing else.
+   */
+  const releaseNotesUrlDirtyRef = useRef(false);
 
   const refreshNativeState = useCallback(async () => {
     if (!desktopRuntime) return;
@@ -177,11 +194,16 @@ export function ReleaseCenterView() {
 
     setNativeUpdater(snapshot);
     setReleaseNotesUrl((current) =>
-      releaseNotesUrlDirty
+      releaseNotesUrlDirtyRef.current
         ? current
         : normalizeReleaseNotesUrl(snapshot?.baseUrl ?? current),
     );
-  }, [desktopRuntime, releaseNotesUrlDirty]);
+    // The dirty flag is intentionally absent from the dependencies: it is read
+    // through the ref above, so this callback keeps a stable identity while the
+    // user edits. Previously the first keystroke changed that identity and
+    // re-ran both effects below, costing one redundant bridge refresh and a
+    // listener re-subscribe.
+  }, [desktopRuntime]);
 
   useEffect(() => {
     void loadUpdateStatus();
@@ -263,7 +285,7 @@ export function ReleaseCenterView() {
       ipcChannel: "desktop:checkForUpdates",
     });
     setNativeUpdater(snapshot);
-    if (!releaseNotesUrlDirty && snapshot?.baseUrl) {
+    if (!releaseNotesUrlDirtyRef.current && snapshot?.baseUrl) {
       setReleaseNotesUrl(normalizeReleaseNotesUrl(snapshot.baseUrl));
     }
   };
@@ -459,7 +481,7 @@ export function ReleaseCenterView() {
     void runAction(
       "reset-release-url",
       async () => {
-        setReleaseNotesUrlDirty(false);
+        releaseNotesUrlDirtyRef.current = false;
         setReleaseNotesUrl(
           normalizeReleaseNotesUrl(
             nativeUpdater?.baseUrl ?? defaultReleaseNotesUrl,
@@ -635,7 +657,7 @@ export function ReleaseCenterView() {
           type="url"
           value={releaseNotesUrl}
           onValueChange={(value) => {
-            setReleaseNotesUrlDirty(true);
+            releaseNotesUrlDirtyRef.current = true;
             setReleaseNotesUrl(value);
           }}
         />
