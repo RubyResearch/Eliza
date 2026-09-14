@@ -12,7 +12,10 @@ import {
   CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE,
   CalendarService,
 } from "@elizaos/plugin-calendar";
-import { getScheduledTaskRunner } from "@elizaos/plugin-scheduling";
+import {
+  getScheduledTaskRunner,
+  type ScheduledTask,
+} from "@elizaos/plugin-scheduling";
 import { SELF_ENTITY_ID } from "@elizaos/shared";
 import { createApprovalQueue } from "../approval-queue.js";
 import type { ApprovalRequest } from "../approval-queue.types.js";
@@ -218,7 +221,7 @@ export class FamilyWorkflowRuntimeService extends Service {
     return this.school.status();
   }
 
-  async ensureMonthlySchedule(): Promise<void> {
+  async ensureMonthlySchedule(): Promise<ScheduledTask> {
     const { familyCoordinationPack } = await import(
       "../../default-packs/family-coordination.js"
     );
@@ -235,10 +238,11 @@ export class FamilyWorkflowRuntimeService extends Service {
       toSpineTaskInput(definition, familyCoordinationPack.key),
     );
     if (!task.ownerVisible || task.kind !== definition.kind)
-      await runner.apply(task.taskId, "edit", {
+      return runner.apply(task.taskId, "edit", {
         ownerVisible: true,
         kind: definition.kind,
       });
+    return task;
   }
 
   reviewSchool(runId: string) {
