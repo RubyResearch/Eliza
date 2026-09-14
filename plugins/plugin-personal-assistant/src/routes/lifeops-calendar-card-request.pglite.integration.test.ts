@@ -40,6 +40,7 @@ const valid = {
 it("answers malformed card bodies with a 400 and issues a well-formed card", async () => {
   const host = await createLifeOpsTestRuntime({ plugins: [fileStoragePlugin] });
   const runtime = host.runtime;
+  runtime.setSetting("ELIZA_EXTERNAL_BASE_URL", "https://calendar.example.org");
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const handled = await tryHandleRuntimePluginRoute({

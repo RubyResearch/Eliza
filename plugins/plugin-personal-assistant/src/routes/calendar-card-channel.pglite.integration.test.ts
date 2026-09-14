@@ -23,8 +23,13 @@ const storage: Plugin = {
 it("queues the selected channel and rejects transport or recipient changes before dispatch", async () => {
   const host = await createLifeOpsTestRuntime({ plugins: [storage] });
   const runtime = host.runtime;
+  const publicOrigin = "https://calendar.example.org:8443";
+  runtime.setSetting("ELIZA_EXTERNAL_BASE_URL", publicOrigin);
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const url = new URL(
+      req.url ?? "/",
+      `http://${req.headers.host ?? "127.0.0.1"}`,
+    );
     const handled = await tryHandleRuntimePluginRoute({
       req,
       res,
@@ -51,7 +56,10 @@ it("queues the selected channel and rejects transport or recipient changes befor
         `http://127.0.0.1:${address.port}/api/lifeops/calendar/cards`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            host: "internal-proxy.invalid:2148",
+          },
           body: JSON.stringify({
             channel,
             date: "2026-09-15",
@@ -74,6 +82,9 @@ it("queues the selected channel and rejects transport or recipient changes befor
       if (request?.payload.action !== "send_message")
         throw new Error("Missing queued card");
       expect(request.channel).toBe(channel);
+      const link = request.payload.body.match(/https?:\/\/\S+/)?.[0];
+      if (!link) throw new Error("Missing private card link");
+      expect(new URL(link).origin).toBe(publicOrigin);
       expect(verifyCalendarCardApproval(request.payload)?.matches).toBe(true);
       const retargeted = await executeApprovedRequest({
         runtime,
@@ -101,6 +112,41 @@ it("queues the selected channel and rejects transport or recipient changes befor
       expect(retained?.state).toBe("pending");
       expect(retained?.execution).toBeNull();
     }
+    const before = await queue.list({
+      subjectUserId: null,
+      state: null,
+      action: null,
+    });
+    for (const configured of [
+      "",
+      "http://calendar.example.org",
+      "https://127.0.0.1:8443",
+      "https://calendar.example.org/private",
+    ]) {
+      runtime.setSetting("ELIZA_EXTERNAL_BASE_URL", configured);
+      const denied = await fetch(
+        `http://127.0.0.1:${address.port}/api/lifeops/calendar/cards`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            channel: "telegram",
+            date: "2026-09-15",
+            timeZone: "UTC",
+            privacyMode: "full",
+            recipient: "self",
+            events: [],
+          }),
+        },
+      );
+      expect(denied.status).toBe(503);
+      expect(await denied.json()).toMatchObject({
+        code: "CALENDAR_CARD_PUBLIC_ORIGIN_UNAVAILABLE",
+      });
+    }
+    expect(
+      await queue.list({ subjectUserId: null, state: null, action: null }),
+    ).toEqual(before);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) =>

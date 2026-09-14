@@ -119,6 +119,7 @@ import {
   calendarCardApprovalPayload,
   composeDailyCalendarCard,
   parseCalendarCardRequest,
+  resolveCalendarCardOrigin,
 } from "../lifeops/calendar-card.js";
 import { probeFullDiskAccess } from "../lifeops/fda-probe.js";
 import { LifeOpsRepository } from "../lifeops/repository.js";
@@ -1259,6 +1260,19 @@ export async function handleLifeOpsRoutes(
       return true;
     }
     const cardRequest = parsedRequest.request;
+    const publicAddress = resolveCalendarCardOrigin(runtime);
+    if (publicAddress.status !== "configured") {
+      json(
+        res,
+        {
+          error:
+            "Configure the agent's public HTTPS address before creating a calendar card.",
+          code: "CALENDAR_CARD_PUBLIC_ORIGIN_UNAVAILABLE",
+        },
+        503,
+      );
+      return true;
+    }
     const authenticatedEntityId = String(
       ctx.state.requestEntityId ?? ctx.state.adminEntityId ?? SELF_ENTITY_ID,
     );
@@ -1284,7 +1298,7 @@ export async function handleLifeOpsRoutes(
       recipientEntityId,
       html: placeholder.html,
       ttlMs,
-      baseUrl: url.origin,
+      baseUrl: publicAddress.origin,
     });
     const composition = composeDailyCalendarCard({
       date: cardRequest.date,

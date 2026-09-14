@@ -48,6 +48,11 @@ binds its exact recipient, channel, calendar content, and private card identity;
 changing any of them requires a new review. Existing version-one approvals
 remain iMessage-only.
 
+Set `ELIZA_EXTERNAL_BASE_URL` to the agent's public HTTPS origin before issuing
+cards. Missing, non-HTTPS, private-network, or path-bearing addresses stop
+creation before a card or approval is stored. Incoming request headers and
+local tunnel addresses never determine the recipient's link.
+
 Card links require the intended authenticated principal as well as the
 single-use capability. Expired, revoked, already-opened, and anonymous reads
 remain denied. A queued card is not delivery evidence; connector setup,

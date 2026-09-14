@@ -13,6 +13,8 @@ import {
 import {
   type IAgentRuntime,
   type IFileStorageService,
+  isBlockedHostname,
+  isPrivateIpAddress,
   ServiceType,
   stableStringify,
 } from "@elizaos/core";
@@ -25,6 +27,39 @@ import { executeRawSql, sqlQuote, toText } from "./sql.js";
 
 export type CalendarCardPrivacyMode = "full" | "times_only" | "busy_only";
 export type CalendarCardChannel = "imessage" | "telegram" | "discord";
+
+/** Shared links use operator configuration, never a tunnel address or request header. */
+export function resolveCalendarCardOrigin(
+  runtime: IAgentRuntime,
+):
+  | { status: "configured"; origin: string }
+  | { status: "unavailable"; reason: "missing" | "invalid" } {
+  const configured = runtime.getSetting("ELIZA_EXTERNAL_BASE_URL");
+  if (configured === undefined || configured === null || configured === "") {
+    return { status: "unavailable", reason: "missing" };
+  }
+  if (typeof configured !== "string")
+    return { status: "unavailable", reason: "invalid" };
+  try {
+    const url = new URL(configured);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.pathname !== "" && url.pathname !== "/") ||
+      isBlockedHostname(url.hostname) ||
+      isPrivateIpAddress(url.hostname)
+    ) {
+      return { status: "unavailable", reason: "invalid" };
+    }
+    return { status: "configured", origin: url.origin };
+  } catch {
+    // error-policy:J3 Invalid operator configuration cannot produce a shared link.
+    return { status: "unavailable", reason: "invalid" };
+  }
+}
 
 const CALENDAR_CARD_PRIVACY_MODES: ReadonlySet<string> = new Set([
   "full",
