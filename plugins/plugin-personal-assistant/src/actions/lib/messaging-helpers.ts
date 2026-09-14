@@ -11,6 +11,7 @@ import {
   sendTwilioSms,
 } from "@elizaos/plugin-phone/twilio";
 import type { LifeOpsService } from "../../lifeops/service.js";
+import { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
 
 export type CrossChannelSendChannel =
   | "telegram"
@@ -126,17 +127,24 @@ export async function prepareCrossChannelSend(args: {
             text: body,
             allowTransportFallback: false,
           });
-          return {
+          const receipt = {
             provider: sent.provider,
-            // The result is a union over channel- and user-addressed sends.
-            // This call addressed a channel, so read the id the transport
-            // actually used and fall back to the one we asked for rather than
-            // asserting the variant.
-            channelId: "channelId" in sent ? sent.channelId : target,
+            channelId: "channelId" in sent ? sent.channelId : null,
             deliveryStatus: sent.deliveryStatus,
             messageId: sent.providerMessageId,
             receipt: sent.receipt,
           };
+          if (
+            sent.deliveryStatus !== "sent" ||
+            !sent.providerMessageId ||
+            receipt.channelId !== target
+          ) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "Discord delivery is not confirmed for the approved destination. Reconcile the provider evidence before retrying.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }

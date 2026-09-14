@@ -59,6 +59,11 @@ single-use capability. Expired, revoked, already-opened, and anonymous reads
 remain denied. A queued card is not delivery evidence; connector setup,
 reachable HTTPS links, and actual provider receipts require separate verification.
 
+Discord approval completion requires a confirmed send, a provider message ID,
+and the reviewed channel. Uncertain status, missing delivery identity, or a
+different destination retains the observed receipt in reconciliation and cannot
+be automatically dispatched again. Multi-part sends retain every provider ID.
+
 ## Undated todo lifecycle
 
 Undated owner todos remain task definitions with `cadence.kind = "unscheduled"`.
