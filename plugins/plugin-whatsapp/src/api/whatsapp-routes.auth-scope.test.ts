@@ -1,10 +1,11 @@
-/** Exercises WhatsApp authentication-scope validation through the route harness. */
+/** Exercises WhatsApp authentication-scope validation and config-persistence failure handling through the route harness. */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   handleWhatsAppRoute,
+  type WhatsAppPairingEventLike,
   type WhatsAppRouteDeps,
   type WhatsAppRouteState,
 } from "./whatsapp-routes.js";
@@ -219,5 +220,113 @@ describe("WhatsApp pairing route teardown ordering", () => {
     releaseStop?.();
     await expect(handling).resolves.toBe(true);
     expect(deps.whatsappLogout).toHaveBeenCalledWith("default");
+  });
+});
+
+describe("WhatsApp route config persistence failures", () => {
+  it("disconnect answers 500 and restores the in-memory connector when saveConfig throws", async () => {
+    const { req, res, state, deps, chunks } = createPostHarness("/api/whatsapp/disconnect", {
+      accountId: "default",
+    });
+    const connector = { enabled: true, authDir: "/tmp/wa-auth" };
+    state.config.connectors = { whatsapp: connector };
+    vi.mocked(state.saveConfig).mockImplementation(() => {
+      throw new Error("EACCES: permission denied");
+    });
+
+    await expect(
+      handleWhatsAppRoute(req, res, "/api/whatsapp/disconnect", "POST", state, deps)
+    ).resolves.toBe(true);
+
+    expect(deps.whatsappLogout).toHaveBeenCalledWith("default");
+    expect(state.saveConfig).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(500);
+    expect(parsed(chunks)).toEqual({
+      ok: false,
+      error: "Failed to save connector config: EACCES: permission denied",
+    });
+    expect(state.config.connectors).toEqual({ whatsapp: connector });
+  });
+
+  it("pairing connected rolls back the connector and owner contact and broadcasts an error when saveConfig throws", async () => {
+    const { req, res, state, deps, chunks } = createPostHarness("/api/whatsapp/pair", {
+      accountId: "default",
+    });
+    const broadcasts: object[] = [];
+    state.broadcastWs = (data) => {
+      broadcasts.push(data);
+    };
+    state.config.agents = { defaults: { ownerContacts: { telegram: { channelId: "tg" } } } };
+    vi.mocked(state.saveConfig).mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    let onEvent: ((event: WhatsAppPairingEventLike) => void) | undefined;
+    vi.mocked(deps.createWhatsAppPairingSession).mockImplementation((options) => {
+      onEvent = options.onEvent;
+      return {
+        start: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+        getStatus: vi.fn(() => "waiting_for_qr"),
+      };
+    });
+
+    await expect(
+      handleWhatsAppRoute(req, res, "/api/whatsapp/pair", "POST", state, deps)
+    ).resolves.toBe(true);
+    expect(res.statusCode).toBe(200);
+    expect(parsed(chunks)).toMatchObject({ ok: true, accountId: "default" });
+
+    onEvent?.({
+      type: "whatsapp-status",
+      accountId: "default",
+      status: "connected",
+      phoneNumber: "15551234567",
+    });
+
+    expect(state.saveConfig).toHaveBeenCalledTimes(1);
+    expect(state.config.connectors).toBeUndefined();
+    expect(state.config.agents?.defaults?.ownerContacts).toEqual({
+      telegram: { channelId: "tg" },
+    });
+    expect(broadcasts.at(-1)).toEqual({
+      type: "whatsapp-status",
+      accountId: "default",
+      authScope: "platform",
+      status: "error",
+      error: "Failed to save connector config: ENOSPC: no space left on device",
+    });
+  });
+
+  it("pairing connected keeps a pre-existing connector and owner contact when saveConfig throws", async () => {
+    const { req, res, state, deps } = createPostHarness("/api/whatsapp/pair", {
+      accountId: "default",
+    });
+    const previousConnector = { enabled: false, transport: "baileys" };
+    const previousContact = { channelId: "15550000000" };
+    state.config.connectors = { whatsapp: previousConnector };
+    state.config.agents = { defaults: { ownerContacts: { whatsapp: previousContact } } };
+    vi.mocked(state.saveConfig).mockImplementation(() => {
+      throw new Error("EACCES");
+    });
+    let onEvent: ((event: WhatsAppPairingEventLike) => void) | undefined;
+    vi.mocked(deps.createWhatsAppPairingSession).mockImplementation((options) => {
+      onEvent = options.onEvent;
+      return {
+        start: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+        getStatus: vi.fn(() => "waiting_for_qr"),
+      };
+    });
+
+    await handleWhatsAppRoute(req, res, "/api/whatsapp/pair", "POST", state, deps);
+    onEvent?.({
+      type: "whatsapp-status",
+      accountId: "default",
+      status: "connected",
+      phoneNumber: "15551234567",
+    });
+
+    expect(state.config.connectors).toEqual({ whatsapp: previousConnector });
+    expect(state.config.agents?.defaults?.ownerContacts?.whatsapp).toBe(previousContact);
   });
 });

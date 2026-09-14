@@ -173,6 +173,67 @@ function setOwnerContact(
   return true;
 }
 
+type ConfigSnapshot = {
+  connectors: Record<string, unknown> | undefined;
+  whatsappConnector: unknown;
+  agents: WhatsAppPluginConfig["agents"];
+  defaults: NonNullable<WhatsAppPluginConfig["agents"]>["defaults"];
+  ownerContacts: Record<string, OwnerContactEntry> | undefined;
+  whatsappContact: OwnerContactEntry | undefined;
+};
+
+function snapshotConfig(config: WhatsAppPluginConfig): ConfigSnapshot {
+  return {
+    connectors: config.connectors,
+    whatsappConnector: config.connectors?.whatsapp,
+    agents: config.agents,
+    defaults: config.agents?.defaults,
+    ownerContacts: config.agents?.defaults?.ownerContacts,
+    whatsappContact: config.agents?.defaults?.ownerContacts?.whatsapp,
+  };
+}
+
+// Restores exactly the containers and entries the handlers may have created or
+// replaced so a failed persist leaves memory equal to what is still on disk.
+function restoreConfig(config: WhatsAppPluginConfig, snapshot: ConfigSnapshot): void {
+  if (snapshot.connectors === undefined) {
+    delete config.connectors;
+  } else if (snapshot.whatsappConnector === undefined) {
+    delete snapshot.connectors.whatsapp;
+    config.connectors = snapshot.connectors;
+  } else {
+    snapshot.connectors.whatsapp = snapshot.whatsappConnector;
+    config.connectors = snapshot.connectors;
+  }
+
+  if (snapshot.agents === undefined) {
+    delete config.agents;
+  } else if (snapshot.defaults === undefined) {
+    delete snapshot.agents.defaults;
+    config.agents = snapshot.agents;
+  } else if (snapshot.ownerContacts === undefined) {
+    delete snapshot.defaults.ownerContacts;
+    snapshot.agents.defaults = snapshot.defaults;
+    config.agents = snapshot.agents;
+  } else if (snapshot.whatsappContact === undefined) {
+    delete snapshot.ownerContacts.whatsapp;
+    snapshot.defaults.ownerContacts = snapshot.ownerContacts;
+    snapshot.agents.defaults = snapshot.defaults;
+    config.agents = snapshot.agents;
+  } else {
+    snapshot.ownerContacts.whatsapp = snapshot.whatsappContact;
+    snapshot.defaults.ownerContacts = snapshot.ownerContacts;
+    snapshot.agents.defaults = snapshot.defaults;
+    config.agents = snapshot.agents;
+  }
+}
+
+function saveConfigFailureMessage(err: unknown): string {
+  return err instanceof Error
+    ? `Failed to save connector config: ${err.message}`
+    : "Failed to save connector config";
+}
+
 function shouldConfigurePlugin(body: WhatsAppAccountBody | null): boolean {
   return body?.configurePlugin !== false;
 }
@@ -340,6 +401,7 @@ export async function handleWhatsAppRoute(
           state.broadcastWs?.({ ...event, authScope });
 
           if (event.status === "connected") {
+            const snapshot = snapshotConfig(state.config);
             let configChanged = false;
             if (configurePlugin) {
               if (!state.config.connectors) state.config.connectors = {};
@@ -365,8 +427,23 @@ export async function handleWhatsAppRoute(
 
             try {
               state.saveConfig();
-            } catch {
-              /* test envs */
+            } catch (err) {
+              // error-policy:J1 the pairing response has already been sent, so the
+              // persist failure is surfaced on the pairing status channel after
+              // restoring the in-memory config to what remains on disk.
+              restoreConfig(state.config, snapshot);
+              const message = saveConfigFailureMessage(err);
+              logger.error(
+                { accountId, authScope, error: err instanceof Error ? err.message : String(err) },
+                "[whatsapp] Failed to persist connector config after pairing"
+              );
+              state.broadcastWs?.({
+                type: "whatsapp-status",
+                accountId,
+                authScope,
+                status: "error",
+                error: message,
+              });
             }
           }
         },
@@ -505,11 +582,20 @@ export async function handleWhatsAppRoute(
       }
 
       if (configurePlugin && state.config.connectors) {
+        const snapshot = snapshotConfig(state.config);
         delete state.config.connectors.whatsapp;
         try {
           state.saveConfig();
-        } catch {
-          /* test envs */
+        } catch (err) {
+          // error-policy:J1 a failed persist leaves the connector configured on
+          // disk, so memory is restored and the caller gets a structured 500.
+          restoreConfig(state.config, snapshot);
+          logger.error(
+            { accountId, authScope, error: err instanceof Error ? err.message : String(err) },
+            "[whatsapp] Failed to persist connector config after disconnect"
+          );
+          json(res, { ok: false, error: saveConfigFailureMessage(err) }, 500);
+          return true;
         }
       }
     } finally {
