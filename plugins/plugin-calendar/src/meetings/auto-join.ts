@@ -294,16 +294,35 @@ async function reconcileEvent(
   }
   const current = live.filter((task) => taskMode(task) === policy);
 
+  // A task of the same role that already reached a terminal state for this
+  // same event start under the current policy is settled: the agent joined,
+  // or the owner answered the approval, and the meeting is still in progress.
+  // Recreating it would anchor a fresh join at start - 1 min, which is already
+  // due, so the agent would join the same meeting a second time (#29961). A
+  // failed task is not settled, so a failed join stays retryable; settlement
+  // is per role, so a completed approval never settles the join on its behalf.
+  // A rescheduled event carries a new startAt and is reconciled afresh.
+  const findSettled = (role: "join" | "approval"): ScheduledTask | undefined =>
+    existing.find(
+      (task) =>
+        !isLive(task) &&
+        task.state.status !== "failed" &&
+        taskRole(task) === role &&
+        taskMode(task) === policy &&
+        task.metadata?.eventStartAt === event.startAt,
+    );
+  const joinAtStart = (mode: MeetingAutoJoinPolicy): ScheduledTaskInput =>
+    joinTaskInput(event, parsed, mode, {
+      kind: "relative_to_anchor",
+      anchorKey: eventStartAnchorKey(event.id),
+      offsetMinutes: JOIN_OFFSET_MINUTES,
+    });
+
   if (policy === "all") {
     const join = current.find((task) => taskRole(task) === "join");
     if (join) return [join];
-    const scheduled = await runner.schedule(
-      joinTaskInput(event, parsed, "all", {
-        kind: "relative_to_anchor",
-        anchorKey: eventStartAnchorKey(event.id),
-        offsetMinutes: JOIN_OFFSET_MINUTES,
-      }),
-    );
+    if (findSettled("join")) return current;
+    const scheduled = await runner.schedule(joinAtStart("all"));
     logger.info(
       {
         src: "calendar:meeting-auto-join",
@@ -318,7 +337,8 @@ async function reconcileEvent(
 
   // policy === "ask"
   let approval = current.find((task) => taskRole(task) === "approval");
-  if (!approval) {
+  const settledApproval = findSettled("approval");
+  if (!approval && !settledApproval) {
     approval = await runner.schedule(approvalTaskInput(event, parsed));
     logger.info(
       {
@@ -330,25 +350,46 @@ async function reconcileEvent(
     );
   }
   let join = current.find((task) => taskRole(task) === "join");
-  if (!join) {
-    join = await runner.schedule(
-      joinTaskInput(event, parsed, "ask", {
-        kind: "after_task",
-        taskId: approval.taskId,
-        outcome: "completed",
-      }),
-    );
-    logger.info(
-      {
-        src: "calendar:meeting-auto-join",
-        eventId: event.id,
-        taskId: join.taskId,
-        approvalTaskId: approval.taskId,
-      },
-      `${LOG_PREFIX} Scheduled approval-gated meeting join for event ${event.id}.`,
-    );
+  if (!join && !findSettled("join")) {
+    if (approval) {
+      join = await runner.schedule(
+        joinTaskInput(event, parsed, "ask", {
+          kind: "after_task",
+          taskId: approval.taskId,
+          outcome: "completed",
+        }),
+      );
+      logger.info(
+        {
+          src: "calendar:meeting-auto-join",
+          eventId: event.id,
+          taskId: join.taskId,
+          approvalTaskId: approval.taskId,
+        },
+        `${LOG_PREFIX} Scheduled approval-gated meeting join for event ${event.id}.`,
+      );
+    } else if (settledApproval?.state.status === "completed") {
+      // The owner already approved and the join itself failed. An after_task
+      // child only fires when its parent transitions, and that approval is
+      // already terminal, so the retry is anchored at the event start instead
+      // of re-prompting an owner who has answered.
+      join = await runner.schedule(joinAtStart("ask"));
+      logger.info(
+        {
+          src: "calendar:meeting-auto-join",
+          eventId: event.id,
+          taskId: join.taskId,
+          approvalTaskId: settledApproval.taskId,
+        },
+        `${LOG_PREFIX} Rescheduled failed meeting join for event ${event.id} under the owner's existing approval.`,
+      );
+    }
+    // An approval the owner dismissed, skipped, or let expire grants nothing;
+    // no join is scheduled for it.
   }
-  return [approval, join];
+  return [approval, join].filter(
+    (task): task is ScheduledTask => task !== undefined,
+  );
 }
 
 export interface ReconcileMeetingAutoJoinArgs {

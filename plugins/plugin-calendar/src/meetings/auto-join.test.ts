@@ -317,6 +317,163 @@ describe("reconcileMeetingAutoJoin", () => {
     });
   });
 
+  it("does not recreate a completed join task while the meeting is still in progress", async () => {
+    await writeMeetingAutoJoinPolicy(harness.runtime, "all");
+    const event = makeEvent();
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => NOW,
+    });
+    const [join] = await autoJoinTasks(harness.runner);
+    // The join fired and the agent is in the meeting.
+    await harness.runner.apply(join.taskId, "complete", { reason: "joined" });
+
+    // A routine feed sync five minutes into the meeting must not schedule a
+    // second, immediately-due join for the same event.
+    const midMeeting = new Date("2026-07-03T15:05:00.000Z");
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => midMeeting,
+    });
+    const tasks = await autoJoinTasks(harness.runner);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].taskId).toBe(join.taskId);
+    expect(tasks[0].state.status).toBe("completed");
+  });
+
+  it("schedules a fresh join when a joined event is rescheduled to a new start", async () => {
+    await writeMeetingAutoJoinPolicy(harness.runtime, "all");
+    const event = makeEvent();
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => NOW,
+    });
+    const [join] = await autoJoinTasks(harness.runner);
+    await harness.runner.apply(join.taskId, "complete", { reason: "joined" });
+
+    const moved = makeEvent({
+      startAt: "2026-07-10T15:00:00.000Z",
+      endAt: "2026-07-10T15:30:00.000Z",
+    });
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [moved],
+      now: () => NOW,
+    });
+    const tasks = await autoJoinTasks(harness.runner);
+    expect(tasks).toHaveLength(2);
+    const live = tasks.filter((t) => t.state.status === "scheduled");
+    expect(live).toHaveLength(1);
+    expect(live[0].metadata?.eventStartAt).toBe(moved.startAt);
+  });
+
+  it("does not re-prompt an approval the owner already dismissed", async () => {
+    await writeMeetingAutoJoinPolicy(harness.runtime, "ask");
+    const event = makeEvent();
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => NOW,
+    });
+    const before = await autoJoinTasks(harness.runner);
+    const approval = before.find((t) => t.kind === "approval");
+    expect(approval).toBeDefined();
+    if (!approval) throw new Error("approval task missing");
+    await harness.runner.apply(approval.taskId, "dismiss", {
+      reason: "owner declined",
+    });
+
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => new Date("2026-07-03T14:50:00.000Z"),
+    });
+    const after = await autoJoinTasks(harness.runner);
+    expect(after.filter((t) => t.kind === "approval")).toHaveLength(1);
+    expect(after.filter((t) => t.state.status === "scheduled")).toHaveLength(
+      before.length - 1,
+    );
+  });
+
+  it("retries a failed join in ask mode under the owner's completed approval without re-prompting", async () => {
+    await writeMeetingAutoJoinPolicy(harness.runtime, "ask");
+    const event = makeEvent();
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => NOW,
+    });
+    const initial = await autoJoinTasks(harness.runner);
+    const approval = initial.find((t) => t.kind === "approval");
+    const join = initial.find((t) => t.kind === "custom");
+    if (!approval || !join) throw new Error("approval pair missing");
+    // The owner approves, then the join fails (the runner's terminal
+    // transition when dispatch escalation is exhausted).
+    await harness.runner.apply(approval.taskId, "complete", {
+      reason: "owner approved",
+    });
+    await harness.runner.pipeline(join.taskId, "failed");
+
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => new Date("2026-07-03T15:02:00.000Z"),
+    });
+    const tasks = await autoJoinTasks(harness.runner);
+    const approvals = tasks.filter((t) => t.kind === "approval");
+    const joins = tasks.filter((t) => t.kind === "custom");
+    // No second prompt: the completed approval is the only approval.
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].state.status).toBe("completed");
+    // The failed join is retried once, anchored at the event start rather
+    // than chained to an approval that can no longer transition.
+    expect(joins).toHaveLength(2);
+    const retry = joins.find((t) => t.state.status === "scheduled");
+    expect(retry).toBeDefined();
+    expect(retry?.trigger).toEqual({
+      kind: "relative_to_anchor",
+      anchorKey: eventStartAnchorKey(event.id),
+      offsetMinutes: JOIN_OFFSET_MINUTES,
+    });
+    expect(retry?.metadata?.autoJoinMode).toBe("ask");
+  });
+
+  it("retries a failed join in all mode on the next sync", async () => {
+    await writeMeetingAutoJoinPolicy(harness.runtime, "all");
+    const event = makeEvent();
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => NOW,
+    });
+    const [join] = await autoJoinTasks(harness.runner);
+    await harness.runner.pipeline(join.taskId, "failed");
+
+    await reconcileMeetingAutoJoin({
+      runtime: harness.runtime,
+      agentId: AGENT_ID,
+      events: [event],
+      now: () => new Date("2026-07-03T15:02:00.000Z"),
+    });
+    const tasks = await autoJoinTasks(harness.runner);
+    expect(tasks.map((t) => t.state.status).sort()).toEqual([
+      "failed",
+      "scheduled",
+    ]);
+  });
+
   it("policy change all→ask dismisses the direct join and creates the approval pair", async () => {
     await writeMeetingAutoJoinPolicy(harness.runtime, "all");
     const event = makeEvent();
