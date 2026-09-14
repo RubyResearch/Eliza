@@ -745,16 +745,27 @@ async function downloadModel(
 		if (statusCode < 200 || statusCode >= 300) {
 			throw new Error(`HTTP ${statusCode} ${response.statusMessage ?? ""}`);
 		}
+		// Resume only when the server confirmed the Range with 206 Partial Content.
+		// Many CDNs, mirrors, and proxies (e.g. a ModelScope base or a corporate
+		// proxy) ignore `Range` and answer 200 OK with the *entire* body. Appending
+		// that full body onto the existing partial bytes yields an oversized, corrupt
+		// GGUF that still begins with the real "GGUF" magic — so isGgufFile() passes,
+		// sha256 is computed over the corrupt bytes, and the file is registered as an
+		// installed model whose later verify_model recomputes the same sha and
+		// reports "ok". The corruption is then silent and permanent (#29454). On a
+		// 200 we discard the partial and restart the write from byte 0.
+		const isResume = existingPartial > 0 && statusCode === 206;
+		record.received = isResume ? existingPartial : 0;
 		const contentLength = Number.parseInt(
 			String(response.headers["content-length"] ?? "0"),
 			10,
 		);
 		if (Number.isFinite(contentLength) && contentLength > 0) {
-			record.total = existingPartial + contentLength;
+			record.total = isResume ? existingPartial + contentLength : contentLength;
 		}
 
 		const stream = fs.createWriteStream(partialPath, {
-			flags: existingPartial > 0 ? "a" : "w",
+			flags: isResume ? "a" : "w",
 		});
 		let lastSampleAt = Date.now();
 		let lastSampleBytes = record.received;
