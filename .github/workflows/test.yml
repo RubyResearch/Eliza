@@ -725,7 +725,9 @@ jobs:
         run: bunx vitest run --config packages/app/vitest.config.ts packages/app/test/screenshot-quality.test.ts
 
       - name: App-core screenshot quality diagnostics coverage
-        run: bun run --cwd packages/app-core test -- test/app/screenshot-quality.test.ts
+        # The package `test` script is a `&&` chain, so `bun run test -- <file>`
+        # appends the path to its last command and vitest runs the whole suite.
+        run: bunx vitest run --config packages/app-core/vitest.config.ts packages/app-core/test/app/screenshot-quality.test.ts
 
   zero-key-scenario-runner:
     name: Zero-Key scenario runner
