@@ -934,6 +934,7 @@ function shouldIncludeAppleCalendar(request: {
 
 export function mergeAggregatedCalendarFeedEvents(
   sources: readonly AggregatedCalendarFeedSource[],
+  links: readonly LinkedCalendarEventRecord[] = [],
 ): LifeOpsCalendarEvent[] {
   type Candidate = {
     event: LifeOpsCalendarEvent;
@@ -1080,6 +1081,41 @@ export function mergeAggregatedCalendarFeedEvents(
       candidate.event.id,
     ]);
 
+  const linkedKeys = new Map<string, string>();
+  const linkedLocalIds = new Set<string>();
+  const events = sources.flatMap(({ feed }) => feed.events);
+  for (const link of links) {
+    if (link.state !== "clean" || link.pendingOperation) continue;
+    const local = events.find(
+      (event) =>
+        event.provider === "eliza" &&
+        event.side === "owner" &&
+        event.agentId === link.agentId &&
+        event.id === link.localEventId &&
+        event.metadata.version === link.localRevision,
+    );
+    const remote = events.find(
+      (event) =>
+        event.provider === "google" &&
+        event.side === "owner" &&
+        event.agentId === link.agentId &&
+        event.connectorAccountId === link.connectorAccountId &&
+        event.calendarId === link.providerCalendarId &&
+        event.externalId === link.providerEventId &&
+        event.metadata.etag === link.providerEtag,
+    );
+    if (!local || !remote) continue;
+    // Only the canonical mapping can connect a local event without an iCalUID
+    // to its provider copy. Matching titles or times never establish identity.
+    const portableKey = occurrenceKey(remote);
+    const key = portableKey
+      ? `portable\u0000${portableKey}`
+      : `linked\u0000${link.id}`;
+    linkedKeys.set(local.id, key);
+    linkedKeys.set(remote.id, key);
+    linkedLocalIds.add(local.id);
+  }
+
   const groups = new Map<string, Candidate[]>();
   for (const source of sources) {
     for (const event of source.feed.events) {
@@ -1096,9 +1132,11 @@ export function mergeAggregatedCalendarFeedEvents(
         },
       };
       const semanticKey = occurrenceKey(candidate.event);
-      const groupKey = semanticKey
-        ? `portable\u0000${semanticKey}`
-        : `source\u0000${localEventKey(candidate)}`;
+      const groupKey =
+        linkedKeys.get(event.id) ??
+        (semanticKey
+          ? `portable\u0000${semanticKey}`
+          : `source\u0000${localEventKey(candidate)}`);
       const group = groups.get(groupKey);
       if (group) {
         group.push(candidate);
@@ -1110,9 +1148,11 @@ export function mergeAggregatedCalendarFeedEvents(
 
   return [...groups.values()]
     .map((group) => {
-      const authoritative = group.reduce((winner, candidate) =>
-        compareCandidates(candidate, winner) > 0 ? candidate : winner,
-      );
+      const authoritative =
+        group.find(({ event }) => linkedLocalIds.has(event.id)) ??
+        group.reduce((winner, candidate) =>
+          compareCandidates(candidate, winner) > 0 ? candidate : winner,
+        );
       if (group.length === 1) return authoritative.event;
       const allSources = group
         .map(sourceReference)
@@ -1167,7 +1207,9 @@ export function mergeAggregatedCalendarFeedEvents(
         metadata: {
           ...authoritative.event.metadata,
           deduplication: {
-            identityVersion: "rfc5545-uid-recurrence-id-v2",
+            identityVersion: linkedLocalIds.has(authoritative.event.id)
+              ? "canonical-linked-calendar-v1"
+              : "rfc5545-uid-recurrence-id-v2",
             authoritativeSource: sourceReference(authoritative),
             sources: allSources,
             conflictingFields,
@@ -5314,7 +5356,9 @@ export class CalendarService extends Service {
     now = new Date(),
     discoveryFailures: readonly LifeOpsCalendarSourceHealth[] = [],
   ): Promise<LifeOpsCalendarFeed> {
-    const sources: AggregatedCalendarFeedSource[] = [];
+    const sources: (AggregatedCalendarFeedSource & {
+      calendar: LifeOpsCalendarSummary;
+    })[] = [];
     for (const calendar of calendars) {
       if (calendar.provider === ELIZA_CALENDAR_PROVIDER) {
         sources.push({
@@ -5455,6 +5499,29 @@ export class CalendarService extends Service {
       }
       sources.push({ calendar, feed });
     }
+    // Provider synchronization can update or delete the linked local event.
+    // Read local snapshots afterwards so this response reflects that change.
+    for (const source of sources) {
+      if (source.calendar.provider === ELIZA_CALENDAR_PROVIDER) {
+        source.feed = await this.readElizaCalendarFeed({
+          calendar: source.calendar,
+          timeMin,
+          timeMax,
+        });
+      }
+    }
+    const hasLinkedCandidates =
+      sources.some(
+        ({ calendar, feed }) =>
+          calendar.provider === "eliza" && feed.events.length > 0,
+      ) &&
+      sources.some(
+        ({ calendar, feed }) =>
+          calendar.provider === "google" && feed.events.length > 0,
+      );
+    const links = hasLinkedCandidates
+      ? await this.linkedRepo.listForAgent(this.agentId())
+      : [];
     const health = [
       ...discoveryFailures,
       ...sources.flatMap((source) => source.feed.sources),
@@ -5474,7 +5541,7 @@ export class CalendarService extends Service {
       .sort();
     return {
       calendarId: calendars.length === 1 ? calendars[0].calendarId : "all",
-      events: mergeAggregatedCalendarFeedEvents(sources),
+      events: mergeAggregatedCalendarFeedEvents(sources, links),
       source: sources.every((source) => source.feed.source === "synced")
         ? "synced"
         : "cache",

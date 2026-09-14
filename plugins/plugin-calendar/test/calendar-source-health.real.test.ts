@@ -23,6 +23,12 @@ import {
   calendarSchema,
 } from "../src/service/index.js";
 
+import { LinkedCalendarControlRepository } from "../src/service/linked-calendar-control.js";
+import {
+  LinkedCalendarRepository,
+  linkedCalendarSemanticHash,
+} from "../src/service/linked-calendar-sync.js";
+
 const AGENT_ID = "calendar-source-health-agent";
 const INTERNAL_URL = new URL("http://internal.local/api/calendar");
 const TIME_MIN = "2026-07-27T00:00:00.000Z";
@@ -74,7 +80,12 @@ function status(
     grantedScopes: [...sourceGrant.grantedScopes],
     expiresAt: null,
     hasRefreshToken: true,
-    grant: sourceGrant,
+    grant: linkedSyncEnabled
+      ? {
+          ...sourceGrant,
+          capabilities: [...sourceGrant.capabilities, "google.calendar.write"],
+        }
+      : sourceGrant,
   };
 }
 
@@ -119,8 +130,14 @@ function googleEvent(accountId: string) {
   return {
     id: "same-provider-event-id",
     calendarId: "primary",
-    title: `Family logistics (${accountId})`,
-    status: "confirmed",
+    title:
+      accountId === "account-a" && linkedProviderTitle !== null
+        ? linkedProviderTitle
+        : `Family logistics (${accountId})`,
+    status:
+      linkedProviderDeleted && accountId === "account-a"
+        ? "cancelled"
+        : "confirmed",
     start: "2026-07-27T16:00:00.000Z",
     end: "2026-07-27T17:00:00.000Z",
     isAllDay: false,
@@ -133,10 +150,15 @@ function googleEvent(accountId: string) {
     organizer: null,
     recurrence: null,
     recurringEventId: null,
-    metadata: {},
+    metadata: linkedSyncEnabled
+      ? { etag: linkedProviderTitle === null ? '"google-1"' : '"google-2"' }
+      : {},
   };
 }
 
+let linkedSyncEnabled = false;
+let linkedProviderTitle: string | null = null;
+let linkedProviderDeleted = false;
 let pg: PGlite;
 let calendar: CalendarService;
 let runtime: IAgentRuntime;
@@ -205,6 +227,8 @@ beforeAll(async () => {
         ? calendar
         : name === "google"
           ? {
+              getEvent: async (request: { accountId: string }) =>
+                googleEvent(request.accountId),
               listCalendars: async (request: { accountId: string }) => [
                 {
                   calendarId: "primary",
@@ -351,6 +375,12 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  linkedSyncEnabled = false;
+  linkedProviderTitle = null;
+  linkedProviderDeleted = false;
+  await pg.query("DELETE FROM app_calendar.linked_calendar_control_mutations");
+  await pg.query("DELETE FROM app_calendar.linked_calendar_control");
+  await pg.query("DELETE FROM app_calendar.linked_calendar_events");
   failAccountA = false;
   failAccountB = false;
   incrementalSyncEnabled = false;
@@ -361,6 +391,18 @@ beforeEach(async () => {
   eventPageRequests.length = 0;
   await pg.query("DELETE FROM app_calendar.life_calendar_events");
   await pg.query("DELETE FROM app_calendar.life_calendar_sync_states");
+  await pg.query("DELETE FROM app_calendar.life_calendar_feed_preferences");
+  for (const sourceGrant of [GRANT_A, GRANT_B]) {
+    await calendar.setCalendarIncluded(INTERNAL_URL, {
+      provider: "google",
+      side: "owner",
+      grantId: sourceGrant.id,
+      connectorAccountId: sourceGrant.connectorAccountId,
+      calendarId: "primary",
+      includeInFeed: true,
+      expectedVersion: 0,
+    });
+  }
 });
 
 afterAll(async () => {
@@ -368,6 +410,88 @@ afterAll(async () => {
 });
 
 describe("CalendarService source truth", () => {
+  it("returns the reconciled local snapshot on the first provider edit and deletion read", async () => {
+    const created = await calendar.createCalendarEventMutation(INTERNAL_URL, {
+      title: googleEvent("account-a").title,
+      startAt: "2026-07-27T16:00:00.000Z",
+      endAt: "2026-07-27T17:00:00.000Z",
+      timeZone: "UTC",
+      idempotencyKey: "linked-first-response",
+    });
+    const event = created.event;
+    if (!event) throw new Error("Expected a persisted local event");
+    const links = new LinkedCalendarRepository(runtime);
+    const link = await links.create({
+      agentId: AGENT_ID,
+      localEventId: event.id,
+      connectorAccountId: "account-a",
+      providerCalendarId: "primary",
+      localRevision: 1,
+    });
+    await links.save(link, {
+      providerEventId: "same-provider-event-id",
+      providerEtag: '"google-1"',
+      state: "clean",
+      pendingOperation: null,
+      lastCommonSemanticHash: linkedCalendarSemanticHash({
+        title: event.title,
+        description: event.description,
+        location: event.location,
+        startAt: event.startAt,
+        endAt: event.endAt,
+        timeZone: "UTC",
+        isAllDay: false,
+        attendees: [],
+      }),
+    });
+    linkedSyncEnabled = true;
+    const controls = new LinkedCalendarControlRepository(runtime);
+    const initial = await controls.read();
+    const selected = await controls.selectDestination(initial.revision, {
+      connectorAccountId: "account-a",
+      providerCalendarId: "primary",
+    });
+    await controls.resume(selected.revision);
+    linkedProviderTitle = "Pickup changed in Google";
+    const request = { timeMin: TIME_MIN, timeMax: TIME_MAX, forceSync: true };
+    const edited = await calendar.getCalendarFeed(INTERNAL_URL, request);
+    const localEvents = edited.events.filter(
+      (item) => item.provider === "eliza",
+    );
+    expect(localEvents.map((item) => [item.id, item.title])).toEqual([
+      [event.id, linkedProviderTitle],
+    ]);
+    expect(
+      edited.events.filter((item) => item.connectorAccountId === "account-a"),
+    ).toEqual([]);
+    expect(
+      edited.events
+        .filter((item) => item.connectorAccountId === "account-b")
+        .map((item) => item.title),
+    ).toEqual(["Family logistics (account-b)"]);
+    expect(localEvents[0].metadata.deduplication).toMatchObject({
+      sources: expect.arrayContaining([
+        expect.objectContaining({
+          provider: "google",
+          connectorAccountId: "account-a",
+        }),
+      ]),
+    });
+    linkedProviderDeleted = true;
+    const deleted = await calendar.getCalendarFeed(INTERNAL_URL, request);
+    expect(
+      deleted.events.some(
+        (item) =>
+          item.id === event.id || item.connectorAccountId === "account-a",
+      ),
+    ).toBe(false);
+    expect(await calendar.getCalendarEventById(event.id)).toBeNull();
+    expect(await links.getByLocalEvent(AGENT_ID, event.id)).toMatchObject({
+      state: "paused",
+      lastErrorCode: "LINKED_CALENDAR_PROVIDER_EVENT_DELETED",
+    });
+  });
+
   it("keeps identical calendar and event ids distinct across accounts", async () => {
     const feed = await calendar.getCalendarFeed(
       INTERNAL_URL,
@@ -383,7 +507,7 @@ describe("CalendarService source truth", () => {
     expect(feed.events).toHaveLength(2);
     expect(new Set(feed.events.map((event) => event.id)).size).toBe(2);
     expect(new Set(feed.sources.map((source) => source.key.grantId))).toEqual(
-      new Set([GRANT_A.id, GRANT_B.id]),
+      new Set(["eliza-calendar", GRANT_A.id, GRANT_B.id]),
     );
   });
 
@@ -429,7 +553,7 @@ describe("CalendarService source truth", () => {
     expect(stale?.error?.code).toBe("CALENDAR_SOURCE_ERROR");
   });
 
-  it("never reports a healthy empty feed when every source fails", async () => {
+  it("reports failed Google sources separately from the available built-in calendar", async () => {
     failAccountA = true;
     failAccountB = true;
 
@@ -444,10 +568,18 @@ describe("CalendarService source truth", () => {
     );
 
     expect(feed.events).toEqual([]);
-    expect(feed.state).toBe("unavailable");
-    expect(feed.sources.every((source) => source.status === "error")).toBe(
-      true,
-    );
+    expect(feed.state).toBe("partial");
+    expect(
+      feed.sources
+        .filter((source) => source.key.provider === "google")
+        .map((source) => [source.key.grantId, source.status]),
+    ).toEqual([
+      [GRANT_A.id, "error"],
+      [GRANT_B.id, "error"],
+    ]);
+    expect(
+      feed.sources.find((source) => source.key.provider === "eliza"),
+    ).toMatchObject({ status: "fresh" });
   });
 
   it("applies account-scoped incremental tombstones and updates without rereading full windows", async () => {
