@@ -1134,14 +1134,17 @@ export async function executeApprovedRequest(args: {
   }
   if (calendarCard) {
     if (
-      args.request.channel !== "imessage" ||
+      args.request.channel !==
+        (calendarCard.correlation.version === 2
+          ? calendarCard.correlation.channel
+          : "imessage") ||
       args.request.subjectUserId !== calendarCard.correlation.recipientEntityId
     ) {
       return preflightFailureResult(
         args.request,
         new ApprovalConnectorPreflightError(
           "CALENDAR_CARD_IDENTITY_MISMATCH",
-          "Calendar card approval is not bound to this iMessage recipient identity",
+          "Calendar card approval is not bound to this channel and recipient identity",
         ),
       );
     }

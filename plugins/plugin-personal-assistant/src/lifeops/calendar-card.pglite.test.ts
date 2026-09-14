@@ -122,6 +122,51 @@ describe("daily calendar card composition", () => {
     ).toBe(false);
   });
 
+  it.each(["imessage", "telegram", "discord"] as const)(
+    "binds a %s card review to its exact recipient and transport",
+    (channel) => {
+      const composition = composeDailyCalendarCard({
+        date: "2026-09-02",
+        timeZone: "America/New_York",
+        privacyMode: "times_only",
+        events,
+        accessUrl: "https://eliza.test/card?token=fixed",
+      });
+      const payload = calendarCardApprovalPayload({
+        channel,
+        recipient: "approved-destination",
+        recipientEntityId: "owner-1",
+        cardId: "card-1",
+        composition,
+      });
+      expect(verifyCalendarCardApproval(payload)?.matches).toBe(true);
+      expect(
+        verifyCalendarCardApproval({
+          ...payload,
+          recipient: "another-destination",
+        })?.matches,
+      ).toBe(false);
+      const correlation = payload.calendarCard;
+      if (correlation?.version !== 2)
+        throw new Error("Missing bound card review");
+      expect(
+        verifyCalendarCardApproval({
+          ...payload,
+          calendarCard: {
+            ...correlation,
+            channel: channel === "telegram" ? "discord" : "telegram",
+          },
+        })?.matches,
+      ).toBe(false);
+      expect(
+        verifyCalendarCardApproval({
+          ...payload,
+          calendarCard: { ...correlation, recipientEntityId: "another-person" },
+        })?.matches,
+      ).toBe(false);
+    },
+  );
+
   it("does not equate provider acceptance with recipient delivery", () => {
     expect(calendarCardDeliveryStatus({ accepted: true })).toEqual({
       state: "accepted",

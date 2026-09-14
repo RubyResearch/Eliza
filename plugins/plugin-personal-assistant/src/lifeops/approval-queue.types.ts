@@ -48,9 +48,8 @@ export interface SchedulingApprovalCorrelation {
 }
 
 /** Immutable bytes and capability identity approved for one calendar card. */
-export interface CalendarCardApprovalCorrelation {
+interface CalendarCardApprovalContent {
   readonly kind: "calendar_card";
-  readonly version: 1;
   readonly cardId: string;
   readonly recipientEntityId: string;
   readonly date: string;
@@ -60,6 +59,18 @@ export interface CalendarCardApprovalCorrelation {
   readonly htmlSha256: string;
   readonly envelopeSha256: string;
 }
+
+/** Legacy cards remain iMessage-only; new reviews bind the transport and destination. */
+export type CalendarCardApprovalCorrelation = CalendarCardApprovalContent &
+  (
+    | { readonly version: 1 }
+    | {
+        readonly version: 2;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly deliverySha256: string;
+      }
+  );
 
 export type ApprovalRequestState =
   | "pending"

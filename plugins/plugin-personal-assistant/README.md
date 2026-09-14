@@ -38,6 +38,21 @@ isolated port (41873 by default):
 bun run --cwd plugins/plugin-personal-assistant test:connections:e2e
 ```
 
+## Private daily calendar cards
+
+`POST /api/lifeops/calendar/cards` accepts an explicit `channel` of `imessage`,
+`telegram`, or `discord`; omitted channels preserve the iMessage default.
+Telegram targets are chat identifiers and Discord targets are channel
+identifiers. Creation queues an owner review and does not send. The approval
+binds its exact recipient, channel, calendar content, and private card identity;
+changing any of them requires a new review. Existing version-one approvals
+remain iMessage-only.
+
+Card links require the intended authenticated principal as well as the
+single-use capability. Expired, revoked, already-opened, and anonymous reads
+remain denied. A queued card is not delivery evidence; connector setup,
+reachable HTTPS links, and actual provider receipts require separate verification.
+
 ## Undated todo lifecycle
 
 Undated owner todos remain task definitions with `cadence.kind = "unscheduled"`.
