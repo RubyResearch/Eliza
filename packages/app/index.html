@@ -319,8 +319,12 @@
 
       // These are the only above-the-fold image requests in the desktop
       // static hero. Start them from the HTML parse instead of waiting for
-      // the entry -> public shell -> landing-page module chain.
-      if (window.matchMedia("(min-width: 641px)").matches) {
+      // the entry -> public shell -> landing-page module chain. Skip every
+      // other public route (including signed-out /login): those surfaces do
+      // not render these marks, so a host-wide preload becomes an unused
+      // high-priority fetch.
+      const pathname = (location.pathname || "/").replace(/\/+$/, "") || "/";
+      if (pathname === "/" && window.matchMedia("(min-width: 641px)").matches) {
         for (const href of [
           "/brand/logos/logo_white_orangebg.svg",
           "/brand/logos/eliza_text_black.svg",
