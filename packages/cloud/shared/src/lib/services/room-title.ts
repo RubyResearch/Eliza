@@ -65,12 +65,14 @@ function generateFallbackTitle(message: string): string {
   const cleaned = message.trim().toLowerCase();
 
   // Common greeting patterns -> generic titles
-  if (/^(hi|hello|hey|howdy|greetings|yo|sup)/i.test(cleaned)) {
+  // Word-boundary anchored so a prefix like "hi" in "history" cannot
+  // collapse a real message to a generic title (#30122).
+  if (/^(hi|hello|hey|howdy|greetings|yo|sup)\b/i.test(cleaned)) {
     return "New Conversation";
   }
 
   // Question patterns
-  if (/^(what|how|why|when|where|who|can|could|would|should|is|are|do|does)/i.test(cleaned)) {
+  if (/^(what|how|why|when|where|who|can|could|would|should|is|are|do|does)\b/i.test(cleaned)) {
     const words = message.trim().split(/\s+/).slice(0, 6);
     if (words.length >= 3) {
       return capitalizeFirst(words.slice(0, 5).join(" "));
@@ -79,17 +81,17 @@ function generateFallbackTitle(message: string): string {
   }
 
   // Help/assist patterns
-  if (/^(help|assist|support|i need|please)/i.test(cleaned)) {
+  if (/^(help|assist|support|i need|please)\b/i.test(cleaned)) {
     return "Help Request";
   }
 
   // Code/technical patterns
-  if (/^(code|write|create|build|make|implement|debug|fix)/i.test(cleaned)) {
+  if (/^(code|write|create|build|make|implement|debug|fix)\b/i.test(cleaned)) {
     return "Coding Assistance";
   }
 
   // Explain patterns
-  if (/^(explain|tell me|describe|what is|define)/i.test(cleaned)) {
+  if (/^(explain|tell me|describe|what is|define)\b/i.test(cleaned)) {
     return "Explanation Request";
   }
 
