@@ -89,6 +89,12 @@ describe("approval messaging boundary", () => {
       provider: "discord",
       channelId: "channel-1",
       deliveryStatus: "sent" as const,
+      providerMessageId: "discord-part-2",
+      receipt: {
+        providerMessageIds: ["discord-part-1", "discord-part-2"],
+        acceptedAt: 1_780_000_000_000,
+        persistence: { status: "persisted", memoryIds: [] },
+      },
     }));
     const sendIMessage = vi.fn(async () => ({
       ok: true as const,
@@ -119,7 +125,11 @@ describe("approval messaging boundary", () => {
       body: "hello",
     });
 
-    await discord.dispatch("approval:discord");
+    const discordReceipt = await discord.dispatch("approval:discord");
+    expect(discordReceipt).toMatchObject({
+      messageId: "discord-part-2",
+      receipt: { providerMessageIds: ["discord-part-1", "discord-part-2"] },
+    });
     await imessage.dispatch("approval:imessage");
     expect(sendDiscordMessage).toHaveBeenCalledWith(
       expect.objectContaining({ allowTransportFallback: false }),

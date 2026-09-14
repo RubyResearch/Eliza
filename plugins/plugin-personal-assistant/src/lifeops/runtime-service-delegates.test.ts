@@ -314,6 +314,33 @@ describe("runtime service delegates", () => {
     );
   });
 
+  it("preserves every provider message receipt for multi-part Discord delivery", async () => {
+    const receipt = {
+      providerMessageIds: ["discord-part-1", "discord-part-2"] as const,
+      acceptedAt: 1_780_000_000_000,
+      persistence: { status: "persisted" as const, memoryIds: [] },
+    };
+    const runtime = runtimeWithServices({
+      discord: {
+        handleSendMessage: async () => ({
+          kind: "delivered",
+          receipt,
+          memories: [],
+        }),
+      },
+    });
+    const result = await sendDiscordMessageWithRuntimeService({
+      runtime,
+      grant: grant({ provider: "discord" }),
+      channelId: "1234567890",
+      text: "Multi-part calendar review",
+    });
+    expect(result.status).toBe("handled");
+    if (result.status !== "handled") throw new Error(result.reason);
+    expect(result.value.delivery.receipt).toEqual(receipt);
+    expect(result.value.delivery.providerMessageId).toBe("discord-part-2");
+  });
+
   it("does not report a Discord send as handled without delivery evidence", async () => {
     const runtime = runtimeWithServices({
       discord: { handleSendMessage: vi.fn(async () => undefined) },

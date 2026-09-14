@@ -134,6 +134,8 @@ export async function prepareCrossChannelSend(args: {
             // asserting the variant.
             channelId: "channelId" in sent ? sent.channelId : target,
             deliveryStatus: sent.deliveryStatus,
+            messageId: sent.providerMessageId,
+            receipt: sent.receipt,
           };
         },
       };

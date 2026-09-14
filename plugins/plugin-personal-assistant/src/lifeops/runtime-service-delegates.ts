@@ -771,7 +771,12 @@ export async function sendDiscordMessageWithRuntimeService(args: {
   accountId?: string | null;
   channelId: string;
   text: string;
-}): Promise<RuntimeServiceDelegationResult<{ ok: true }>> {
+}): Promise<
+  RuntimeServiceDelegationResult<{
+    ok: true;
+    delivery: ReturnType<typeof requireConfirmedSendHandlerDelivery>;
+  }>
+> {
   const service = getRuntimeService<ConnectorMessageRuntimeServiceLike>(
     args.runtime,
     ["discord"],
@@ -788,14 +793,14 @@ export async function sendDiscordMessageWithRuntimeService(args: {
     channelId: args.channelId,
   });
   try {
-    requireConfirmedSendHandlerDelivery(
+    const delivery = requireConfirmedSendHandlerDelivery(
       await service.handleSendMessage(args.runtime, target, {
         text: args.text,
         source: "lifeops",
         metadata: { accountId },
       } as Content),
     );
-    return { status: "handled", accountId, value: { ok: true } };
+    return { status: "handled", accountId, value: { ok: true, delivery } };
   } catch (error) {
     // error-policy:J1 connector-service boundary refuses to translate an
     // unconfirmed structural outcome into `{ ok: true }`.
