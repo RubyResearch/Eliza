@@ -623,10 +623,18 @@ export function lookupModelPrice(
  * `logger.warn` is invoked once per call. Callers in hot paths can pass
  * `logger: undefined` to suppress noise.
  *
- * Cache-read tokens are billed at the cacheRead rate when set, otherwise
- * the regular input rate. Cache-creation tokens are billed at cacheWrite
- * (Anthropic's surcharge) on top of the regular input portion that paid
- * for them. Non-cached input is billed at the input rate.
+ * `promptTokens` is treated as INCLUSIVE of the cache counts: the non-cached
+ * portion is `promptTokens - cacheRead - cacheWrite`, clamped at 0.
+ *
+ * Each portion is then billed exactly once:
+ * - non-cached input at `input`;
+ * - cache-read tokens at `cacheRead`, or at `input` when `cacheRead` is 0 or
+ *   unset (a provider with no separate cache-read price bills them as input);
+ * - cache-creation tokens at `cacheWrite`, or at `input` under the same rule.
+ *
+ * `cacheWrite` is a FULL rate, not a surcharge added to `input` — Anthropic's
+ * cache-write entries are 1.25x their input rate, so billing a cache-creation
+ * token at both `input` and `cacheWrite` would overcharge it by 1.8x.
  */
 export function computeCallCostUsd(
 	modelName: string | undefined,

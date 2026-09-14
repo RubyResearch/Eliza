@@ -312,7 +312,7 @@ describe("computeCallCostUsd", () => {
 		expect(cost).toBeCloseTo(18.0, 6);
 	});
 
-	it("applies cache-read discount and cache-write surcharge for Anthropic", () => {
+	it("bills cache-read and cache-write portions at their own full rates", () => {
 		// claude-haiku-4-5: input $1.00, output $5.00, cacheRead $0.10,
 		//                   cacheWrite $1.25 (per 1M).
 		// 1000 prompt = 200 fresh + 700 cacheRead + 100 cacheWrite
@@ -329,6 +329,20 @@ describe("computeCallCostUsd", () => {
 			totalTokens: 1050,
 		});
 		expect(cost).toBeCloseTo(0.000645, 9);
+	});
+
+	it("bills a cache-creation token once, not at input plus cacheWrite", () => {
+		// cacheWrite is a full rate (1.25x input for Anthropic), not an extra
+		// charge added to the input rate. Isolate the cache-write term: all
+		// prompt tokens are cache-creation, so every other term is 0.
+		const cost = computeCallCostUsd("claude-haiku-4-5", {
+			promptTokens: 1_000_000,
+			completionTokens: 0,
+			cacheCreationInputTokens: 1_000_000,
+			totalTokens: 1_000_000,
+		});
+		// 1M * $1.25/M = $1.25. Billing input as well would give $2.25.
+		expect(cost).toBeCloseTo(1.25, 9);
 	});
 
 	it("falls back to the input rate when cacheRead is 0 (Cerebras gpt-oss)", () => {
