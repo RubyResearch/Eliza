@@ -71,7 +71,7 @@ export const ownerAgreementKnowledgeAction: Action = {
   routingHint:
     "parenting or coparenting agreement knowledge, reviewed obligations, pins, or guest access preview -> OWNER_AGREEMENT_KNOWLEDGE",
   tags: ["domain:family", "capability:read", "capability:write"],
-  contexts: ["family", "docs", "contacts"],
+  contexts: ["family", "documents", "contacts"],
   roleGate: { minRole: "OWNER" },
   validate: hasLifeOpsAccess,
   parameters: [

@@ -191,7 +191,7 @@ export function createHouseholdOperationsAction(
       "household vendors|maintenance|seasonal opportunities|child sizes|CPEM|weekly brief; drafts only",
     routingHint:
       "vendor/service history, due home work, seasonal registration, child clothing size, household responsibility non-use, or weekly family brief -> HOUSEHOLD_OPERATIONS",
-    contexts: ["general", "calendar", "tasks", "finances", "documents"],
+    contexts: ["general", "calendar", "tasks", "finance", "documents"],
     roleGate: { minRole: "OWNER" },
     suppressPostActionContinuation: true,
     toolSchemaStrict: false,

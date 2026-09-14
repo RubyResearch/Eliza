@@ -854,7 +854,7 @@ export const ownerDocumentsAction: Action & {
     "OWNER_DOCUMENTS signature|approval|deadline|upload_asset|collect_id|close_request|guarantee_class",
   routingHint:
     'owner document signature/approval/upload/portal/ID-form ("get signed", "send approval", "upload deck", "track NDA deadline", "close doc") -> OWNER_DOCUMENTS; approval queue resolution -> RESOLVE_REQUEST',
-  contexts: ["docs", "tasks", "calendar", "contacts"],
+  contexts: ["documents", "tasks", "calendar", "contacts"],
   roleGate: { minRole: "OWNER" },
   suppressPostActionContinuation: true,
   validate: async (runtime, message) => hasLifeOpsAccess(runtime, message),

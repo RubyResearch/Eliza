@@ -19,7 +19,7 @@ export const proxyStatusAction: Action = {
     "and (in shared mode) reachability of the upstream proxy.",
   descriptionCompressed:
     "anthropic-proxy-status: mode, url, listening, requests, token expiry, upstream check",
-  contexts: ["debug", "operations"],
+  contexts: ["system", "settings"],
   validate: async () => true,
   handler: async (runtime: IAgentRuntime): Promise<ActionResult> => {
     const service = runtime.getService<AnthropicProxyService>(ANTHROPIC_PROXY_SERVICE_NAME);
