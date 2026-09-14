@@ -1214,7 +1214,7 @@ describe("DocumentService requester authorization", () => {
 		const expected = readDocumentMutationSnapshot(parent);
 		if (!expected)
 			throw new Error("Replacement parent has no mutation snapshot");
-		const rejectedFragmentId = "f4300000-0000-4000-8000-000000000031" as UUID;
+		const rejectedFragmentId = "f4300000-0000-4000-8000-000000000099" as UUID;
 		const oversized = "x".repeat(32 * 1024 * 1024);
 		await expect(
 			runtime.adapter.replaceDocumentRevision({
