@@ -610,8 +610,6 @@ export class NodeAutoscaler {
     allocatedByNode: Map<string, number>,
     totalAvailable: number,
   ): Promise<DockerNode[]> {
-    if (healthyEnabled.length <= 1) return [];
-
     const ageThreshold = this.nowFn() - this.policy.idleNodeMinAgeMs;
     const oldEnough = healthyEnabled.filter(
       (n) => isAutoscaledHetznerNode(n) && n.created_at.getTime() < ageThreshold,
@@ -629,8 +627,9 @@ export class NodeAutoscaler {
       })),
     );
 
+    // The configured slot floor is authoritative, including zero. Keeping an
+    // extra node unconditionally would keep charging an empty fleet forever.
     let remainingAvailable = totalAvailable;
-    let remainingHealthyNodes = healthyEnabled.length;
     const drainCandidates: DockerNode[] = [];
 
     for (const { node, retainedCount } of counts) {
@@ -640,12 +639,10 @@ export class NodeAutoscaler {
       if (allocated > 0) continue;
 
       const nodeAvailable = Math.max(0, node.capacity - allocated);
-      if (remainingHealthyNodes <= 1) continue;
       if (remainingAvailable - nodeAvailable < preservationFloor) continue;
 
       drainCandidates.push(node);
       remainingAvailable -= nodeAvailable;
-      remainingHealthyNodes -= 1;
     }
 
     return drainCandidates;

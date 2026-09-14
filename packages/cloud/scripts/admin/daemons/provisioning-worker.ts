@@ -1819,6 +1819,23 @@ async function runWorkCycle(
   const work = (async () => {
     await runBoundedPhase(
       logger,
+      "expired Dedicated funding reconcile",
+      async () => {
+        const { provisioningJobService } = await loadDeps();
+        return provisioningJobService.reconcileExpiredAgentCompute();
+      },
+      (result) => {
+        if (result.total > 0) {
+          logger.info(
+            "[provisioning-worker] expired Dedicated funding reconcile complete",
+            result,
+          );
+        }
+      },
+    );
+
+    await runBoundedPhase(
+      logger,
       "replacement cleanup reconcile",
       () => processReplacementCleanupReconcileCycle(config.batchSize),
       (result) => {

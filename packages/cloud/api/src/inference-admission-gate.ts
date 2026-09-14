@@ -7,14 +7,12 @@
  * resetting an active quota window. The object never queries Postgres or Redis.
  */
 
-import { runWithDbCacheAsync } from "@/db/client";
 import { runWithCloudBindingsAsync } from "@/lib/runtime/cloud-bindings";
 import { isAffiliateBillingAttribution } from "@/lib/services/affiliate-billing-attribution";
 import type { InferenceBalanceFence } from "@/lib/services/credits";
-import {
-  type InferenceAdmissionRecoveryContext,
-  type InferenceAdmissionRecoveryResult,
-  recoverExpiredInferenceAdmissionLease,
+import type {
+  InferenceAdmissionRecoveryContext,
+  InferenceAdmissionRecoveryResult,
 } from "@/lib/services/inference-admission-recovery";
 import { logger } from "@/lib/utils/logger";
 import type { AppEnv } from "@/types/cloud-worker-env";
@@ -1856,6 +1854,15 @@ export class InferenceAdmissionGate {
     if (expired.length === 0) return;
     const results = await Promise.allSettled(
       expired.map(async ({ requestId, lease }) => {
+        // Recovery is alarm-only. Keep its database, pricing, and provider
+        // dependencies out of Worker startup and ordinary admission requests.
+        const [
+          { runWithDbCacheAsync },
+          { recoverExpiredInferenceAdmissionLease },
+        ] = await Promise.all([
+          import("@/db/client"),
+          import("@/lib/services/inference-admission-recovery"),
+        ]);
         const inferenceBalanceFence: InferenceBalanceFence = {
           // Alarm recovery charges the exact active estimate, so the existing
           // lease already fences this amount. The authoritative revision below

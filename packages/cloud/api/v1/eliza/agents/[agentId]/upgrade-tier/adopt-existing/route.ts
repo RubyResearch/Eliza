@@ -37,12 +37,13 @@ import { logger } from "@/lib/utils/logger";
 import type { AppEnv } from "@/types/cloud-worker-env";
 
 const CORS_METHODS = "GET, POST, OPTIONS";
-const ADOPTION_QUOTE_VERSION = "personal-dedicated-adoption-v2";
+const ADOPTION_QUOTE_VERSION = "personal-dedicated-adoption-v3";
 
 const AdoptionConfirmation = z
   .object({
     action: z.literal("adopt_existing_dedicated"),
     quoteId: z.string().regex(/^[a-f0-9]{64}$/),
+    minimumActivationChargeUsd: z.number().finite().nonnegative(),
   })
   .strict();
 
@@ -104,6 +105,7 @@ async function quoteIdFor(params: {
     params.balance.toFixed(6),
     params.activationAuthorityKey,
     AGENT_PRICING.RUNNING_HOURLY_RATE.toFixed(6),
+    AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE.toFixed(6),
     AGENT_PRICING.DAILY_RUNNING_COST.toFixed(6),
     AGENT_PRICING.UPGRADE_MINIMUM_BALANCE.toFixed(6),
     AGENT_PRICING.UPGRADE_MIN_HOSTING_DAYS.toString(10),
@@ -156,6 +158,9 @@ async function adoptionQuote(
     adoptionState: resolution.state,
     startsCompute: willStartCompute,
     hourlyRateUsd: AGENT_PRICING.RUNNING_HOURLY_RATE,
+    minimumActivationChargeUsd: willStartCompute
+      ? AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE
+      : 0,
     dailyRateUsd: AGENT_PRICING.DAILY_RUNNING_COST,
     minimumBalanceUsd,
     minimumRunwayDays: AGENT_PRICING.UPGRADE_MIN_HOSTING_DAYS,
@@ -334,7 +339,11 @@ async function __hono_POST(
     const quote = await timed("quote", () =>
       adoptionQuote(sourceAgentId, user, resolved),
     );
-    if (confirmation.data.quoteId !== quote.quoteId) {
+    if (
+      confirmation.data.quoteId !== quote.quoteId ||
+      confirmation.data.minimumActivationChargeUsd !==
+        quote.minimumActivationChargeUsd
+    ) {
       return json(
         {
           success: false,

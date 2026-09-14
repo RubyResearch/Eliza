@@ -257,7 +257,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
       set: mock(() => ({ where: mock(() => ({ returning: mock(async () => []) })) })),
     }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       await expect(
         (
@@ -620,7 +624,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
       set: mock(() => ({ where: mock(() => ({ returning: mock(async () => []) })) })),
     }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       await expect(
         (
@@ -679,7 +687,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
         set: mock(() => ({ where: mock(() => ({ returning: mock(async () => []) })) })),
       }));
       sandboxTransactions.implementation = async (fn) =>
-        fn({ execute: async () => ({ rows: [] }), update });
+        fn({
+          execute: async () => ({ rows: [] }),
+          update,
+          select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+        });
       try {
         await expect(
           (
@@ -751,7 +763,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
       })),
     }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       const result = (await (
         svc as unknown as {
@@ -807,7 +823,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
     }));
     const update = mock(() => ({ set }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       const result = (await (
         svc as unknown as {
@@ -874,7 +894,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
     }));
     const update = mock(() => ({ set }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       const result = (await (
         svc as unknown as {
@@ -941,7 +965,11 @@ describe("ElizaSandboxService.deleteAgent fail-closed pre-deletion capture (#185
       })),
     }));
     sandboxTransactions.implementation = async (fn) =>
-      fn({ execute: async () => ({ rows: [] }), update });
+      fn({
+        execute: async () => ({ rows: [] }),
+        update,
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
+      });
     try {
       await expect(
         (

@@ -8,7 +8,7 @@
  */
 
 import { type RefObject, useCallback } from "react";
-import type { Tab } from "../navigation";
+import { getWindowNavigationPath, type Tab } from "../navigation";
 import type { FirstRunStateHook } from "./useFirstRunState";
 
 export interface FirstRunCallbacksDeps {
@@ -47,7 +47,12 @@ export function useFirstRunCallbacks(deps: FirstRunCallbacksDeps) {
       setFirstRunComplete(true);
       coordinatorFirstRunCompleteRef.current?.();
       initialTabSetRef.current = true;
-      setTab(landingTab);
+      // A Cloud account page can finish agent discovery in the background.
+      // Complete onboarding without replacing the user's explicit management
+      // destination with Chat after the sign-in callback has restored it.
+      if (!/^\/cloud(?:\/|$)/.test(getWindowNavigationPath())) {
+        setTab(landingTab);
+      }
       void loadCharacter();
     },
     [

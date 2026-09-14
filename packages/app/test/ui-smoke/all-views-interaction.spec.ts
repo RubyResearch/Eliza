@@ -15,6 +15,7 @@ import {
   openAppPath,
   seedAppStorage,
 } from "./helpers";
+import { installCameraRecoveryFixture } from "./helpers/camera-recovery-fixture";
 import {
   CLICK_OBSERVED_ATTRIBUTES,
   type ControlDetails,
@@ -770,7 +771,14 @@ test.describe("bounded built-in interaction activity smoke", () => {
       await hideChatOverlay(page);
       await installDefaultAppRoutes(page);
       await installInteractionAuditRoutes(page);
-      await openAppPath(page, view.path);
+      if (view.id === "camera") await installCameraRecoveryFixture(page);
+      await openAppPath(
+        page,
+        view.id === "camera" ? `${view.path}?android=true` : view.path,
+      );
+      if (view.id === "camera") {
+        await expect(page.getByTestId("camera-denied")).toBeVisible();
+      }
       await page.locator("body").waitFor({ state: "visible", timeout: 60_000 });
       observedChanges.push(
         `view ${view.id}: route ${view.path} rendered ${page.url()}`,
@@ -866,6 +874,15 @@ test.describe("bounded built-in interaction activity smoke", () => {
         }
       }
 
+      if (view.id === "camera") {
+        const preview = page.getByTestId("camera-preview").locator("video");
+        await expect(preview).toBeVisible();
+        await expect
+          .poll(() =>
+            preview.evaluate((video: HTMLVideoElement) => video.readyState),
+          )
+          .toBeGreaterThanOrEqual(2);
+      }
       expect(
         observationFailures,
         [

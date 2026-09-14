@@ -815,7 +815,9 @@ function isSingleVitestWrapperCommand(command) {
 }
 
 function isSingleVitestBatchWrapperCommand(command) {
-  return /^node\s+scripts\/run-vitest-batches\.mjs$/.test(
+  // The agent's mobile-entry preflight must succeed before its final batch
+  // runner receives the JUnit arguments appended to the package command.
+  return /^(?:bun\s+run\s+test:mobile-workspace-entry\s+&&\s+)?node\s+scripts\/run-vitest-batches\.mjs$/.test(
     stripLeadingEnvAssignments(command),
   );
 }

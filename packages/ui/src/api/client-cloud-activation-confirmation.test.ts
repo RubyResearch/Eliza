@@ -11,6 +11,7 @@ const QUOTE = {
   sourceAgentId: PERSONAL_ID,
   hourlyRateUsd: 0.01,
   dailyRateUsd: 0.24,
+  minimumActivationChargeUsd: 0.3,
   minimumBalanceUsd: 0.72,
   minimumRunwayDays: 3,
   balanceUsd: 10,
@@ -47,6 +48,24 @@ function installQuote(quote: Record<string, unknown> = QUOTE) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Dedicated activation confirmation", () => {
+  it("refuses a quote without the activation minimum before asking for confirmation or posting", async () => {
+    const { minimumActivationChargeUsd: _minimum, ...incomplete } = QUOTE;
+    const requests = installQuote(incomplete);
+    const confirmation = vi.fn<DedicatedActivationConfirmationRequester>();
+    await expect(
+      new ElizaClient().ensurePersonalDedicatedEliza({
+        cloudApiBase: "https://api.eliza.app",
+        authToken: "test-token",
+        requestDedicatedActivationConfirmation: confirmation,
+      }),
+    ).rejects.toMatchObject({
+      code: "CLOUD_DEDICATED_ACTIVATION_QUOTE_INVALID",
+    });
+    expect(confirmation).not.toHaveBeenCalled();
+    expect(requests).toHaveBeenCalledTimes(2);
+    for (const [, init] of requests.mock.calls)
+      expect(init?.method).toBe("GET");
+  });
   it("keeps headless startup read-only", async () => {
     const requests = installQuote();
     await expect(

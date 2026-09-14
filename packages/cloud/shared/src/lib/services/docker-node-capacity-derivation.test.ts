@@ -29,7 +29,7 @@ import {
 const CLOUD_NODE_MB = 7745;
 /** eliza-staging-robot-1 and its five siblings. */
 const ROBOT_NODE_MB = 257626;
-/** The shipped per-agent ceiling. */
+/** The historical per-agent ceiling in the measured overcommit incident. */
 const AGENT_MB = 3072;
 
 /** Measured vCPU: the cloud boxes are 4-core, the robots 12-core. */
@@ -42,6 +42,27 @@ const base = {
 };
 
 describe("deriveNodeCapacity", () => {
+  test("fits one restore-sized agent on the paid 8 GiB node without consuming the host reserve", () => {
+    const result = resolveNodeCapacity({
+      requestedCapacity: 1,
+      memTotalMb: CLOUD_NODE_MB,
+      vCpuCount: 2,
+      agentMemoryLimitMb: 6144,
+      fallbackCapacity: 8,
+    });
+    expect(result.capacity).toBe(1);
+    expect(result.capacity * 6144 + HOST_RESERVE_MB).toBeLessThanOrEqual(CLOUD_NODE_MB);
+    expect(
+      resolveNodeCapacity({
+        requestedCapacity: 4,
+        memTotalMb: CLOUD_NODE_MB,
+        vCpuCount: CLOUD_VCPU,
+        agentMemoryLimitMb: 6144,
+        fallbackCapacity: 8,
+      }),
+    ).toMatchObject({ capacity: 1, clampedFrom: 4, boundBy: "memory" });
+  });
+
   test("sizes the measured cloud box at 2 slots, bound by memory", () => {
     // memory (7745-1024)/3072 = 2 ; cpu (4-1)/1 = 3 -> memory binds
     const d = deriveNodeCapacity({

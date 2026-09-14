@@ -2,61 +2,35 @@
  * Prepares an authoritative personal Dedicated runtime for a connector turn.
  *
  * Connector delivery may arrive while paid compute is stopped or sleeping.
- * This service reuses the existing credit, worker-health, and idempotent
- * lifecycle-job contracts so messaging can request recovery without ever
- * reopening the archived Shared conversation.
+ * Delivery may use an already-running runtime, but cannot authorize a new
+ * paid session. Stopped targets require price review in the Eliza app.
  */
 
 import type { AgentSandbox } from "../../db/repositories/agent-sandboxes";
-import type { AppEnv } from "../../types/cloud-worker-env";
-import { logger } from "../utils/logger";
-import { checkAgentCreditGate } from "./agent-billing-gate";
-import { provisioningJobService } from "./provisioning-jobs";
-import { checkProvisioningWorkerHealth } from "./provisioning-worker-health";
 
 export const PERSONAL_DEDICATED_RETRY_AFTER_SECONDS = 5;
 
 export type PersonalDedicatedDeliveryPreparation =
   | { state: "ready" }
   | {
-      state: "starting";
-      action: "resume" | "wake";
-      created: boolean;
-      jobId: string;
-      previousStatus: "stopped" | "sleeping";
-      retryAfterSeconds: number;
-    }
-  | {
-      state: "blocked";
-      code: "insufficient_credits";
-      error: string;
-      currentBalance: number;
-    }
-  | {
       state: "unavailable";
       code:
         | "dedicated_starting"
         | "dedicated_state_unavailable"
-        | "PROVISIONING_WORKER_NOT_CONFIGURED"
-        | "PROVISIONING_WORKER_UNHEALTHY"
-        | "PROVISIONING_WORKER_UNREACHABLE"
-        | "PROVISIONING_WORKER_CAPABILITY_REQUIRED";
+        | "DEDICATED_PRICE_CONFIRMATION_REQUIRED";
       error: string;
       retryable: boolean;
-      status: 502 | 503;
+      status: 428 | 503;
       retryAfterSeconds?: number;
     };
 
 /**
  * Return ready only for a running runtime. Stopped and sleeping targets keep
- * their server-owned cutover authority while an idempotent paid-compute
- * recovery job starts; every other lifecycle state remains fail-closed.
+ * their server-owned cutover authority without creating a job or reopening
+ * Shared. The owner must explicitly start another paid session in the app.
  */
 export async function preparePersonalDedicatedDelivery(
   target: Pick<AgentSandbox, "id" | "status">,
-  identity: { organizationId: string; userId: string },
-  env: AppEnv["Bindings"],
-  executionCtx: { waitUntil(promise: Promise<unknown>): void },
 ): Promise<PersonalDedicatedDeliveryPreparation> {
   if (target.status === "running") return { state: "ready" };
 
@@ -81,60 +55,11 @@ export async function preparePersonalDedicatedDelivery(
     };
   }
 
-  const creditCheck = await checkAgentCreditGate(identity.organizationId);
-  if (!creditCheck.allowed) {
-    return {
-      state: "blocked",
-      code: "insufficient_credits",
-      error:
-        creditCheck.error ??
-        "Dedicated Eliza needs a funded balance before paid compute can start.",
-      currentBalance: creditCheck.balance,
-    };
-  }
-
-  const workerHealth = await checkProvisioningWorkerHealth();
-  if (!workerHealth.ok) {
-    return {
-      state: "unavailable",
-      code: workerHealth.code,
-      error: workerHealth.error,
-      retryable: true,
-      status: workerHealth.status,
-      retryAfterSeconds: PERSONAL_DEDICATED_RETRY_AFTER_SECONDS,
-    };
-  }
-
-  const common = {
-    agentId: target.id,
-    organizationId: identity.organizationId,
-    userId: identity.userId,
-  };
-  const result =
-    target.status === "sleeping"
-      ? await provisioningJobService.enqueueAgentWakeOnce(common)
-      : await provisioningJobService.enqueueAgentResumeOnce(common);
-
-  // The durable job is already committed. This kick only avoids waiting for
-  // the periodic poller and observes its own transport failures internally.
-  const trigger = provisioningJobService.triggerImmediate(env).catch((error) => {
-    // error-policy:J7 the durable lifecycle job remains observable by the
-    // daemon; retain a failed best-effort nudge as an operational diagnostic.
-    logger.warn("[personal-dedicated-delivery] Immediate provisioning nudge failed", {
-      agentId: target.id,
-      organizationId: identity.organizationId,
-      userId: identity.userId,
-      jobId: result.job.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
-  executionCtx.waitUntil(trigger);
   return {
-    state: "starting",
-    action: target.status === "sleeping" ? "wake" : "resume",
-    created: result.created,
-    jobId: result.job.id,
-    previousStatus: target.status,
-    retryAfterSeconds: PERSONAL_DEDICATED_RETRY_AFTER_SECONDS,
+    state: "unavailable",
+    code: "DEDICATED_PRICE_CONFIRMATION_REQUIRED",
+    error: "Open Eliza to review the current price and start your Dedicated agent.",
+    retryable: false,
+    status: 428,
   };
 }

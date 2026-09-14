@@ -3,7 +3,7 @@
  * coordinator boundary before they are projected into runtime memories.
  */
 
-import { ChannelType } from "@elizaos/core/edge";
+import { ChannelType } from "@elizaos/core/types/primitives";
 
 export interface SharedRuntimeChannel {
   type: ChannelType;

@@ -2591,6 +2591,62 @@
       "when": 1796083200013,
       "tag": "0386_agent_heartbeat_lifecycle_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 370,
+      "version": "7",
+      "when": 1796083200014,
+      "tag": "0387_agent_compute_funding",
+      "breakpoints": true
+    },
+    {
+      "idx": 371,
+      "version": "7",
+      "when": 1796083200015,
+      "tag": "0388_agent_compute_funded_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 372,
+      "version": "7",
+      "when": 1796083200016,
+      "tag": "0389_agent_compute_stop_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 373,
+      "version": "7",
+      "when": 1796083200017,
+      "tag": "0390_agent_compute_runtime_readiness",
+      "breakpoints": true
+    },
+    {
+      "idx": 374,
+      "version": "7",
+      "when": 1796083200018,
+      "tag": "0391_agent_compute_subjects",
+      "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1796083200019,
+      "tag": "0392_agent_compute_retirement_backup",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1796083200020,
+      "tag": "0393_agent_compute_activation_minimum",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1796083200021,
+      "tag": "0394_agent_billing_activation_minimum",
+      "breakpoints": true
     }
   ]
 }

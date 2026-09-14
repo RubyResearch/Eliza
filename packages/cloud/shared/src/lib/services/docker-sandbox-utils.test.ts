@@ -890,6 +890,15 @@ describe("extractDockerCreateContainerId", () => {
     expect(extractDockerCreateContainerId(out)).toBe("aaaaaaaaaaaa");
     expect(() => extractDockerCreateContainerId("no id here")).toThrow(/invalid container id/);
   });
+  test("paid admission retains all 64 identity characters and rejects abbreviated ids", () => {
+    const id = "a".repeat(64);
+    expect(extractDockerCreateContainerId(`WARNING: pull\n${id}`, { requireFullId: true })).toBe(
+      id,
+    );
+    expect(() => extractDockerCreateContainerId(id.slice(0, 12), { requireFullId: true })).toThrow(
+      "full immutable Docker id",
+    );
+  });
 });
 
 describe("steward url + host gateway routing", () => {

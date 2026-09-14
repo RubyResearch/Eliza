@@ -16,6 +16,13 @@ import {
   WARM_POOL_ORG_ID,
 } from "../../../../db/schemas/agent-sandboxes";
 import { logger } from "../../../utils/logger";
+import {
+  completeProvisionCompute,
+  reconcileFailedProvisionCompute,
+  reserveProvisionCompute,
+  restartProvisionCompute,
+  startProvisionCompute,
+} from "../../agent-compute-provision";
 import { decryptAgentEnvVars } from "../../agent-env-crypto";
 import type { DockerSandboxMetadata } from "../../docker-sandbox-provider";
 import { prepareManagedElizaEnvironment } from "../../managed-eliza-env";
@@ -266,7 +273,7 @@ export class SandboxProvision {
           await releaseReviewedProvisionAdmissionFence(reviewedAdmissionFence);
           reviewedAdmissionFence = undefined;
         }
-        await this.markError(rec, message);
+        rec = (await this.markError(rec, message)) ?? rec;
         return {
           success: false,
           sandboxRecord: await agentSandboxesRepository.findById(rec.id),
@@ -276,14 +283,33 @@ export class SandboxProvision {
       }
     }
 
+    let computeFundingId: string | undefined;
+    let retainedCompute = false;
+    let skipFundingCleanup = false;
     // biome-ignore format: keep the existing provision body stable while this guard owns fence cleanup.
     try {
+    const provisionProvider = await this.host.getProvider();
+    const isWarmPoolProvision =
+      rec.organization_id === WARM_POOL_ORG_ID && rec.pool_status === "unclaimed";
+    if (provisionProvider.computeFundingCapability === "host-lease-v1" && !isWarmPoolProvision) {
+      try {
+        const funding = await reserveProvisionCompute(rec);
+        computeFundingId = funding.window.id;
+        retainedCompute = funding.retained;
+        rec = funding.agent;
+      } catch (error) {
+        // error-policy:J1 no provider allocation has occurred; return payment/admission failure.
+        const message = error instanceof Error ? error.message : String(error);
+        rec = (await this.markError(rec, message)) ?? rec;
+        return { success: false, sandboxRecord: await agentSandboxesRepository.findById(rec.id), error: message, failureCause: error };
+      }
+    }
     // 1. Database
     let dbUri = rec.database_uri;
     if (rec.database_status !== "ready" || !dbUri) {
       const db = await this.provisionAgentDatabase(rec);
       if (!db.success) {
-        await this.markError(rec, `Database provisioning failed: ${db.error}`);
+        rec = (await this.markError(rec, `Database provisioning failed: ${db.error}`)) ?? rec;
         return {
           success: false,
           sandboxRecord: await agentSandboxesRepository.findById(rec.id),
@@ -302,8 +328,6 @@ export class SandboxProvision {
       rec.claimed_at !== null &&
       (rec.warm_claim_credential_state === "pending" ||
         rec.warm_claim_credential_state === "attested");
-    const isWarmPoolProvision =
-      rec.organization_id === WARM_POOL_ORG_ID && rec.pool_status === "unclaimed";
     const containerLaunch = resolveSandboxContainerLaunchConfig(rec.agent_config);
     const provisioningRetryHandle =
       previousStatus === "provisioning" ? this.buildProvisioningRetryHandle(rec) : null;
@@ -313,7 +337,7 @@ export class SandboxProvision {
     // writing the replacement. A retained provisioning container also needs its
     // original environment: re-probing it cannot install a replacement key.
     // Only a new cold container may rotate credentials here.
-    if (!rec.claimed_at && !provisioningRetryHandle) {
+    if (!rec.claimed_at && !provisioningRetryHandle && !retainedCompute) {
       const managedEnvironment = await prepareManagedElizaEnvironment({
         existingEnv: (rec.environment_vars as Record<string, string>) ?? {},
         organizationId: rec.organization_id,
@@ -374,7 +398,7 @@ export class SandboxProvision {
     } catch (envError) {
       // error-policy:J1 return a failed provision without losing its decryption cause.
       const message = envError instanceof Error ? envError.message : String(envError);
-      await this.markError(rec, `Environment decryption failed: ${message}`);
+      rec = (await this.markError(rec, `Environment decryption failed: ${message}`)) ?? rec;
       return {
         success: false,
         sandboxRecord: await agentSandboxesRepository.findById(rec.id),
@@ -390,8 +414,10 @@ export class SandboxProvision {
 
       try {
         const retryHandle = attempt === 1 ? provisioningRetryHandle : null;
-        if (retryHandle) {
-          handle = retryHandle;
+        if (retryHandle || (attempt === 1 && retainedCompute)) {
+          handle = computeFundingId
+            ? await restartProvisionCompute(rec, computeFundingId)
+            : retryHandle!;
           healthContext = { kind: "canonical" };
           logger.info(
             "[agent-sandbox] Re-probing persisted provisioning container before create",
@@ -412,7 +438,8 @@ export class SandboxProvision {
           // the caller did NOT supply one do we inject the managed URL as
           // DATABASE_URL — the normal managed-agent path, byte-identical to before.
           const dbEnv = computeManagedAgentDbEnv(callerEnv, dbUri);
-          handle = await (await this.host.getProvider()).create({
+          const fundingId = computeFundingId;
+          handle = await provisionProvider.create({
             agentId: rec.id,
             agentName: rec.agent_name ?? "CloudAgent",
             organizationId: rec.organization_id,
@@ -432,6 +459,7 @@ export class SandboxProvision {
             snapshotId: rec.snapshot_id ?? undefined,
             dockerImage: provisionDockerImage,
             container: containerLaunch,
+            ...(fundingId ? { startFundedContainer: (created: SandboxHandle) => startProvisionCompute(rec, fundingId, created) } : {}),
             ...this.host.replacementCleanupCallbacks(rec.id, rec.organization_id, {
               status: "provisioning",
               environmentRevision: rec.environment_revision,
@@ -454,7 +482,7 @@ export class SandboxProvision {
             failureCause: err,
           };
         }
-        await this.markError(rec, `Sandbox creation failed: ${msg}`);
+        rec = (await this.markError(rec, `Sandbox creation failed: ${msg}`)) ?? rec;
         return {
           success: false,
           sandboxRecord: await agentSandboxesRepository.findById(rec.id),
@@ -568,17 +596,11 @@ export class SandboxProvision {
 
         // 4. Persist the reachable container and provider-specific metadata.
         //
-        // User rows flip to `running` before restore because that status is the
-        // proxy reachability gate; delaying it made a responsive agent render
-        // as "waking" throughout restore (#14038). Unclaimed pool rows are the
-        // exception: exposing them as claimable before the restore tail
-        // succeeds recreates the readiness crash window, so they stay
-        // `provisioning` until the final status+stamp CAS below.
+        // Funded containers remain non-public until the complete restore tail
+        // commits readiness. A crash leaves a retryable provisioning row.
+        // Pool rows similarly remain unclaimable until their final readiness CAS.
         const updateData: Parameters<typeof agentSandboxesRepository.update>[1] = {
-          // Pool rows stay non-claimable until the entire provision tail
-          // succeeds. Their final status+readiness stamp is one repository CAS
-          // below; user rows retain the early reachability flip.
-          status: recoveringPendingWarmClaim || isWarmPoolProvision ? "provisioning" : "running",
+          status: computeFundingId || recoveringPendingWarmClaim || isWarmPoolProvision ? "provisioning" : "running",
           sandbox_id: handle.sandboxId,
           bridge_url: handle.bridgeUrl,
           health_url: handle.healthUrl,
@@ -624,6 +646,7 @@ export class SandboxProvision {
           rec.environment_revision,
           updateData,
         );
+        rec = updated;
 
         // Re-enter the billable set on every successful provision. A
         // credit-suspended agent (billing_status='suspended') that a user tops
@@ -632,7 +655,9 @@ export class SandboxProvision {
         // free dedicated compute forever. The service-key resume/restart routes
         // already reactivate; do it here so ALL provision paths re-enter billing.
         // Idempotent + exempt-guarded (ne billing_status 'exempt').
-        await agentBillingRepository.reactivateSandboxBillingAfterFunding(rec.id, new Date());
+        if (!computeFundingId) {
+          await agentBillingRepository.reactivateSandboxBillingAfterFunding(rec.id, new Date());
+        }
 
         // 5. Restore from backup (reconstructs incrementals back to a full).
         //
@@ -833,7 +858,9 @@ export class SandboxProvision {
           });
         }
 
-        let completed = updated;
+        let completed = computeFundingId
+          ? await completeProvisionCompute(updated, computeFundingId, handle)
+          : updated;
         if (isWarmPoolProvision) {
           const ready = await agentSandboxesRepository.commitPoolEntryReady(updated);
           if (!ready) {
@@ -857,6 +884,7 @@ export class SandboxProvision {
           sandboxId: handle.sandboxId,
           attempt,
         });
+        skipFundingCleanup = true;
         return {
           success: true,
           sandboxRecord: completed,
@@ -879,6 +907,7 @@ export class SandboxProvision {
         // recovers. Preserve the (pending/provisioning) row so the reconciler
         // and job retry both have something to act on.
         if (err instanceof SandboxReachabilityUnresolvedError) {
+          skipFundingCleanup = true;
           logger.warn(
             "[agent-sandbox] Managed reachability remains unresolved; leaving container in place for retry/reconciliation",
             { agentId: rec.id, sandboxId: handle.sandboxId, attempt },
@@ -900,13 +929,19 @@ export class SandboxProvision {
         });
 
         try {
+          if (computeFundingId) {
+            await reconcileFailedProvisionCompute(rec.id, rec.organization_id, computeFundingId, {
+              expected: rec, handle,
+            });
+            skipFundingCleanup = true;
+          }
           const current = await agentSandboxesRepository.findByIdAndOrg(
             rec.id,
             rec.organization_id,
           );
           if (current && this.host.getReplacementCleanupLocator(current)) {
-            await this.host.retirePersistedReplacementCleanup(rec.id, rec.organization_id);
-          } else {
+            await this.host.retirePersistedReplacementCleanup(rec.id, rec.organization_id, undefined, undefined, "lifecycle", handle);
+          } else if (!computeFundingId) {
             const provider = await this.host.getProvider();
             if (!provider.stopForReplacement) {
               throw new Error("Sandbox provider cannot prove failed provision absent");
@@ -920,6 +955,7 @@ export class SandboxProvision {
             sandboxId: handle.sandboxId,
             error: stopErr instanceof Error ? stopErr.message : String(stopErr),
           });
+          if (computeFundingId) skipFundingCleanup = true;
           return {
             success: false,
             retryable: true,
@@ -938,7 +974,7 @@ export class SandboxProvision {
           msg.toLowerCase().includes("duplicate");
         lastErrorRetryable = isUniqueConstraintError;
 
-        if (isUniqueConstraintError && attempt < MAX_PROVISION_ATTEMPTS) {
+        if (isUniqueConstraintError && !computeFundingId && attempt < MAX_PROVISION_ATTEMPTS) {
           logger.info("[agent-sandbox] Port collision detected, retrying", {
             attempt,
             nextAttempt: attempt + 1,
@@ -955,10 +991,10 @@ export class SandboxProvision {
     // a port collision and therefore was never eligible for a retry.
     const attemptsLabel = attemptsMade === 1 ? "1 attempt" : `${attemptsMade} attempts`;
     const giveUpReason = lastErrorRetryable ? "" : " (not retryable)";
-    await this.markError(
+    rec = (await this.markError(
       rec,
       `Provisioning failed after ${attemptsLabel}${giveUpReason}: ${lastError}`,
-    );
+    )) ?? rec;
     return {
       success: false,
       sandboxRecord: await agentSandboxesRepository.findById(rec.id),
@@ -968,8 +1004,14 @@ export class SandboxProvision {
         : { failureCause: lastFailureCause }),
     };
     } finally {
-      if (reviewedAdmissionFence) {
-        await releaseReviewedProvisionAdmissionFence(reviewedAdmissionFence);
+      try {
+        if (computeFundingId && !skipFundingCleanup) {
+          await reconcileFailedProvisionCompute(rec.id, rec.organization_id, computeFundingId, { expected: rec });
+        }
+      } finally {
+        if (reviewedAdmissionFence) {
+          await releaseReviewedProvisionAdmissionFence(reviewedAdmissionFence);
+        }
       }
     }
   }
@@ -1019,11 +1061,7 @@ export class SandboxProvision {
   }
 
   async markError(rec: AgentSandbox, msg: string) {
-    await agentSandboxesRepository.update(rec.id, {
-      status: "error",
-      error_message: msg,
-      error_count: (rec.error_count ?? 0) + 1,
-    });
+    return agentSandboxesRepository.markProvisionFailed(rec, msg);
   }
 
   /**

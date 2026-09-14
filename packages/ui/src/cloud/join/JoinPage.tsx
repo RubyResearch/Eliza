@@ -443,6 +443,13 @@ export default function JoinPage(): React.JSX.Element {
                 minimum: formatUSD(activationReview.minimumBalanceUsd),
               })}
             </p>
+            <p className="text-sm leading-relaxed text-white/72">
+              {t("cloud.join.dedicatedActivationMinimum", {
+                defaultValue:
+                  "Minimum charge per successful start: {{minimum}}. Applies again after stopping and restarting.",
+                minimum: formatUSD(activationReview.minimumActivationChargeUsd),
+              })}
+            </p>
             <div className="flex w-full flex-col gap-3">
               <Button
                 variant="surface"
@@ -507,6 +514,17 @@ export default function JoinPage(): React.JSX.Element {
                         "Dedicated hosting is already active; confirming does not start another server.",
                     })}
               </p>
+              {adoptionReview.quote.startsCompute && (
+                <p>
+                  {t("cloud.join.dedicatedActivationMinimum", {
+                    defaultValue:
+                      "Minimum charge per successful start: {{minimum}}. Applies again after stopping and restarting.",
+                    minimum: formatUSD(
+                      adoptionReview.quote.minimumActivationChargeUsd,
+                    ),
+                  })}
+                </p>
+              )}
               <p>
                 {t("cloud.join.dedicatedAdoptionBalance", {
                   defaultValue:

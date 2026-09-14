@@ -28,6 +28,28 @@ import {
 } from "../../sanitize-json";
 
 describe("sanitizeJsonObject", () => {
+  it("preserves large document source text without relaxing other JSON budgets", () => {
+    const text = 'source \\"🌍\n'.repeat(200_000);
+    const document = { text, title: "Complete source" };
+    expect(JSON.parse(serializeJsonb(document, { documentText: true })!)).toEqual(document);
+    expect(() => serializeJsonb(document)).toThrowError();
+    expect(() => serializeJsonb({ text, nested: { text } }, { documentText: true })).toThrowError();
+    expect(() => serializeJsonb({ text, title: text }, { documentText: true })).toThrowError();
+    expect(() => serializeJsonb({ text: `${text}\0` }, { documentText: true })).toThrowError();
+  });
+
+  it("does not invoke a document source accessor while serializing", () => {
+    let invoked = false;
+    const document = {
+      get text() {
+        invoked = true;
+        return "source";
+      },
+    };
+    expect(() => serializeJsonb(document, { documentText: true })).toThrowError();
+    expect(invoked).toBe(false);
+  });
+
   it("preserves backslashes exactly (no double-escaping)", () => {
     // "C:\Users\dev" — backslash followed by chars outside ["\/bfnrtu]
     const windowsPath = "C:\\Users\\dev";

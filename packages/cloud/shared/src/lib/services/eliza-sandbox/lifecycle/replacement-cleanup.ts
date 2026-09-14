@@ -12,6 +12,8 @@ import {
 import { dockerNodes } from "../../../../db/schemas/docker-nodes";
 import { jobs } from "../../../../db/schemas/jobs";
 import { logger } from "../../../utils/logger";
+import { settleReplacementComputeInTransaction } from "../../agent-compute-provision";
+import { creditsService } from "../../credits";
 import { EXCLUSIVE_AGENT_LIFECYCLE_JOB_TYPES } from "../../provisioning-job-types";
 import { type SandboxHandle, type SandboxProvider } from "../../sandbox-provider";
 import { SandboxReplacementCleanupUnresolvedError } from "../../sandbox-provider-types";
@@ -600,6 +602,7 @@ export class SandboxReplacementCleanup {
     expectation?: AdminCanaryCleanupExpectation,
     onConvergedInTx?: (tx: DbTransaction) => Promise<void>,
     source: "lifecycle" | "background-reconcile" | "admin-converge" = "lifecycle",
+    expectedReplacement?: SandboxHandle,
   ): Promise<"missing" | "clean" | "deferred" | "retired"> {
     const startedAt = Date.now();
     logger.info("[agent-sandbox] Replacement cleanup started", {
@@ -607,6 +610,7 @@ export class SandboxReplacementCleanup {
       organizationId: orgId,
       source,
     });
+    const provider = await this.host.getProvider();
     const snapshot = await dbWrite.transaction(async (tx) => {
       await this.host.lockLifecycle(tx, agentId, orgId);
       const current = await this.host.getAgentForLifecycleMutation(tx, agentId, orgId);
@@ -614,6 +618,13 @@ export class SandboxReplacementCleanup {
       const tierRejection = containerBackedServiceRejection(current, "replacement");
       if (tierRejection) throw new Error(tierRejection);
       const locator = this.getReplacementCleanupLocator(current);
+      if (expectedReplacement) {
+        if (!locator) throw new Error("Failed provision replacement ownership changed");
+        const expected = this.replacementLocatorFromHandle(expectedReplacement);
+        this.assertSameReplacementIdentity(locator, expected);
+        if (locator.containerId !== expected.containerId)
+          throw new Error("Failed provision container identity changed");
+      }
       if (expectation) {
         this.assertAdminCanaryCleanupExpectation(current, locator, expectation);
       }
@@ -630,13 +641,20 @@ export class SandboxReplacementCleanup {
       ) {
         return { state: "deferred" as const };
       }
-      if (locator) return { state: "pending" as const, locator };
+      if (locator) {
+        const funding =
+          provider.computeFundingCapability === "host-lease-v1"
+            ? await settleReplacementComputeInTransaction(tx, current, locator)
+            : null;
+        return { state: "pending" as const, locator, funding };
+      }
       if (onConvergedInTx) await onConvergedInTx(tx);
       return { state: "clean" as const };
     });
     if (snapshot.state !== "pending") return snapshot.state;
+    if (snapshot.funding?.purchasedCreditRefunded)
+      await creditsService.invalidateCreditCaches(orgId);
 
-    const provider = await this.host.getProvider();
     if (!provider.stopOnSpecificNodeForReplacement) {
       throw new Error("Sandbox provider cannot prove a persisted replacement absent");
     }

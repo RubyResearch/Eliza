@@ -34,6 +34,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_NETWORK_POLICY_PREFERENCES,
+  EDGE_BACKUP_VOICES,
   VOICE_MODEL_VERSIONS,
 } from "@elizaos/shared";
 import type { AccountsListResponse } from "@elizaos/ui/api/client-agent";
@@ -1799,64 +1800,118 @@ export const JOURNEY_STEPS: readonly JourneyStep[] = [
     id: "settings-edit",
     title: "Edit a setting (persist + read-back)",
     expectation:
-      "A settings toggle is changed and persists: in the live lane the change writes (PUT /api/config) and survives a reload; the mock lane confirms the toggle flips.",
+      "A voice selection is saved through PUT /api/config, survives a reload, and is restored. The mock lane uses a stateful config fixture; the live lane uses the backend.",
     async run({ page, lane }) {
       await openAppPath(page, "/settings");
-      await expect(page.getByTestId("settings-shell")).toBeVisible({
-        timeout: 30_000,
-      });
-      await openSettingsSection(page, /Capabilities/);
-      const walletToggle = page.locator('[data-agent-id="capability-wallet"]');
-      const assertions: string[] = ["Opened Capabilities section"];
-      let configPuts = 0;
-      page.on("response", (r) => {
-        if (
-          r.url().includes("/api/config") &&
-          r.request().method() === "PUT" &&
-          r.status() < 400
-        )
-          configPuts += 1;
-      });
-      if (
-        await walletToggle
-          .first()
-          .isVisible({ timeout: 8_000 })
-          .catch(() => false)
-      ) {
-        const before = await walletToggle
-          .first()
-          .getAttribute("aria-checked")
-          .catch(() => null);
-        await walletToggle.first().click();
-        const after = await walletToggle
-          .first()
-          .getAttribute("aria-checked")
-          .catch(() => null);
-        assertions.push(`capability-wallet aria-checked ${before} → ${after}`);
-        if (lane === "live") {
-          await expect
-            .poll(() => configPuts, { timeout: 20_000 })
-            .toBeGreaterThan(0);
-          assertions.push("PUT /api/config observed (live persistence)");
-          await openAppPath(page, "/settings");
-          await openSettingsSection(page, /Capabilities/);
-          const persisted = await page
-            .locator('[data-agent-id="capability-wallet"]')
-            .first()
-            .getAttribute("aria-checked")
-            .catch(() => null);
-          assertions.push(`Read-back after reload: aria-checked=${persisted}`);
-        }
-        // Restore original state so the run is idempotent.
-        await walletToggle
-          .first()
-          .click()
-          .catch(() => undefined);
+      if (lane === "mock") {
+        const initial = await page.evaluate(async () => {
+          const response = await fetch("/api/config");
+          if (!response.ok)
+            throw new Error("Initial settings config unavailable");
+          return response.json();
+        });
+        const seedVoice = EDGE_BACKUP_VOICES[0];
+        if (!seedVoice) throw new Error("No supported voice fixture available");
+        let config = {
+          ...initial,
+          messages: {
+            ...initial.messages,
+            tts: { provider: "edge", edge: { voice: seedVoice.voiceId } },
+          },
+        };
+        await page.route("**/api/config", async (route) => {
+          const method = route.request().method();
+          if (method === "PUT") {
+            const update = route.request().postDataJSON();
+            config = {
+              ...config,
+              ...update,
+              messages: { ...config.messages, ...update.messages },
+            };
+          } else if (method !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await fulfillJson(route, 200, config);
+        });
       } else {
-        assertions.push("Capability toggle not reachable on this surface");
+        await page.unroute("**/api/config");
+      }
+      await openAppPath(page, "/settings");
+      await openSettingsSection(page, /^Voice$/);
+      const selection = page.locator('[data-agent-id="identity-voice"]');
+      await expect(selection).toBeVisible();
+      await selection.click();
+      const selected = page.getByRole("option", { selected: true });
+      await expect(selected).toHaveCount(1);
+      const before = (await selected.textContent())?.trim();
+      if (!before) throw new Error("Selected voice is unnamed");
+      const alternative = page.getByRole("option", { selected: false }).first();
+      const after = (await alternative.textContent())?.trim();
+      if (!after) throw new Error("Alternative voice is unnamed");
+      expect(after).not.toBe(before);
+      await alternative.click();
+      const save = async () => {
+        const [response] = await Promise.all([
+          page.waitForResponse(
+            (r) =>
+              new URL(r.url()).pathname === "/api/config" &&
+              r.request().method() === "PUT",
+            { timeout: 15000 },
+          ),
+          page
+            .getByRole("button", { name: "Save Changes", exact: true })
+            .click(),
+        ]);
+        expect(response.ok()).toBe(true);
+      };
+      try {
+        await save();
+        await openAppPath(page, "/settings");
+        await openSettingsSection(page, /^Voice$/);
+        await selection.click();
+        await expect(
+          page
+            .getByRole("option", { selected: true })
+            .filter({ hasText: after }),
+        ).toBeVisible();
+      } finally {
+        // Restore through the same UI even when the changed-value assertion fails.
+        await openAppPath(page, "/settings");
+        await openSettingsSection(page, /^Voice$/);
+        await selection.click();
+        if (
+          !(await page
+            .getByRole("option", { selected: true })
+            .filter({ hasText: before })
+            .isVisible())
+        ) {
+          await page
+            .getByRole("option")
+            .filter({ hasText: before })
+            .click({ timeout: 10000 });
+          await save();
+        } else {
+          await page.keyboard.press("Escape");
+        }
+        await openAppPath(page, "/settings");
+        await openSettingsSection(page, /^Voice$/);
+        await selection.click();
+        await expect(
+          page
+            .getByRole("option", { selected: true })
+            .filter({ hasText: before }),
+        ).toBeVisible();
+        await page.keyboard.press("Escape");
       }
       return {
-        assertions,
+        assertions: [
+          "Opened Voice settings",
+          `Saved voice ${before} → ${after}`,
+          "PUT /api/config succeeded",
+          "Reload preserved the new selection",
+          "Original voice restored and verified after reload",
+        ],
         dom: await domMarkers(page, {
           settingsShell: '[data-testid="settings-shell"]',
         }),

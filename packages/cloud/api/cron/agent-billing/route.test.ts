@@ -453,7 +453,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
       primaryWalletAddress: "0x0000000000000000000000000000000000000001",
       walletKeyRef: "steward:waifu-agent",
       creditsRemaining: 0,
-      requiredCredits: 0.01,
+      requiredCredits: 0.15,
       billingStatus: "active",
       status: "running",
     });
@@ -527,7 +527,7 @@ describe("agent billing cron waifu lifecycle callbacks", () => {
       primaryWalletAddress: "0x0000000000000000000000000000000000000001",
       walletKeyRef: "steward:waifu-agent",
       creditsRemaining: 0,
-      requiredCredits: 0.01,
+      requiredCredits: 0.15,
       billingStatus: "shutdown_pending",
       status: "running",
       scheduledShutdownAt: expect.any(String),

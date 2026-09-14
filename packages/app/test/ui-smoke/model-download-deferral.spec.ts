@@ -8,6 +8,7 @@ import {
   installRenderTelemetryGuard,
   seedAppStorage,
 } from "./helpers";
+import { installDesktopBridgeFixture } from "./helpers/desktop-bridge";
 
 const DOWNLOAD_MODEL_ID = "eliza-1-4b";
 const DOWNLOAD_MODEL = {
@@ -82,6 +83,7 @@ async function fulfillJson(
 }
 
 async function injectFullCapabilityHost(page: Page): Promise<void> {
+  await installDesktopBridgeFixture(page);
   await page.addInitScript(() => {
     (window as unknown as Record<string, unknown>).__ELIZA_APP_API_BASE__ =
       window.location.origin;

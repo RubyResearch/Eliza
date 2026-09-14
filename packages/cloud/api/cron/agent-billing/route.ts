@@ -2,7 +2,7 @@
  * Bills managed-agent compute and records one durable receipt per invocation.
  *
  * The hourly processor:
- * - Charges organizations hourly for running agents ($0.01/hour)
+ * - Charges organizations hourly for running agents at the quoted Dedicated rate
  * - Charges for idle/stopped agents with snapshots ($0.0025/hour)
  * - Immediately queues a durable stop when accrued compute cannot be paid
  * - Rechecks funding under the lifecycle lock before committing the stop
@@ -262,7 +262,10 @@ async function processSandboxBilling(
     };
   }
 
-  if (billingResult.status === "insufficient_credits") {
+  if (
+    billingResult.status === "insufficient_credits" ||
+    billingResult.status === "funded_until"
+  ) {
     return queueUnfundedStop();
   }
 

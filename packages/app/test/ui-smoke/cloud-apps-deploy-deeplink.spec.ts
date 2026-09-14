@@ -105,7 +105,7 @@ async function installCloudApiMocks(
   unmocked: string[],
   deployRequests: unknown[],
 ): Promise<void> {
-  await page.route("https://api.eliza.app/**", async (route) => {
+  await page.route("https://api.eliza.app/api/v1/apps{,/**}", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
     const method = route.request().method();

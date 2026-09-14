@@ -1,16 +1,24 @@
 /** Owns sandbox warm-claim operations while preserving the host’s lifecycle transactions, provider instance, and backup authority. */
 
 import { ElizaError } from "@elizaos/core";
-import { inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { dbWrite } from "../../../../db/helpers";
 import { type AgentSandbox } from "../../../../db/repositories/agent-sandboxes";
+import { agentComputeFunding } from "../../../../db/schemas/agent-compute-funding";
 import {
   agentSandboxes,
   CONTAINER_BACKED_EXECUTION_TIERS,
   WARM_POOL_ORG_ID,
 } from "../../../../db/schemas/agent-sandboxes";
+import {
+  cancelUnboundAgentComputeInTransaction,
+  stopFundedAgentInTransaction,
+} from "../../agent-compute-stop";
 import { decryptAgentEnvVars, encryptAgentEnvVarsForStorage } from "../../agent-env-crypto";
 import { apiKeysService } from "../../api-keys";
+import { creditsService } from "../../credits";
+import { reconcileAllocatedWorkloadsOnNodeWithDatabase } from "../../docker-node-workload-queries";
+import type { SandboxProvider } from "../../sandbox-provider-types";
 import {
   buildWarmClaimCharacterPayload,
   WARM_CLAIM_CHARACTER_PUSH_TIMEOUT_MS,
@@ -21,6 +29,7 @@ import {
   WARM_CLAIM_KEY_PUSH_TIMEOUT_MS,
   warmClaimKeyFingerprint,
 } from "../../warm-claim-key-push";
+import { snapshotCaptureStillCanonical } from "../backup/authority";
 import { SandboxTransport } from "../bridge/transport.js";
 import { SandboxLifecycleAuthority } from "./authority.js";
 import { containerBackedServiceRejection } from "./policy.js";
@@ -36,7 +45,11 @@ export interface SandboxWarmClaimHost {
   getAgentForLifecycleMutation(
     ...args: Parameters<SandboxLifecycleAuthority["getAgentForLifecycleMutation"]>
   ): ReturnType<SandboxLifecycleAuthority["getAgentForLifecycleMutation"]>;
-  runBoundedSandboxStopForReplacement(sandboxId: string): Promise<BoundedSandboxStopResult>;
+  getProvider(): Promise<SandboxProvider>;
+  runBoundedSandboxStopForReplacement(
+    sandboxId: string,
+    options?: { readonly releaseCapacity?: false },
+  ): Promise<BoundedSandboxStopResult>;
 }
 
 export class SandboxWarmClaim {
@@ -221,39 +234,99 @@ export class SandboxWarmClaim {
     agentId: string,
     organizationId: string,
   ): Promise<{ success: true } | { success: false; error: string }> {
-    return dbWrite.transaction(async (tx) => {
-      await this.host.lockLifecycle(tx, agentId, organizationId);
-      const current = await this.host.getAgentForLifecycleMutation(tx, agentId, organizationId);
-      if (current) {
-        const tierRejection = containerBackedServiceRejection(current, "credential");
-        if (tierRejection) throw new Error(tierRejection);
-      }
-      if (
-        !current?.claimed_at ||
-        current.warm_claim_credential_state !== "failed" ||
-        !current.warm_claim_cleanup_completed_at
-      ) {
-        return {
-          success: false as const,
-          error: "Warm-claim retry ownership changed before teardown",
-        };
-      }
-      if (!current.sandbox_id && (current.node_id || current.container_name)) {
-        return {
-          success: false as const,
-          error: "Previous warm-claim container locator is incomplete",
-        };
-      }
-      if (current.sandbox_id) {
-        const stop = await this.host.runBoundedSandboxStopForReplacement(current.sandbox_id);
-        if (stop) {
+    const prepaid = (await this.host.getProvider()).computeFundingCapability === "host-lease-v1";
+    const retire = (expectedStopped?: AgentSandbox) =>
+      dbWrite.transaction(async (tx) => {
+        await this.host.lockLifecycle(tx, agentId, organizationId);
+        const current = await this.host.getAgentForLifecycleMutation(tx, agentId, organizationId);
+        if (current) {
+          const tierRejection = containerBackedServiceRejection(current, "credential");
+          if (tierRejection) throw new Error(tierRejection);
+        }
+        if (
+          !current?.claimed_at ||
+          current.warm_claim_credential_state !== "failed" ||
+          !current.warm_claim_cleanup_completed_at
+        ) {
           return {
             success: false as const,
-            error: "Failed to retire the previous warm-claim container",
+            error: "Warm-claim retry ownership changed before teardown",
           };
         }
-      }
-      const reset = await tx.execute<{ id: string }>(sql`
+        if (
+          current.deleted_at ||
+          current.deletion_attempt_id ||
+          (expectedStopped &&
+            (!snapshotCaptureStillCanonical(current, expectedStopped) ||
+              current.lifecycle_job_id !== expectedStopped.lifecycle_job_id ||
+              current.lifecycle_execution_generation !==
+                expectedStopped.lifecycle_execution_generation))
+        ) {
+          return {
+            success: false as const,
+            error: "Warm-claim retry ownership changed before teardown",
+          };
+        }
+        if (!current.sandbox_id && (current.node_id || current.container_name)) {
+          return {
+            success: false as const,
+            error: "Previous warm-claim container locator is incomplete",
+          };
+        }
+        if (prepaid) {
+          const [window] = await tx
+            .select()
+            .from(agentComputeFunding)
+            .where(
+              and(
+                eq(agentComputeFunding.agent_id, agentId),
+                eq(agentComputeFunding.organization_id, organizationId),
+                isNull(agentComputeFunding.settled_at),
+              ),
+            )
+            .for("update");
+          if (window) {
+            const identity = {
+              agentId,
+              organizationId,
+              lifecycleRevision: current.lifecycle_revision,
+              fundingId: window.id,
+            };
+            const funding =
+              window.provider_container_id === null
+                ? await cancelUnboundAgentComputeInTransaction(tx, identity)
+                : await stopFundedAgentInTransaction(tx, identity);
+            if (!funding) throw new Error("Warm-claim retry lost its paid stop authority");
+            const [stopped] = await tx
+              .update(agentSandboxes)
+              .set({ status: "stopped", updated_at: new Date() })
+              .where(
+                and(
+                  eq(agentSandboxes.id, agentId),
+                  eq(agentSandboxes.organization_id, organizationId),
+                ),
+              )
+              .returning();
+            if (!stopped) throw new Error("Warm-claim retry lost its stopped generation");
+            if (current.node_id)
+              await reconcileAllocatedWorkloadsOnNodeWithDatabase(tx, current.node_id);
+            return { success: true as const, fundedRetirement: stopped, funding };
+          }
+        }
+        if (current.sandbox_id) {
+          const stop = prepaid
+            ? await this.host.runBoundedSandboxStopForReplacement(current.sandbox_id, {
+                releaseCapacity: false,
+              })
+            : await this.host.runBoundedSandboxStopForReplacement(current.sandbox_id);
+          if (stop) {
+            return {
+              success: false as const,
+              error: "Failed to retire the previous warm-claim container",
+            };
+          }
+        }
+        const reset = await tx.execute<{ id: string }>(sql`
         UPDATE ${agentSandboxes}
         SET
           status = 'stopped',
@@ -284,11 +357,23 @@ export class SandboxWarmClaim {
           AND lifecycle_revision = ${current.lifecycle_revision}
         RETURNING id
       `);
-      if (reset.rows.length !== 1) {
-        throw new Error("Failed warm-claim retry lost its cleanup CAS");
-      }
-      return { success: true as const };
-    });
+        if (reset.rows.length !== 1) {
+          throw new Error("Failed warm-claim retry lost its cleanup CAS");
+        }
+        if (prepaid && current.node_id)
+          await reconcileAllocatedWorkloadsOnNodeWithDatabase(tx, current.node_id);
+        return { success: true as const };
+      });
+    const first = await retire();
+    if (!first.success || !("fundedRetirement" in first)) return first;
+    if (!first.funding || !first.fundedRetirement)
+      throw new Error("Warm-claim retry lost its committed funding result");
+    if (first.funding.purchasedCreditRefunded)
+      await creditsService.invalidateCreditCaches(organizationId);
+    const second = await retire(first.fundedRetirement);
+    if (second.success && "fundedRetirement" in second)
+      throw new Error("Warm-claim retry gained funding during teardown");
+    return second;
   }
 
   /**

@@ -204,3 +204,12 @@ primary state; the cursor does not preserve a snapshot across requests, and a
 command completed between pages can disappear. Lease expiry describes the
 stored worker lease, not whether Stripe accepted an operation. The report makes
 no provider request and does not retry a command.
+
+
+### Accepting a new Dedicated runtime charge
+
+Before starting paid Dedicated compute, show the current running rate and minimum successful-start charge from `AGENT_PRICING` and obtain the caller's acceptance. Send `X-Eliza-Dedicated-Price` with the value returned by `getDedicatedComputePriceAcceptance()` from `@elizaos/cloud-sdk/browser-contracts`. The header is required on Dedicated `provision`, `resume`, `wake`, and eager agent creation. Creating an offline record, using Shared, or retrieving an already-running agent does not start a new session and does not require it.
+
+A missing or outdated value returns HTTP428 with code `DEDICATED_PRICE_CONFIRMATION_REQUIRED` and the current pricing. No paid start is admitted. Review the new terms before retrying; do not silently attach acceptance in a generic HTTP interceptor. API-key callers follow the same contract as signed-in app callers. The startup minimum counts toward running charges and applies again after stopping and starting; an uninterrupted billing renewal is not a new activation.
+
+New provision/resume/wake/restart jobs persist the tariff at admission. A worker with different terms rejects the job before dispatching runtime actions; legacy jobs without a tariff are also rejected. Reusing or recovering a job does not refresh its tariff. A rejected start needs a new request after price review, not automatic retry. During rollout, drain old workers and reconcile their in-flight operations before switching versions; this check does not make an old worker understand the new contract.

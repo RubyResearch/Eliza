@@ -14,7 +14,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 const AMBIENT_DATABASE_URL = process.env.DATABASE_URL ?? "";
 const CAN_USE_ISOLATED_PGLITE =
@@ -30,6 +30,7 @@ import { resetKmsClientForTests } from "../../db/crypto/kms-client";
 import { agentBillingRepository } from "../../db/repositories/agent-billing";
 import { agentSandboxesRepository } from "../../db/repositories/agent-sandboxes";
 import { agentBackupObjects } from "../../db/schemas/agent-backup-catalog";
+import { agentComputeFunding } from "../../db/schemas/agent-compute-funding";
 import { agentNodeIncarnationHistories } from "../../db/schemas/agent-node-incarnation-histories";
 import {
   type AgentBackupStateData,
@@ -38,6 +39,7 @@ import {
   agentSandboxes,
   type EncryptedAgentBackupStateData,
 } from "../../db/schemas/agent-sandboxes";
+import { billingFundingReservations } from "../../db/schemas/billing-funding-reservations";
 import { organizations } from "../../db/schemas/organizations";
 import { userCharacters } from "../../db/schemas/user-characters";
 import { users } from "../../db/schemas/users";
@@ -193,9 +195,19 @@ beforeAll(async () => {
       agentSandboxBackups,
       agentBackupCatalogAuthorities,
       agentBackupObjects,
+      billingFundingReservations,
+      agentComputeFunding,
     };
-    const { apply } = await pushSchema(schema as never, dbWrite as never);
-    await apply();
+    const { statementsToExecute } = await pushSchema(schema as never, dbWrite as never);
+    // Drizzle push emits cross-table FKs before unique indexes on newly
+    // created tables. Install the referenced indexes before adding those FKs.
+    const isForeignKey = (statement: string) =>
+      /^ALTER TABLE .* ADD CONSTRAINT .* FOREIGN KEY/s.test(statement);
+    for (const statement of [
+      ...statementsToExecute.filter((statement) => !isForeignKey(statement)),
+      ...statementsToExecute.filter(isForeignKey),
+    ])
+      await dbWrite.execute(sql.raw(statement));
   } catch (error) {
     pgliteReady = false;
     console.error(
@@ -601,6 +613,10 @@ describe("executeWake with the restore-integrity gate", () => {
     spyOn(agentBillingRepository, "settleAccruedBillingBeforeLifecycle").mockResolvedValue({
       status: "already_billed_recently",
     });
+    spyOn(
+      agentBillingRepository,
+      "settleAccruedBillingBeforeLifecycleInTransaction",
+    ).mockResolvedValue({ status: "already_billed_recently" });
     spyOn(svc, "provision").mockImplementation(
       async (_agentId: string, _orgId: string, restoreOverride?: ProvisionRestoreOverride) => {
         provisionCalls.push(restoreOverride);
@@ -614,6 +630,58 @@ describe("executeWake with the restore-integrity gate", () => {
     );
     return { svc, provisionCalls };
   }
+
+  test.each([
+    "environment_revision",
+    "lifecycle_execution_generation",
+    "lifecycle_job_id",
+  ] as const)(
+    "wake rejects a changed %s after backup validation before settlement",
+    async (field) => {
+      const { sandboxId, orgId } = await seedSandbox();
+      await dbWrite
+        .update(agentSandboxes)
+        .set({
+          lifecycle_job_id: crypto.randomUUID(),
+          lifecycle_execution_generation: crypto.randomUUID(),
+        })
+        .where(eq(agentSandboxes.id, sandboxId));
+      await seedFullBackup(sandboxId, sampleState("wake-authority-race"), NOW);
+      const { svc, provisionCalls } = makeService();
+      const settle = spyOn(
+        agentBillingRepository,
+        "settleAccruedBillingBeforeLifecycleInTransaction",
+      );
+      const original = agentSandboxesRepository.getLatestStoredBackup;
+      const readBackup = spyOn(
+        agentSandboxesRepository,
+        "getLatestStoredBackup",
+      ).mockImplementation(async (...args) => {
+        const backup = await original.apply(agentSandboxesRepository, args);
+        await dbWrite
+          .update(agentSandboxes)
+          .set(
+            field === "environment_revision"
+              ? { environment_revision: 99 }
+              : field === "lifecycle_execution_generation"
+                ? { lifecycle_execution_generation: crypto.randomUUID() }
+                : { lifecycle_job_id: crypto.randomUUID() },
+          )
+          .where(eq(agentSandboxes.id, sandboxId));
+        return backup;
+      });
+      try {
+        const result = await svc.executeWake(sandboxId, orgId);
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Agent lifecycle changed before wake billing settlement");
+        expect(provisionCalls).toEqual([]);
+        expect(settle).not.toHaveBeenCalled();
+        expect(await readSandboxStatus(sandboxId)).toBe("sleeping");
+      } finally {
+        readBackup.mockRestore();
+      }
+    },
+  );
 
   test("healthy latest backup: wake proceeds and restores it", async () => {
     const { sandboxId, orgId } = await seedSandbox();

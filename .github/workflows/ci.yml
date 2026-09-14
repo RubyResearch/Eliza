@@ -188,6 +188,10 @@ jobs:
           skip-avatar-clone: "true"
           no-vision-deps: "true"
 
+      - name: Install browser for client integration tests
+        if: needs.changes.outputs.client == 'true'
+        run: bunx playwright install --with-deps chromium
+
       - name: Client tests
         if: needs.changes.outputs.client == 'true'
         run: bun run test:client

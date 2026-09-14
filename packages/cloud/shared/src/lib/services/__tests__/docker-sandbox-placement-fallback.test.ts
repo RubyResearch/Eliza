@@ -59,6 +59,9 @@ describe("DockerSandboxProvider placement fallback", () => {
           agentName: "Placement breaker regression",
           executionTier: "dedicated-always",
           environmentVars: {},
+          startFundedContainer: async () => {
+            throw new Error("Unavailable placement cannot start a container");
+          },
         })
         .catch((error: unknown) => error);
 

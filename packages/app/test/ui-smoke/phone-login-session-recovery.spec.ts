@@ -44,12 +44,9 @@ for (const viewport of VIEWPORTS) {
     page,
   }, testInfo) => {
     await page.setViewportSize(viewport);
-    await seedStewardSession(page, { token: "older-session-token" });
-    await page.addInitScript(() => {
-      window.localStorage.setItem(
-        "steward_session_token_scope",
-        "eliza-cloud:production",
-      );
+    await seedStewardSession(page, {
+      jwt: true,
+      subject: "older-session-user",
     });
 
     const frontendEvents: string[] = [];

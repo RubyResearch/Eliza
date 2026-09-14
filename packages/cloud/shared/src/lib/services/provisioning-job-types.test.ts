@@ -74,8 +74,9 @@ describe("container-backed target admission", () => {
     );
   });
 
-  test("requires a container for exactly the eleven container lifecycle operations", () => {
+  test("requires a container for lifecycle operations and prepaid host renewal", () => {
     const required = [
+      JOB_TYPES.AGENT_COMPUTE_LEASE,
       JOB_TYPES.AGENT_PROVISION,
       JOB_TYPES.AGENT_SUSPEND,
       JOB_TYPES.AGENT_RESUME,

@@ -73,11 +73,12 @@ const PERSONAL_ID = "personal:00000000-0000-5000-8000-000000000001";
 const QUOTE = {
   quoteId: "a".repeat(64),
   sourceAgentId: PERSONAL_ID,
-  hourlyRateUsd: 0.01,
-  dailyRateUsd: 0.24,
-  minimumBalanceUsd: 0.72,
+  hourlyRateUsd: 0.15,
+  dailyRateUsd: 3.6,
+  minimumActivationChargeUsd: 0.3,
+  minimumBalanceUsd: 10.8,
   minimumRunwayDays: 3,
-  balanceUsd: 1.25,
+  balanceUsd: 12.5,
   deficitUsd: 0,
   canActivate: true,
   requiresConfirmation: true as const,
@@ -132,6 +133,78 @@ describe("Dedicated activation quote", () => {
     vi.clearAllMocks();
   });
 
+  it.each([
+    ["stopped", "Resume Agent", "resume"],
+    ["sleeping", "Reactivate Agent", "wake"],
+  ] as const)(
+    "requires paid-start confirmation for %s agents",
+    async (status, label, action) => {
+      apiWithStatus.mockResolvedValue({
+        status: 202,
+        data: { data: { jobId: "restart-job" } },
+      });
+      renderWithQueryClient(
+        <MemoryRouter>
+          <ElizaAgentActions
+            agentId="existing-dedicated"
+            executionTier="dedicated-always"
+            status={status}
+          />
+        </MemoryRouter>,
+      );
+      await userEvent.click(screen.getByRole("button", { name: label }));
+      expect(await screen.findByRole("alertdialog")).toBeTruthy();
+      expect(
+        screen.getByText(/Minimum charge per successful start: \$0.30/),
+      ).toBeTruthy();
+      expect(screen.getByText(/Running costs \$0.15/)).toBeTruthy();
+      expect(apiWithStatus).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      expect(apiWithStatus).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: label }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "Start Dedicated" }),
+      );
+      await waitFor(() => expect(apiWithStatus).toHaveBeenCalledTimes(1));
+      expect(apiWithStatus).toHaveBeenCalledWith(
+        `/api/v1/eliza/agents/existing-dedicated/${action}`,
+        {
+          method: "POST",
+          json: undefined,
+          headers: {
+            "X-Eliza-Dedicated-Price":
+              "dedicated-compute-v1:USD:0.150000:0.300000",
+          },
+        },
+      );
+    },
+  );
+
+  it("shows a changed-price refusal without retrying or accepting new terms", async () => {
+    const message =
+      "Refresh the app and review the current Dedicated price before starting. No compute was started.";
+    apiWithStatus.mockResolvedValue({ status: 428, data: { error: message } });
+    renderWithQueryClient(
+      <MemoryRouter>
+        <ElizaAgentActions
+          agentId="existing-dedicated"
+          executionTier="dedicated-always"
+          status="stopped"
+        />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Resume Agent" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Start Dedicated" }),
+    );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(`Action failed: ${message}`),
+    );
+    expect(apiWithStatus).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
   it("loads and renders the server-owned quote before offering activation", async () => {
     apiWithStatus.mockResolvedValueOnce({
       status: 200,
@@ -143,16 +216,21 @@ describe("Dedicated activation quote", () => {
 
     expect(
       await screen.findByText(
-        "Current balance: $1.25 · Required before activation: $0.72 (3 days)",
+        "Current balance: $12.50 · Required before activation: $10.80 (3 days)",
       ),
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Your Shared Agent becomes a private, always-on Dedicated Agent. Dedicated hosting uses $0.24 per day ($0.01/hr) while running.",
+        "Your Shared Agent becomes a private, always-on Dedicated Agent. Dedicated hosting uses $3.60 per day ($0.15/hr) while running.",
       ),
     ).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Activate Dedicated" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Minimum charge per successful start: $0.30. Applies again after stopping and restarting.",
+      ),
     ).toBeTruthy();
     expect(apiWithStatus).toHaveBeenCalledWith(
       `/api/v1/eliza/agents/${encodeURIComponent(PERSONAL_ID)}/upgrade-tier`,
@@ -187,7 +265,7 @@ describe("Dedicated activation quote", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "A Dedicated Agent already exists for this upgrade, but setup did not finish. Resuming reuses that agent — it does not create another one. Hosting uses $0.24 per day ($0.01/hr) while running.",
+        "A Dedicated Agent already exists for this upgrade, but setup did not finish. Resuming reuses that agent — it does not create another one. Hosting uses $3.60 per day ($0.15/hr) while running.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Resume setup" })).toBeTruthy();
@@ -263,6 +341,7 @@ describe("Dedicated activation quote", () => {
       {
         method: "POST",
         json: {
+          minimumActivationChargeUsd: 0.3,
           action: "activate_dedicated",
           quoteId: QUOTE.quoteId,
         },
@@ -373,7 +452,7 @@ describe("Dedicated activation quote", () => {
         data: {
           ...QUOTE,
           balanceUsd: 0,
-          deficitUsd: 0.72,
+          deficitUsd: 10.8,
           canActivate: false,
           unavailableReason: "Add credits to activate Dedicated.",
         },

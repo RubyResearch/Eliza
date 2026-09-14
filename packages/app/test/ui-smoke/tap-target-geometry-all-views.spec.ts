@@ -1,29 +1,7 @@
-// Reusable rendered-geometry tap-target + role/DOM-coherence gate (#10722).
-//
-// The 44px Apple-HIG touch floor used to be enforced only as a CSS token
-// (`--min-touch-target`) plus lint conventions — nothing measured what the
-// browser actually laid out, so a control could regress below 44px (the
-// ShellBackButton shipped at 36px; the spatial filter chips at ~34px) with the
-// whole gate green. `tap-target-geometry.spec.ts` measures the two known
-// regression surfaces; THIS spec generalizes that to a REUSABLE gate that walks
-// the same canonical built-in view enumeration the interaction-coverage spec
-// uses (`./view-routes`), measures REAL `getBoundingClientRect()` geometry for
-// every standalone interactive control on a coarse-pointer Pixel-7 viewport, and
-// asserts:
-//
-//   1. every STANDALONE interactive control (icon/label button, role=button/
-//      tab/switch/menuitem, standalone link) renders a >=44x44 hit target, and
-//   2. role<->DOM-node coherence: an ARIA role must not contradict the node's
-//      native semantics, a non-native role=button/link must be keyboard-
-//      focusable, and every interactive control must expose an accessible name.
-//
-// Legitimately-sub-44 controls (inline prose links, native checkbox/radio boxes
-// whose <label> is the real tap surface, nested inner controls, off-screen /
-// disabled controls) are excluded IN-PAGE with a documented reason and surfaced
-// in the report, never silently dropped. Genuinely-under-44 standalone controls
-// that survive the exception filter are FAILURES — fix the source (raise the
-// control to the floor) or add a justified entry to `DOCUMENTED_EXCEPTIONS`.
-
+/**
+ * Measures real mobile hit targets and accessible control semantics across the
+ * built-in views, using populated fixtures where controls depend on stored data.
+ */
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { devices, expect, type Page, test } from "@playwright/test";
@@ -33,6 +11,7 @@ import {
   openAppPath,
   seedAppStorage,
 } from "./helpers";
+import { installDesktopBridgeFixture } from "./helpers/desktop-bridge";
 import { VIEW_ROUTES } from "./view-routes";
 
 // Coarse-pointer mobile emulation: the `@media (pointer: coarse)` touch floor
@@ -446,7 +425,7 @@ const allRecords: ControlRecord[] = [];
 
 test.describe("tap-target rendered-geometry + role/DOM coherence gate", () => {
   test.beforeEach(async ({ page }) => {
-    await seedAppStorage(page);
+    await seedAppStorage(page, { "eliza:permissions-primed": "1" });
     await hideChatOverlay(page);
     await installDefaultAppRoutes(page);
   });
@@ -455,6 +434,62 @@ test.describe("tap-target rendered-geometry + role/DOM coherence gate", () => {
     test(`${view.id} — every standalone control is a >=44px, coherent hit target`, async ({
       page,
     }) => {
+      if (view.id === "desktop") await installDesktopBridgeFixture(page);
+      if (view.id === "files") {
+        const hash = "a".repeat(64);
+        await page.route("**/api/files", (route) =>
+          route.fulfill({
+            json: {
+              files: [
+                {
+                  fileName: `${hash}.pdf`,
+                  url: `/api/media/${hash}.pdf`,
+                  hash,
+                  mimeType: "application/pdf",
+                  size: 51200,
+                  createdAt: 1700000001000,
+                },
+              ],
+            },
+          }),
+        );
+      }
+      if (view.id === "trajectories") {
+        await page.route("**/api/trajectories**", async (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname !== "/api/trajectories") return route.fallback();
+          await route.fulfill({
+            json: {
+              trajectories: [
+                {
+                  id: "trajectory-geometry-1",
+                  agentId: "ui-smoke-agent",
+                  source: "conversation",
+                  status: "completed",
+                  startTime: 1700000004000,
+                  endTime: 1700000004800,
+                  durationMs: 800,
+                  llmCallCount: 1,
+                  providerAccessCount: 0,
+                  totalPromptTokens: 128,
+                  totalCompletionTokens: 64,
+                  scenarioId: null,
+                  batchId: null,
+                  createdAt: "2023-11-14T22:13:24.000Z",
+                  updatedAt: "2023-11-14T22:13:24.800Z",
+                  roomId: "ui-smoke-room",
+                  entityId: null,
+                  conversationId: null,
+                  metadata: {},
+                },
+              ],
+              total: 1,
+              offset: 0,
+              limit: 50,
+            },
+          });
+        });
+      }
       await openAppPath(page, view.path);
       await page.locator("body").waitFor({ state: "visible", timeout: 60_000 });
 

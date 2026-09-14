@@ -1,20 +1,14 @@
-// Interaction coverage for the Electrobun desktop workspace controls. Keyless web
-// normally shows the "desktop tools only on Electrobun" fallback; injecting
-// `__electrobunWindowId` makes `isElectrobunRuntime()` true so the real control
-// surface renders. We drive the client-side console filter (no native bridge
-// needed) to prove the surface is interactive, not just rendered.
-
+/** Exercises desktop diagnostic controls through the real renderer with a synthetic native host boundary. */
 import { expect, test } from "@playwright/test";
 import {
   installDefaultAppRoutes,
   openAppPath,
   seedAppStorage,
 } from "./helpers";
+import { installDesktopBridgeFixture } from "./helpers/desktop-bridge";
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    (window as unknown as Record<string, number>).__electrobunWindowId = 1;
-  });
+  await installDesktopBridgeFixture(page);
   // The injected __electrobunWindowId makes the platform read as desktop,
   // which arms the permission-priming modal (#12331); its Radix focus trap
   // would swallow the console-filter fill below. Mark it already shown.

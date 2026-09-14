@@ -14,7 +14,7 @@ import { customSandbox, fetchUrl } from "./test-support/fixtures.js";
  * using deterministic repository and provider fixtures.
  */
 
-import { afterAll, afterEach, beforeAll } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach } from "bun:test";
 import { encryptField } from "../../../db/crypto/field-crypto";
 import { resetKmsClientForTests } from "../../../db/crypto/kms-client";
 import {
@@ -740,6 +740,22 @@ describe("ElizaSandboxService sleep", () => {
 // deleteAgent run inside dbWrite.transaction and are exercised by the live
 // provisioning lifecycle in prod.)
 describe("ElizaSandboxService.executeResume", () => {
+  beforeEach(() => {
+    // These legacy orchestration fixtures have no prepaid funding history.
+    // Real funded resume and transaction replay run in the PostgreSQL/SSH suite.
+    sandboxTransactions.implementation = async (fn) => {
+      const tx = {
+        execute: async () => ({ rows: [] }),
+        select: () => ({
+          from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+        }),
+      };
+      return fn(tx);
+    };
+  });
+  afterEach(() => {
+    sandboxTransactions.implementation = null;
+  });
   const RESUME_AGENT = "e06bb509-6c52-4c33-a9f7-66addc43e8c8";
   const RESUME_ORG = "22222222-2222-4222-8222-222222222222";
 
@@ -939,11 +955,18 @@ describe("ElizaSandboxService deletion-state guards (resume/wake/restart)", () =
     });
   }
 
-  test("executeRestart propagates a transient fail-closed snapshot result", async () => {
+  test("legacy executeRestart propagates a transient fail-closed snapshot result", async () => {
     const { ElizaSandboxService, SNAPSHOT_CAPTURE_TRANSIENT } = await import(
       "../eliza-sandbox.ts?actual"
     );
-    const svc = new ElizaSandboxService();
+    const provider: SandboxProvider = {
+      create: mock(async () => {
+        throw new Error("Transient shutdown must not allocate");
+      }),
+      stopForDeletion: mock(async () => ({ kind: "not-running-proven" as const })),
+      checkHealth: mock(async () => true),
+    };
+    const svc = new ElizaSandboxService(provider);
     const findSpy = spyOn(agentSandboxesRepository, "findByIdAndOrgForWrite").mockResolvedValue(
       row("running"),
     );

@@ -4,9 +4,12 @@
  * filesystem, a real in-memory KMS backend, and the real PGlite `dumpDataDir`
  * path via a stub adapter — deterministic, no network.
  */
+
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { AgentRuntime } from "@elizaos/core";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -17,10 +20,13 @@ import {
   fetchAgentScopedRowsBatched,
   listLocalAgentBackups,
   PGLITE_SNAPSHOT_UNAVAILABLE_TRANSIENT,
+  purgeAdmittedRetiredLocalAgentBackups,
   restoreAgentSnapshot,
   restoreLocalAgentBackup,
+  reviewRetiredLocalAgentBackups,
   SnapshotBudget,
 } from "./agent-backup.ts";
+import { withAgentBackupAuthority } from "./agent-backup-authority.ts";
 import { AGENT_BACKUP_V2_PGLITE_CAPTURE_LIMITS } from "./agent-backup-v2-capture.ts";
 
 const ORIGINAL_ENV = {
@@ -171,6 +177,157 @@ afterEach(() => {
 });
 
 describe("agent backup manifest", () => {
+  test("retired snapshots cannot resurrect files, while a current snapshot preserves the durable boundary", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "backup-retirement-"));
+    const pgliteDir = path.join(root, "pglite");
+    process.env.ELIZA_STATE_DIR = root;
+    process.env.PGLITE_DATA_DIR = pgliteDir;
+    delete process.env.POSTGRES_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      await writeFixtureState(root, pgliteDir);
+      const runtime = runtimeStub("11111111-1111-4111-8111-111111111111");
+      const old = await createAgentSnapshot(runtime, {} as never);
+      const legacy = structuredClone(old);
+      delete legacy.manifest.restoreGeneration;
+      const generation = await withAgentBackupAuthority(root, (authority) =>
+        authority.retire(runtime.agentId, "family-delete-1"),
+      );
+      await expect(
+        createAgentSnapshot(runtime, {} as never),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_RETIREMENT_PENDING" });
+      await expect(restoreAgentSnapshot(runtime, old)).rejects.toMatchObject({
+        code: "AGENT_BACKUP_RETIREMENT_PENDING",
+      });
+      await withAgentBackupAuthority(root, async (authority) => {
+        expect(await authority.pendingRetirement(runtime.agentId)).toEqual({
+          operationId: "family-delete-1",
+          generation,
+        });
+        expect(await authority.retire(runtime.agentId, "family-delete-1")).toBe(
+          generation,
+        );
+        await expect(
+          authority.retire(runtime.agentId, "another-delete"),
+        ).rejects.toMatchObject({ code: "AGENT_BACKUP_RETIREMENT_PENDING" });
+        await expect(
+          authority.completeRetirement(
+            runtime.agentId,
+            "another-delete",
+            generation,
+          ),
+        ).rejects.toMatchObject({ code: "AGENT_BACKUP_RETIREMENT_MISMATCH" });
+        expect(await authority.generation("unrelated-agent")).toBe("initial");
+      });
+      await fs.writeFile(path.join(pgliteDir, "pgdata.bin"), "after deletion");
+      await withAgentBackupAuthority(root, async (authority) => {
+        await authority.completeRetirement(
+          runtime.agentId,
+          "family-delete-1",
+          generation,
+        );
+        await authority.completeRetirement(
+          runtime.agentId,
+          "family-delete-1",
+          generation,
+        );
+      });
+      for (const snapshot of [old, legacy]) {
+        await expect(
+          restoreAgentSnapshot(runtime, snapshot),
+        ).rejects.toMatchObject({ code: "AGENT_BACKUP_GENERATION_RETIRED" });
+        expect(await readText(path.join(pgliteDir, "pgdata.bin"))).toBe(
+          "after deletion",
+        );
+      }
+      const current = await createAgentSnapshot(runtime, {} as never);
+      await withAgentBackupAuthority(root, async (authority) => {
+        expect(await authority.retire(runtime.agentId, "family-delete-1")).toBe(
+          generation,
+        );
+      });
+      await expect(
+        createAgentSnapshot(runtime, {} as never),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_RETIREMENT_PENDING" });
+      await expect(
+        restoreAgentSnapshot(runtime, current),
+      ).rejects.toMatchObject({
+        code: "AGENT_BACKUP_RETIREMENT_PENDING",
+      });
+      await withAgentBackupAuthority(root, (authority) =>
+        authority.completeRetirement(
+          runtime.agentId,
+          "family-delete-1",
+          generation,
+        ),
+      );
+      const malicious = structuredClone(current);
+      malicious.manifest.components.stateFiles.files.push({
+        path: ".backup-authority/operation.lock",
+        bytesBase64: Buffer.from("replace authority").toString("base64"),
+        sha256: "0".repeat(64),
+        size: 17,
+      });
+      await fs.writeFile(path.join(pgliteDir, "pgdata.bin"), "later change");
+      await expect(
+        restoreAgentSnapshot(runtime, malicious),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_AUTHORITY_INVALID" });
+      expect(await readText(path.join(pgliteDir, "pgdata.bin"))).toBe(
+        "later change",
+      );
+      await restoreAgentSnapshot(runtime, current);
+      expect(await readText(path.join(pgliteDir, "pgdata.bin"))).toBe(
+        "after deletion",
+      );
+      expect(
+        await withAgentBackupAuthority(root, (authority) =>
+          authority.generation(runtime.agentId),
+        ),
+      ).toBe(generation);
+      const moduleUrl = new URL("./agent-backup-authority.ts", import.meta.url)
+        .href;
+      const child = await promisify(execFile)(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        `
+        const { withAgentBackupAuthority } = await import(${JSON.stringify(moduleUrl)});
+        const generation = await withAgentBackupAuthority(${JSON.stringify(root)}, (authority) => authority.generation(${JSON.stringify(runtime.agentId)}));
+        process.stdout.write(generation);
+      `,
+      ]);
+      expect(child.stdout).toBe(generation);
+      await expect(restoreAgentSnapshot(runtime, old)).rejects.toMatchObject({
+        code: "AGENT_BACKUP_GENERATION_RETIRED",
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a held filesystem claim rejects competing capture before collecting state", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "backup-contention-"));
+    process.env.ELIZA_STATE_DIR = root;
+    try {
+      await withAgentBackupAuthority(root, async () => {
+        await expect(
+          createAgentSnapshot(runtimeStub("agent"), {} as never),
+        ).rejects.toMatchObject({ code: "AGENT_BACKUP_AUTHORITY_UNAVAILABLE" });
+      });
+      await fs.writeFile(
+        path.join(root, ".backup-authority", "operation.lock"),
+        "interrupted claim",
+      );
+      await expect(
+        withAgentBackupAuthority(root, async () => true),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_AUTHORITY_UNAVAILABLE" });
+      expect(
+        await readText(path.join(root, ".backup-authority", "operation.lock")),
+      ).toBe("interrupted claim");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("captures and restores local PGlite, media, vault, character, and state-dir files", async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), "eliza-agent-backup-"),
@@ -403,6 +560,128 @@ describe("agent backup manifest", () => {
     await expect(
       snapshotWithError("failed while closing corrupted WAL segment"),
     ).rejects.toThrow("failed while closing corrupted WAL segment");
+  });
+
+  test("backup cleanup review authenticates retired copies and refuses incomplete inventories", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "backup-cleanup-review-"),
+    );
+    const pgliteDir = path.join(root, "pglite");
+    process.env.NODE_ENV = "test";
+    process.env.ELIZA_KMS_BACKEND = "memory";
+    process.env.ELIZA_STATE_DIR = root;
+    process.env.PGLITE_DATA_DIR = pgliteDir;
+    delete process.env.POSTGRES_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      await writeFixtureState(root, pgliteDir);
+      const runtime = runtimeStub("33333333-3333-4333-8333-333333333333");
+      const foreign = runtimeStub("44444444-4444-4444-8444-444444444444");
+      const old = await createLocalAgentBackup(runtime, {} as never);
+      const other = await createLocalAgentBackup(foreign, {} as never);
+      expect(
+        (await reviewRetiredLocalAgentBackups(runtime.agentId)).archives,
+      ).toEqual([]);
+      await withAgentBackupAuthority(root, async (authority) => {
+        const generation = await authority.retire(
+          runtime.agentId,
+          "cleanup-review",
+        );
+        await authority.completeRetirement(
+          runtime.agentId,
+          "cleanup-review",
+          generation,
+        );
+      });
+      const current = await createLocalAgentBackup(runtime, {} as never);
+      const review = await reviewRetiredLocalAgentBackups(runtime.agentId);
+      expect(review.archives.map((archive) => archive.fileName)).toEqual([
+        old.fileName,
+      ]);
+      expect(review.archives[0]?.sizeBytes).toBe(
+        (await fs.readFile(old.path)).length,
+      );
+      const originalOther = await fs.readFile(other.path);
+      expect(await fs.readFile(current.path)).not.toHaveLength(0);
+      expect(await fs.readFile(other.path)).toEqual(originalOther);
+
+      // A misleading foreign-agent header cannot bypass authentication.
+      const envelope = JSON.parse(await fs.readFile(old.path, "utf8"));
+      envelope.agentId = foreign.agentId;
+      const originalOld = await fs.readFile(old.path);
+      await fs.writeFile(old.path, JSON.stringify(envelope));
+      await expect(
+        reviewRetiredLocalAgentBackups(runtime.agentId),
+      ).rejects.toMatchObject({
+        code: "AGENT_BACKUP_REVIEW_UNAVAILABLE",
+      });
+      await fs.writeFile(old.path, originalOld);
+      const alias = path.join(
+        path.dirname(old.path),
+        "alias.agent-backup.json",
+      );
+      await fs.symlink(old.path, alias);
+      await expect(
+        reviewRetiredLocalAgentBackups(runtime.agentId),
+      ).rejects.toMatchObject({
+        code: "AGENT_BACKUP_REVIEW_UNAVAILABLE",
+      });
+      await fs.unlink(alias);
+      await fs.writeFile(alias, "corrupt archive");
+      await expect(
+        reviewRetiredLocalAgentBackups(runtime.agentId),
+      ).rejects.toMatchObject({
+        code: "AGENT_BACKUP_REVIEW_UNAVAILABLE",
+      });
+      expect(await fs.readFile(old.path)).toEqual(originalOld);
+      expect(await fs.readFile(other.path)).toEqual(originalOther);
+      await fs.unlink(alias);
+      const admission = {
+        ...review,
+        notBefore: new Date(Date.now() - 1000).toISOString(),
+      };
+      const originalCurrent = await fs.readFile(current.path);
+      await expect(
+        purgeAdmittedRetiredLocalAgentBackups(runtime.agentId, async () => ({
+          ...admission,
+          notBefore: new Date(Date.now() + 60_000).toISOString(),
+        })),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_RETENTION_PENDING" });
+      expect(await fs.readFile(old.path)).toEqual(originalOld);
+      await fs.copyFile(old.path, alias);
+      await expect(
+        purgeAdmittedRetiredLocalAgentBackups(
+          runtime.agentId,
+          async () => admission,
+        ),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_CLEANUP_STALE" });
+      expect(await fs.readFile(old.path)).toEqual(originalOld);
+      await fs.unlink(alias);
+      // A valid foreign replacement must not be mistaken for an already removed file.
+      await fs.writeFile(old.path, originalOther);
+      await expect(
+        purgeAdmittedRetiredLocalAgentBackups(
+          runtime.agentId,
+          async () => admission,
+        ),
+      ).rejects.toMatchObject({ code: "AGENT_BACKUP_CLEANUP_STALE" });
+      expect(await fs.readFile(old.path)).toEqual(originalOther);
+      await fs.writeFile(old.path, originalOld);
+      await purgeAdmittedRetiredLocalAgentBackups(
+        runtime.agentId,
+        async () => admission,
+      );
+      await expect(fs.stat(old.path)).rejects.toMatchObject({ code: "ENOENT" });
+      // Replaying the same durable admission reconciles a lost completion acknowledgement.
+      await purgeAdmittedRetiredLocalAgentBackups(
+        runtime.agentId,
+        async () => admission,
+      );
+      expect(await fs.readFile(other.path)).toEqual(originalOther);
+      expect(await fs.readFile(current.path)).toEqual(originalCurrent);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   test("writes encrypted local backup files and restores them", async () => {

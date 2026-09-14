@@ -1,36 +1,36 @@
-/**
- * Records a walkthrough of the settings surface for PR evidence: this PR
- * changes locale catalogs and splits one settings key, so the artifact a
- * reviewer needs is the surface actually rendering with those catalogs. Video
- * is enabled per-context here rather than globally so the rest of the smoke
- * suite keeps its current cost.
- */
+/** Records real Settings section navigation at desktop and mobile sizes using deterministic API fixtures. */
 import { expect, test } from "@playwright/test";
+import {
+  installDefaultAppRoutes,
+  openAppPath,
+  openSettingsSection,
+  seedAppStorage,
+} from "./helpers";
 
-test.use({ video: { mode: "on", size: { width: 1440, height: 900 } } });
-
-test("settings surface walkthrough (PR evidence)", async ({ page }) => {
-  await page.goto("/");
-  await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(4000);
-
-  await page.goto("/settings");
-  await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(3000);
-  await expect(
-    page.getByText("Settings", { exact: false }).first(),
-  ).toBeVisible({
-    timeout: 30_000,
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`settings section walkthrough at ${viewport.name}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await seedAppStorage(page);
+    await installDefaultAppRoutes(page);
+    await openAppPath(page, "/settings");
+    await openSettingsSection(page, "Voice");
+    await expect(
+      page.getByRole("heading", { name: "Voice selection", exact: true }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("settings-voice.png"),
+      fullPage: true,
+    });
+    await openSettingsSection(page, "General");
+    await expect(page.getByTestId("background-catalog-gallery")).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("settings-general.png"),
+      fullPage: true,
+    });
   });
-  await page.waitForTimeout(1200);
-
-  // Scroll the surface so the capture shows the rendered rows rather than a
-  // single static frame. Clicking section entries is deliberately omitted: the
-  // shell's overlay intercepts pointer events in this harness, and the artifact
-  // this PR owes is the surface RENDERING with the restored catalogs, not a
-  // navigation flow — nothing in this diff changes navigation.
-  await page.mouse.wheel(0, 400);
-  await page.waitForTimeout(1500);
-  await page.mouse.wheel(0, -400);
-  await page.waitForTimeout(2000);
-});
+}

@@ -41,6 +41,8 @@ import { AgreementObligationReview } from "./AgreementObligationReview.js";
 import { AgreementProposalEditor } from "./AgreementProposalEditor.js";
 import { AgreementReviewPanel } from "./AgreementReviewPanel.js";
 import { defaultFamilyOperationsAdapter } from "./adapter.js";
+import type { FamilyDeletionAdapter } from "./deletion-adapter.js";
+import { FamilyDeletionPanel } from "./FamilyDeletionPanel.js";
 import { FamilyIntakePanel } from "./FamilyIntakePanel.js";
 import {
   defaultFamilyIntakeAdapter,
@@ -1360,11 +1362,13 @@ function PacketPanel({
 export interface FamilyOperationsViewProps {
   intakeAdapter?: FamilyIntakeAdapter;
   adapter?: FamilyOperationsAdapter;
+  deletionAdapter?: FamilyDeletionAdapter;
 }
 
 export function FamilyOperationsView({
   adapter = defaultFamilyOperationsAdapter,
   intakeAdapter = defaultFamilyIntakeAdapter,
+  deletionAdapter,
 }: FamilyOperationsViewProps) {
   const [tab, setTab] = useState<Tab>("agreements");
   const [snapshot, setSnapshot] = useState<FamilyOperationsSnapshot | null>(
@@ -1491,6 +1495,7 @@ export function FamilyOperationsView({
           {exportError ? <Unavailable message={exportError} /> : null}
           {exportNotice ? <p role="status">{exportNotice}</p> : null}
         </header>
+        <FamilyDeletionPanel adapter={deletionAdapter} onChange={refresh} />
         <nav
           aria-label="Family Operations sections"
           style={{

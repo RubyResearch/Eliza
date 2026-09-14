@@ -31,9 +31,9 @@ afterEach(() => {
 });
 
 describe("agentContainerMemoryLimitMb", () => {
-  test("defaults to 3072 when unset", () => {
+  test("defaults to 6144 when unset", () => {
     setEnv({});
-    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(3072);
+    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(6144);
   });
 
   test("honors CONTAINERS_AGENT_MEMORY_LIMIT_MB", () => {
@@ -71,8 +71,8 @@ describe("agentContainerMemoryLimitMb", () => {
 
   test("rejects garbage and negative values back to the default", () => {
     setEnv({ CONTAINERS_AGENT_MEMORY_LIMIT_MB: "not-a-number" });
-    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(3072);
+    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(6144);
     setEnv({ CONTAINERS_AGENT_MEMORY_LIMIT_MB: "-512" });
-    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(3072);
+    expect(containersEnv.agentContainerMemoryLimitMb()).toBe(6144);
   });
 });

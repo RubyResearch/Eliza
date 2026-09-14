@@ -284,6 +284,8 @@ describe("ElizaSandboxService.deleteAgent teardown cap (#9066)", () => {
             },
           ],
         }),
+        // This legacy agent has no prepaid funding window to settle.
+        select: () => ({ from: () => ({ where: () => ({ for: async () => [] }) }) }),
         update,
       });
 

@@ -1339,6 +1339,13 @@ export async function connectRemoteFirstRunToHome(
 
   await expectChatFirstOnboarding(page);
 
+  // The device starts unconfigured, but the adopted host is already ready.
+  // Switch this endpoint before connecting; adoption must not configure it again.
+  await page.route("**/api/first-run/status", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    await fulfillJson(route, { complete: true, cloudProvisioned: false });
+  });
+
   const apiBase =
     opts.apiBase ??
     (await page.evaluate(() => window.location.origin.toString()));
@@ -1355,12 +1362,18 @@ export async function connectRemoteFirstRunToHome(
     );
   }, apiBase);
 
+  // Remote adoption opens the completed conversation at full height. Reveal
+  // Home through the normal dismissal gesture before checking its contents.
+  await expectOnboardingSettleToFull(page);
+  await dismissPermissionPrimingIfShown(page);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("chat-sheet")).toHaveAttribute(
+    "data-detent",
+    "collapsed",
+  );
   const surface = page.getByTestId("home-launcher-surface");
   await expect(surface).toBeVisible({ timeout: 60_000 });
   await expect(surface).toHaveAttribute("data-page", "home");
-  // Remote adoption flips firstRunComplete too — same settle-to-half edge.
-  await expectOnboardingSettleToFull(page);
-  await dismissPermissionPrimingIfShown(page);
   await expect(page.getByTestId("chat-composer-textarea")).toBeVisible({
     timeout: 30_000,
   });
@@ -1377,9 +1390,9 @@ export async function connectRemoteFirstRunToHome(
   ).toBe("1");
 
   expect(
-    state.firstRunPosts.length <= 1,
-    "remote first-run adoption must not double-submit first-run setup",
-  ).toBe(true);
+    state.firstRunPosts.length,
+    "adopting a configured remote must not submit first-run setup",
+  ).toBe(0);
 
   const activeServer = await page.evaluate(() =>
     localStorage.getItem("elizaos:active-server"),

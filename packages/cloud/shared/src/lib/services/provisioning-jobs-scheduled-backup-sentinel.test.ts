@@ -21,6 +21,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { and, eq, sql } from "drizzle-orm";
 import { installOrganizationPolicyTestSchema } from "../../db/repositories/organization-policy-test-fixture";
 
@@ -134,6 +135,16 @@ beforeAll(async () => {
     }
     const { getPgliteClientForTests } = await import("../../db/client");
     await installOrganizationPolicyTestSchema((query) => getPgliteClientForTests().exec(query));
+    for (const name of [
+      "0388_agent_compute_funded_receipts.sql",
+      "0394_agent_billing_activation_minimum.sql",
+    ]) {
+      const migration = await readFile(
+        new URL(`../../db/migrations/${name}`, import.meta.url),
+        "utf8",
+      );
+      await getPgliteClientForTests().exec(migration);
+    }
   } catch (error) {
     pgliteReady = false;
     console.error(

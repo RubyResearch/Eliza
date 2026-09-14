@@ -34,7 +34,7 @@ describe("insufficientCreditsBody", () => {
       { requiredBalance: AGENT_PRICING.UPGRADE_MINIMUM_BALANCE },
     );
 
-    expect(body.requiredBalance).toBe(0.72);
+    expect(body.requiredBalance).toBe(10.8);
     expect(body.currentBalance).toBe(0.5);
   });
 

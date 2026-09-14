@@ -20,6 +20,7 @@ import { getMaxNonTerminalAgentsForOrg } from "@/lib/constants/agent-sandbox-quo
 import { getConfiguredElizaAgentPublicWebUiUrl } from "@/lib/eliza-agent-web-ui";
 import { checkAgentCreditGate } from "@/lib/services/agent-billing-gate";
 import { insufficientCredits402 } from "@/lib/services/agent-billing-gate-402";
+import { requireDedicatedComputePriceAcceptance } from "@/lib/services/dedicated-compute-price-acceptance";
 import {
   stripReservedElizaConfigKeys,
   withReusedElizaCharacterOwnership,
@@ -418,6 +419,8 @@ app.post("/", async (c) => {
   let orgBalanceForQuota: number | undefined;
 
   if (shouldProvisionEagerly) {
+    const priceError = requireDedicatedComputePriceAcceptance(c.req.raw);
+    if (priceError) return priceError;
     const creditCheck = await checkAgentCreditGate(user.organization_id);
     orgBalanceForQuota = creditCheck.balance;
     if (!creditCheck.allowed) {

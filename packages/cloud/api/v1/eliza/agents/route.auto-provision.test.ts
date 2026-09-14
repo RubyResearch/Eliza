@@ -127,12 +127,20 @@ function buildApp() {
   return app;
 }
 
-function post(query = "") {
+function post(
+  query = "",
+  acceptance: string | null = "dedicated-compute-v1:USD:0.150000:0.300000",
+) {
   return buildApp().request(
     `/api/v1/eliza/agents${query}`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(acceptance === null
+          ? {}
+          : { "X-Eliza-Dedicated-Price": acceptance }),
+      },
       body: JSON.stringify({ agentName: "keep-offline", alwaysOn: true }),
     },
     ENV,
@@ -293,6 +301,16 @@ describe("POST /api/v1/eliza/agents autoProvision identity", () => {
     createAgent.mockClear();
   });
 
+  test.each([null, "dedicated-compute-v1:USD:0.010000:0.020000", "invalid"])(
+    "requires reviewed pricing before eager creation (%s)",
+    async (acceptance) => {
+      const response = await post("", acceptance);
+      expect(response.status).toBe(428);
+      expect(checkAgentCreditGate).not.toHaveBeenCalled();
+      expect(createAgent).not.toHaveBeenCalled();
+    },
+  );
+
   test.each(["", "?autoProvision=", "?autoProvision=true"])(
     "accepts %s as eager-provision (credit gate runs)",
     async (query) => {
@@ -304,7 +322,7 @@ describe("POST /api/v1/eliza/agents autoProvision identity", () => {
   );
 
   test("accepts autoProvision=false as skip the credit gate", async () => {
-    const response = await post("?autoProvision=false");
+    const response = await post("?autoProvision=false", null);
     expect(response.status).toBe(200);
     expect(checkAgentCreditGate).not.toHaveBeenCalled();
     expect(createAgent).toHaveBeenCalledTimes(1);

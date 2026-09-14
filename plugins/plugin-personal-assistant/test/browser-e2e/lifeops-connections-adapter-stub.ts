@@ -22,3 +22,4 @@ export const defaultAccountHandoffAdapter = {
   cancelLifeOpsAccountHandoff: unavailableHandoff,
   advanceLifeOpsAccountHandoff: unavailableHandoff,
 };
+export const defaultFamilyDeletionAdapter = {};

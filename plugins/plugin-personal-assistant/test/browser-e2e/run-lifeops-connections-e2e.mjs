@@ -40,6 +40,11 @@ const result = await viteBuild({
           return join(here, "lifeops-time-host-fixture.ts");
         }
         if (source === "./handoff-adapter.js") return adapterStub;
+        if (
+          source === "./deletion-adapter.js" &&
+          importer?.endsWith("FamilyDeletionPanel.tsx")
+        )
+          return adapterStub;
         return source === "./adapter.js" &&
           (importer?.endsWith("LifeOpsConnectionsView.tsx") ||
             importer?.endsWith("FamilyOperationsView.tsx") ||
@@ -161,7 +166,10 @@ async function openFamilyMonth(page, month) {
     .waitFor();
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  slowMo: process.env.ELIZA_LIFEOPS_E2E_RECORD_SLOW === "1" ? 750 : 0,
+});
 try {
   const desktop = await browser.newPage({
     viewport: { width: 1280, height: 900 },
@@ -750,6 +758,175 @@ try {
       `${fault.query} has no uncaught page error`,
     );
     await faultPage.close();
+  }
+
+  for (const width of [1180, 390]) {
+    const context = await browser.newContext({
+      viewport: { width, height: 850 },
+      isMobile: width === 390,
+      hasTouch: width === 390,
+      recordVideo: { dir: join(outputDir, `deletion-${width}-video`) },
+    });
+    const page = await context.newPage();
+    await page.clock.setFixedTime(new Date("2026-09-13T13:00:00.000Z"));
+    const errors = [];
+    const frontend = [];
+    page.on("console", (message) =>
+      frontend.push({
+        type: "console",
+        level: message.type(),
+        text: message.text(),
+      }),
+    );
+    page.on("response", (response) =>
+      frontend.push({
+        type: "response",
+        method: response.request().method(),
+        path: new URL(response.url()).pathname,
+        status: response.status(),
+      }),
+    );
+    page.on("pageerror", (error) => errors.push(String(error)));
+    await page.goto(`${baseURL}?scenario=family-deletion`);
+    await page
+      .getByRole("button", { name: "Review workspace deletion" })
+      .click();
+    const confirm = page.getByRole("button", {
+      name: "Delete reviewed workspace",
+    });
+    await confirm.waitFor();
+    assert(
+      await confirm.isDisabled(),
+      "deletion requires review and retention selection",
+    );
+    await page.getByText(/Review all 2 affected records/).click();
+    await page.getByRole("button", { name: "After 7 days" }).click();
+    await page.getByRole("checkbox").check();
+    await confirm.scrollIntoViewIfNeeded();
+    await page.mouse.move(0, 0);
+    assert(
+      await page.getByRole("button").evaluateAll((buttons) =>
+        buttons.every((button) => {
+          const bounds = button.getBoundingClientRect();
+          return bounds.height >= 44 && bounds.width >= 44;
+        }),
+      ),
+      `deletion ${width}px buttons meet the 44px touch target`,
+    );
+    await page.screenshot({
+      path: join(outputDir, `deletion-review-${width}.png`),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await confirm.hover();
+    await page.screenshot({
+      path: join(outputDir, `deletion-review-hover-${width}.png`),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await confirm.click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Workspace changed" })
+      .waitFor();
+    assert((await confirm.count()) === 0, "stale review cannot be resubmitted");
+    await page.getByRole("button", { name: "Refresh deletion status" }).click();
+    await page.getByRole("checkbox").waitFor();
+    assert(
+      !(await page.getByRole("checkbox").isChecked()),
+      "new snapshot needs new review acknowledgement",
+    );
+    await page.getByRole("checkbox").check();
+    await confirm.click();
+    await page
+      .getByText("Access is revoked. Primary-file cleanup is still pending.")
+      .waitFor();
+    await page.screenshot({
+      path: join(outputDir, `deletion-primary-pending-${width}.png`),
+      fullPage: true,
+    });
+    await page.reload();
+    await page
+      .getByRole("button", { name: "Review workspace deletion" })
+      .click();
+    await page.getByRole("button", { name: "Retry primary cleanup" }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Cleanup response was interrupted" })
+      .waitFor();
+    await page.getByRole("button", { name: "Refresh deletion status" }).click();
+    await page
+      .getByText(
+        "Primary cleanup is verified. Backup cleanup is pending; deletion is not complete.",
+      )
+      .waitFor();
+    assert(
+      (await page
+        .getByRole("button", { name: "Retry primary cleanup" })
+        .count()) === 0,
+      "verified primary cleanup is not repeated",
+    );
+    await page.screenshot({
+      path: join(outputDir, `deletion-backup-pending-${width}.png`),
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Review backup copies" }).click();
+    const confirmBackups = page.getByRole("button", {
+      name: "Confirm reviewed backup cleanup",
+    });
+    assert(
+      await confirmBackups.isDisabled(),
+      "whole archive removal needs separate acknowledgement",
+    );
+    await page.getByText("Review all 1 backup copies").click();
+    await page
+      .getByRole("checkbox", { name: /I reviewed every backup/ })
+      .check();
+    await confirmBackups.scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: join(outputDir, `deletion-archive-review-${width}.png`),
+      fullPage: true,
+    });
+    await confirmBackups.click();
+    const retryBackups = page.getByRole("button", {
+      name: "Retry backup cleanup",
+    });
+    assert(
+      await retryBackups.isDisabled(),
+      "retention deadline prevents early archive removal",
+    );
+    await page.screenshot({
+      path: join(outputDir, `deletion-archive-retained-${width}.png`),
+      fullPage: true,
+    });
+    await page.clock.setFixedTime(new Date("2026-09-21T13:00:00.000Z"));
+    await page.getByRole("button", { name: "Refresh deletion status" }).click();
+    await retryBackups.click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Backup cleanup acknowledgement lost" })
+      .waitFor();
+    await page.getByRole("button", { name: "Refresh deletion status" }).click();
+    await page
+      .getByText(
+        "Workspace deletion is complete. Referenced provider records remain with their providers.",
+        { exact: true },
+      )
+      .waitFor();
+    await page.screenshot({
+      path: join(outputDir, `deletion-archive-complete-${width}.png`),
+      fullPage: true,
+    });
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth + 1,
+    );
+    assert(!overflow, `deletion review fits ${width}px viewport`);
+    assert(errors.length === 0, `deletion ${width}px flow has no page errors`);
+    await writeFile(
+      join(outputDir, `deletion-frontend-${width}.json`),
+      JSON.stringify({ frontend, pageErrors: errors }, null, 2),
+    );
+    await context.close();
   }
 
   for (const width of [1180, 390]) {

@@ -99,6 +99,9 @@ describe("DockerSandboxProvider remote runtime mode", () => {
       provider.create({
         agentId: "11111111-1111-4111-8111-111111111111",
         agentName: "Remote pairing guard",
+        startFundedContainer: async () => {
+          throw new Error("Configuration capture cannot start a container");
+        },
         organizationId: "22222222-2222-4222-8222-222222222222",
         executionTier: "dedicated-always",
         environmentVars: callerEnvironment,
@@ -133,6 +136,9 @@ describe("DockerSandboxProvider remote runtime mode", () => {
       provider.create({
         agentId: "11111111-1111-4111-8111-111111111111",
         agentName: "Execution key guard",
+        startFundedContainer: async () => {
+          throw new Error("Configuration capture cannot start a container");
+        },
         organizationId: "22222222-2222-4222-8222-222222222222",
         executionTier: "dedicated-always",
         environmentVars: {

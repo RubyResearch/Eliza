@@ -116,6 +116,52 @@ test("skills view shows empty state and New Skill opens the create form", async 
   ).toBeVisible({ timeout: 10_000 });
 });
 
+test("learning a skill opens an editable conversation draft", async ({
+  page,
+}) => {
+  let sentMessages = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/api\/(?:chat|conversations\/[^/]+\/messages)(?:\/stream)?(?:\?|$)/.test(
+        request.url(),
+      )
+    )
+      sentMessages += 1;
+  });
+  await openAppPath(page, "/character/skills");
+  const learn = page.getByRole("button", {
+    name: "Learn a skill",
+    exact: true,
+  });
+  await expect(learn).toBeVisible({ timeout: 60_000 });
+  const before = sentMessages;
+  await learn.click();
+  const composer = page.getByTestId("chat-composer-textarea");
+  await expect(composer).toBeVisible();
+  await expect(composer).toHaveValue(/Help me learn a new skill/);
+  await composer.fill("Help me practice Spanish conversation.");
+  await expect(composer).toHaveValue("Help me practice Spanish conversation.");
+  expect(sentMessages).toBe(before);
+  const submitted = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /\/api\/(?:chat|conversations\/[^/]+\/messages)(?:\/stream)?(?:\?|$)/.test(
+        request.url(),
+      ),
+  );
+  await page.getByRole("button", { name: "send", exact: true }).click();
+  expect((await submitted).postDataJSON()).toMatchObject({
+    text: "Help me practice Spanish conversation.",
+  });
+  const thread = page.getByTestId("chat-thread");
+  await expect(thread).toBeVisible();
+  await expect(
+    thread.getByText(/"fixture":"ui-smoke-assistant-v1"/),
+  ).toHaveCount(1);
+  expect(sentMessages).toBe(before + 1);
+});
+
 test("trajectories view loads and search re-queries", async ({ page }) => {
   const trajReqs = countRequests(page, /\/api\/trajectories(?:\?|$|\/)/);
   await openAppPath(page, "/apps/trajectories");
@@ -156,10 +202,17 @@ test("stream view renders the offline status surface", async ({ page }) => {
   });
 });
 
-test("rolodex renders its designed unavailable boundary", async ({ page }) => {
+test("legacy rolodex URL opens the working relationship graph", async ({
+  page,
+}) => {
+  const graphRequests = countRequests(
+    page,
+    /\/api\/lifeops\/(entities|relationships)(?:\?|$)/,
+  );
   await openAppPath(page, "/rolodex");
-  await expect(
-    page.locator('[data-view-status="unavailable"][data-view-id="rolodex"]'),
-  ).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByTestId("relationships-view")).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(page).toHaveURL(/\/apps\/relationships$/);
+  await expect.poll(graphRequests).toBeGreaterThan(0);
 });

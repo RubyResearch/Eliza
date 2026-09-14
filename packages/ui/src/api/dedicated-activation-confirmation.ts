@@ -4,6 +4,7 @@ export interface DedicatedActivationConfirmationQuote {
   quoteId: string;
   sourceAgentId: string;
   hourlyRateUsd: number;
+  minimumActivationChargeUsd: number;
   dailyRateUsd: number;
   minimumBalanceUsd: number;
   minimumRunwayDays: number;
@@ -36,6 +37,8 @@ export function parseDedicatedActivationConfirmationQuote(
     value.requiresConfirmation !== true ||
     value.canActivate !== true ||
     !isFiniteAmount(value.hourlyRateUsd) ||
+    !isFiniteAmount(value.minimumActivationChargeUsd) ||
+    value.minimumActivationChargeUsd < 0 ||
     !isFiniteAmount(value.dailyRateUsd) ||
     !isFiniteAmount(value.minimumBalanceUsd) ||
     !isFiniteAmount(value.minimumRunwayDays) ||
@@ -54,6 +57,7 @@ export function parseDedicatedActivationConfirmationQuote(
     quoteId: value.quoteId,
     sourceAgentId,
     hourlyRateUsd: value.hourlyRateUsd,
+    minimumActivationChargeUsd: value.minimumActivationChargeUsd,
     dailyRateUsd: value.dailyRateUsd,
     minimumBalanceUsd: value.minimumBalanceUsd,
     minimumRunwayDays: value.minimumRunwayDays,

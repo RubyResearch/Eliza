@@ -1242,4 +1242,116 @@ describe("NodeAutoscaler full provision\u2192healthy\u2192drain loop (#8920)", (
     expect(drained.healthyNodeCount).toBe(0);
     expect(drained.shouldScaleUp).toBe(true);
   });
+
+  test.each([
+    {
+      name: "zero spare capacity",
+      buffer: 0,
+      hot: 0,
+      allocated: 0,
+      retained: 0,
+      young: false,
+      managed: true,
+      drain: true,
+    },
+    {
+      name: "nonzero buffer",
+      buffer: 1,
+      hot: 0,
+      allocated: 0,
+      retained: 0,
+      young: false,
+      managed: true,
+      drain: false,
+    },
+    {
+      name: "nonzero hot floor",
+      buffer: 0,
+      hot: 1,
+      allocated: 0,
+      retained: 0,
+      young: false,
+      managed: true,
+      drain: false,
+    },
+    {
+      name: "allocated workload",
+      buffer: 0,
+      hot: 0,
+      allocated: 1,
+      retained: 0,
+      young: false,
+      managed: true,
+      drain: false,
+    },
+    {
+      name: "retained workload",
+      buffer: 0,
+      hot: 0,
+      allocated: 0,
+      retained: 1,
+      young: false,
+      managed: true,
+      drain: false,
+    },
+    {
+      name: "recently created node",
+      buffer: 0,
+      hot: 0,
+      allocated: 0,
+      retained: 0,
+      young: true,
+      managed: true,
+      drain: false,
+    },
+    {
+      name: "operator managed node",
+      buffer: 0,
+      hot: 0,
+      allocated: 0,
+      retained: 0,
+      young: false,
+      managed: false,
+      drain: false,
+    },
+  ])("final node capacity policy: $name", async (scenario) => {
+    const fake = new InMemoryComputeProvider({ serverActivateAfterTicks: 0 });
+    const autoscaler = new NodeAutoscaler(
+      {
+        ...policy,
+        minFreeSlotsBuffer: scenario.buffer,
+        minHotAvailableSlots: scenario.hot,
+      },
+      () => NOW,
+      fake,
+    );
+    const provisioned = await autoscaler.provisionNode(
+      { nodeId: "final-node", capacity: 8, prePullImages: [] },
+      { controlPlanePublicKey: "ssh-ed25519 AAAAcontrol" },
+    );
+    delete store[0].metadata.capacityProvisional;
+    store[0].metadata.autoscaled = scenario.managed;
+    store[0].capacity = 8;
+    store[0].status = "healthy";
+    if (scenario.young) store[0].created_at = new Date(NOW);
+    mocks.countAllocated.mockResolvedValue(scenario.allocated);
+    mocks.countRetained.mockResolvedValue(scenario.retained);
+
+    const decision = await autoscaler.evaluateCapacity();
+    expect(decision.shouldScaleUp).toBe(false);
+    expect(decision.shouldScaleDownNodeIds).toEqual(scenario.drain ? ["final-node"] : []);
+    expect(await fake.getServer(provisioned.hcloudServerId)).not.toBeNull();
+    if (scenario.drain) {
+      await autoscaler.drainNode(decision.shouldScaleDownNodeIds[0], { deprovision: true });
+      expect(store).toHaveLength(0);
+      expect(await fake.getServer(provisioned.hcloudServerId)).toBeNull();
+      expect(await autoscaler.evaluateCapacity()).toMatchObject({
+        healthyNodeCount: 0,
+        shouldScaleUp: false,
+        shouldScaleDownNodeIds: [],
+      });
+    } else {
+      expect(store).toHaveLength(1);
+    }
+  });
 });

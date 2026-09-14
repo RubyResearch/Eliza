@@ -24,6 +24,8 @@ export interface FrontendKpiSample {
   jsTransferredBytes: number;
   /** Total number of resource entries fetched by the page. */
   requestCount: number;
+  /** Resource breakdown captured with the first-interactive transfer total. */
+  firstInteractiveScripts: Array<{ path: string; bytes: number }> | null;
 }
 
 // The page-side global the init script populates and readFrontendKpis() drains.
@@ -39,6 +41,7 @@ interface KpiCollectorState {
   cls: number;
   /** JS-transfer total snapshotted at first-interactive, null until captured. */
   firstInteractiveJsBytes: number | null;
+  firstInteractiveScripts: Array<{ path: string; bytes: number }> | null;
 }
 
 declare global {
@@ -59,6 +62,7 @@ export async function installWebVitalsObservers(page: Page): Promise<void> {
         lcpMs: null,
         cls: 0,
         firstInteractiveJsBytes: null,
+        firstInteractiveScripts: null,
       };
       (window as unknown as Record<string, KpiCollectorState>)[globalKey] =
         state;
@@ -83,6 +87,16 @@ export async function installWebVitalsObservers(page: Page): Promise<void> {
         if (state.firstInteractiveJsBytes !== null) return false;
         if (!document.querySelector(firstInteractiveSelector)) return false;
         state.firstInteractiveJsBytes = sumScriptBytes();
+        state.firstInteractiveScripts = (
+          performance.getEntriesByType(
+            "resource",
+          ) as PerformanceResourceTiming[]
+        )
+          .filter((entry) => entry.initiatorType === "script")
+          .map((entry) => ({
+            path: new URL(entry.name).pathname,
+            bytes: entry.encodedBodySize,
+          }));
         return true;
       };
       if (!captureFirstInteractive()) {
@@ -153,7 +167,12 @@ export async function readFrontendKpis(page: Page): Promise<FrontendKpiSample> {
   return page.evaluate((globalKey: string): FrontendKpiSample => {
     const state = (window as unknown as Record<string, KpiCollectorState>)[
       globalKey
-    ] ?? { lcpMs: null, cls: 0, firstInteractiveJsBytes: null };
+    ] ?? {
+      lcpMs: null,
+      cls: 0,
+      firstInteractiveJsBytes: null,
+      firstInteractiveScripts: null,
+    };
 
     const paintEntries = performance.getEntriesByType("paint");
     const fcpEntry = paintEntries.find(
@@ -181,6 +200,7 @@ export async function readFrontendKpis(page: Page): Promise<FrontendKpiSample> {
       cls: state.cls,
       jsTransferredBytes,
       requestCount: resourceEntries.length,
+      firstInteractiveScripts: state.firstInteractiveScripts,
     };
   }, KPI_GLOBAL);
 }

@@ -5,6 +5,7 @@ import { errorToResponse, ValidationError } from "@/lib/api/errors";
 import { requireAuthOrApiKeyWithOrg } from "@/lib/auth";
 import { checkAgentCreditGate } from "@/lib/services/agent-billing-gate";
 import { insufficientCredits402 } from "@/lib/services/agent-billing-gate-402";
+import { requireDedicatedComputePriceAcceptance } from "@/lib/services/dedicated-compute-price-acceptance";
 import { elizaSandboxService } from "@/lib/services/eliza-sandbox";
 import { provisioningJobService } from "@/lib/services/provisioning-jobs";
 import {
@@ -189,6 +190,8 @@ async function __hono_POST(
     }
 
     // Credit gate: waking provisions paid compute.
+    const priceError = requireDedicatedComputePriceAcceptance(request);
+    if (priceError) return applyCorsHeaders(priceError, CORS_METHODS);
     const creditCheck = await checkAgentCreditGate(user.organization_id);
     if (!creditCheck.allowed) {
       const body = insufficientCredits402(

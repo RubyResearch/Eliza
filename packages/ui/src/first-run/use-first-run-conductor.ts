@@ -382,6 +382,7 @@ function dedicatedAdoptionConfirmationText(
       "Start your Dedicated Eliza?",
       "",
       `Hosting costs $${quote.dailyRateUsd.toFixed(2)}/day ($${quote.hourlyRateUsd.toFixed(2)}/hour).`,
+      `Minimum charge per successful start: $${quote.minimumActivationChargeUsd.toFixed(2)}. Applies again after stopping and restarting.`,
       `Your balance is $${quote.balanceUsd.toFixed(2)}. You need at least $${quote.minimumBalanceUsd.toFixed(2)} to start.`,
       "",
       "[CHOICE:first-run id=dedicated-adoption]",
@@ -404,6 +405,11 @@ function dedicatedAdoptionConfirmationText(
     `${changed}Use your existing Dedicated agent?`,
     "",
     `$${quote.dailyRateUsd.toFixed(2)}/day ($${quote.hourlyRateUsd.toFixed(2)}/hour).`,
+    ...(quote.startsCompute
+      ? [
+          `Minimum charge per successful start: $${quote.minimumActivationChargeUsd.toFixed(2)}. Applies again after stopping and restarting.`,
+        ]
+      : []),
     `Balance: $${quote.balanceUsd.toFixed(2)}; $${quote.minimumBalanceUsd.toFixed(2)} required.`,
     ...(quote.deficitUsd > 0
       ? [`Add $${quote.deficitUsd.toFixed(2)} to start.`]

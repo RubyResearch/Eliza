@@ -1058,7 +1058,7 @@ async function handleRead(
 		message,
 	);
 	if (!documentRange) {
-		const text = `Document ${documentId} was not found; tell the user it doesn't exist.`;
+		const text = `No accessible document matched ID ${documentId}. Verify the exact ID in the available document index, or use DOCUMENT list/search to resolve the intended document before retrying. Do not infer that the named document does not exist from this ID lookup. Ask the user only if the intended document remains ambiguous.`;
 		return result(false, text, "read", { values: { error: "not_found" } });
 	}
 	if (offset > documentRange.total) {

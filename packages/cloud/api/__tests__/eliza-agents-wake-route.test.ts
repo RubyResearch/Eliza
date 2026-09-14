@@ -356,9 +356,14 @@ afterAll(async () => {
 
 async function wake(
   agentId: string,
-  init: { key?: string; body?: BodyInit } = {},
+  init: { key?: string; body?: BodyInit; acceptance?: string | null } = {},
 ): Promise<Response> {
   const headers = new Headers();
+  if (init.acceptance !== null)
+    headers.set(
+      "X-Eliza-Dedicated-Price",
+      init.acceptance ?? "dedicated-compute-v1:USD:0.150000:0.300000",
+    );
   if (init.key !== undefined) headers.set("X-API-Key", init.key);
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
   return app.request(`/api/v1/eliza/agents/${agentId}/wake`, {
@@ -367,6 +372,31 @@ async function wake(
     ...(init.body === undefined ? {} : { body: init.body }),
   });
 }
+
+describe("Dedicated price acceptance", () => {
+  test.each([AGENT_SHARED, AGENT_RUNNING])(
+    "keeps the no-op path for %s without new acceptance",
+    async (agentId) => {
+      const res = await wake(agentId, { key: KEY_A, acceptance: null });
+      expect(res.status).toBe(200);
+      if (!countWakeJobs) throw new Error("harness not initialized");
+      expect(await countWakeJobs(agentId)).toBe(0);
+    },
+  );
+
+  test.each([null, "dedicated-compute-v1:USD:0.010000:0.020000", "invalid"])(
+    "rejects %s without creating a paid job",
+    async (acceptance) => {
+      const res = await wake(AGENT_A, { key: KEY_A, acceptance });
+      expect(res.status).toBe(428);
+      expect(await res.json()).toMatchObject({
+        code: "DEDICATED_PRICE_CONFIRMATION_REQUIRED",
+      });
+      if (!countWakeJobs) throw new Error("harness not initialized");
+      expect(await countWakeJobs(AGENT_A)).toBe(0);
+    },
+  );
+});
 
 describe("authentication", () => {
   test("no credentials at all is a 401, not an enqueued job", async () => {
@@ -630,6 +660,9 @@ describe("CORS preflight", () => {
       method: "OPTIONS",
     });
     expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain(
+      "X-Eliza-Dedicated-Price",
+    );
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
       "POST, OPTIONS",
     );

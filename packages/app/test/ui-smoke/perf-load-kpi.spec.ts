@@ -76,6 +76,10 @@ test.describe("frontend load KPIs", () => {
     // navigation, so they are already recorded by first-interactive.
 
     const sample: FrontendKpiSample = await readFrontendKpis(page);
+    await test.info().attach("first-interactive-resources", {
+      body: JSON.stringify(sample, null, 2),
+      contentType: "application/json",
+    });
 
     // Surface the raw numbers through the reporter so the spec is a usable
     // measurement, not just a pass/fail gate.

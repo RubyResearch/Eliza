@@ -512,6 +512,7 @@ describe("AppModeEntryRoute — rowless personal entry", () => {
               sourceAgentId: PERSONAL_ID,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 10,

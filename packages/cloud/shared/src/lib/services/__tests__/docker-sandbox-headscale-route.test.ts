@@ -279,6 +279,9 @@ describe("DockerSandboxProvider Headscale route guard", () => {
         organizationId: "22222222-2222-4222-8222-222222222222",
         executionTier: "dedicated-always",
         environmentVars: {},
+        startFundedContainer: async () => {
+          throw new Error("Missing route cannot start a container");
+        },
       }),
     ).rejects.toThrow("HEADSCALE_API_KEY is not configured");
   });

@@ -125,6 +125,7 @@ mock.module("./inference-app-key-scope", () => ({
   loadInferenceAppKeyScope: async () => null,
 }));
 mock.module("./inference-credential-revocation", () => ({
+  InferenceCredentialRevocationUnavailableError: class InferenceCredentialRevocationUnavailableError extends Error {},
   isInferenceStrongRevocationEnabled: () =>
     process.env.INFERENCE_STRONG_REVOCATION_ENABLED === "true",
   InferenceCredentialRevokedError: class InferenceCredentialRevokedError extends Error {
@@ -622,6 +623,83 @@ describe("resolveInferenceAuthContext", () => {
     expect(chainCalls).toBe(1);
     expect(incrementUsageCalls).toEqual([]);
     expect(await readInferenceAuthContext(hashApiKey(KEY))).not.toBeNull();
+  });
+
+  test("background projection retries a transient credential check without delaying origin admission", async () => {
+    const { InferenceCredentialRevocationUnavailableError } = await import(
+      "./inference-credential-revocation"
+    );
+    const retry = Promise.withResolvers<void>();
+    let checks = 0;
+    assertCredentialActive = async () => {
+      if (++checks === 1)
+        throw new InferenceCredentialRevocationUnavailableError("transport timeout");
+      await retry.promise;
+    };
+    const waited: Promise<unknown>[] = [];
+    const result = await resolveInferenceAuthContext(reqWithApiKey(), {
+      cacheOnly: true,
+      deferStrongCredentialCheck: true,
+      executionCtx: { waitUntil: (promise) => waited.push(promise) },
+    });
+    expect(result).toMatchObject({
+      kind: "authorized",
+      source: "origin",
+      credential: { credentialId: "key-1" },
+    });
+    expect(await readInferenceAuthContext(hashApiKey(KEY))).toBeNull();
+    retry.resolve();
+    await Promise.all(waited);
+    expect(checks).toBe(2);
+    expect(await readInferenceAuthContext(hashApiKey(KEY))).toMatchObject({ apiKeyId: "key-1" });
+    assertCredentialActive = async () => undefined;
+    expect(
+      await resolveInferenceAuthContext(reqWithApiKey(), { deferStrongCredentialCheck: true }),
+    ).toMatchObject({ kind: "authorized", source: "cache" });
+    expect(authBoundaryCalls).toHaveLength(1);
+  });
+
+  test.each(["unavailable", "revoked", "unexpected"] as const)(
+    "background projection stays uncached after a retry ends with %s",
+    async (outcome) => {
+      const { InferenceCredentialRevocationUnavailableError, InferenceCredentialRevokedError } =
+        await import("./inference-credential-revocation");
+      let checks = 0;
+      assertCredentialActive = async () => {
+        checks++;
+        if (checks === 1 || outcome === "unavailable")
+          throw new InferenceCredentialRevocationUnavailableError("transport timeout");
+        if (outcome === "revoked") throw new InferenceCredentialRevokedError("credential_revoked");
+        throw new Error("unexpected failure");
+      };
+      const waited: Promise<unknown>[] = [];
+      await resolveInferenceAuthContext(reqWithApiKey(), {
+        cacheOnly: true,
+        deferStrongCredentialCheck: true,
+        executionCtx: { waitUntil: (promise) => waited.push(promise) },
+      });
+      await Promise.all(waited);
+      expect(checks).toBe(2);
+      expect(await readInferenceAuthContext(hashApiKey(KEY))).toBeNull();
+    },
+  );
+
+  test("background projection never retries an explicit revocation", async () => {
+    const { InferenceCredentialRevokedError } = await import("./inference-credential-revocation");
+    let checks = 0;
+    assertCredentialActive = async () => {
+      checks++;
+      throw new InferenceCredentialRevokedError("credential_revoked");
+    };
+    const waited: Promise<unknown>[] = [];
+    await resolveInferenceAuthContext(reqWithApiKey(), {
+      cacheOnly: true,
+      deferStrongCredentialCheck: true,
+      executionCtx: { waitUntil: (promise) => waited.push(promise) },
+    });
+    await Promise.all(waited);
+    expect(checks).toBe(1);
+    expect(await readInferenceAuthContext(hashApiKey(KEY))).toBeNull();
   });
 
   test("a cold consumer without an admission credential awaits its standalone strong check", async () => {

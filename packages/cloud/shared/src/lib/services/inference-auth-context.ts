@@ -48,6 +48,7 @@ import {
 import {
   assertInferenceCredentialActive,
   type InferenceCredentialCheck,
+  InferenceCredentialRevocationUnavailableError,
   InferenceCredentialRevokedError,
   inferenceCredentialRevocationReason,
   isInferenceStrongRevocationEnabled,
@@ -460,11 +461,25 @@ function getOrCreateApiKeyHydration(
     .then(async (result) => {
       if (!result) return;
       if (result.kind === "authorized" && "keyHash" in result.ctx) {
-        await assertInferenceCredentialActive(result.ctx.orgId, {
+        const credential: InferenceCredentialCheck = {
           kind: "api_key",
           credentialId: result.ctx.apiKeyId,
           userId: result.ctx.userId,
-        });
+        };
+        try {
+          await assertInferenceCredentialActive(result.ctx.orgId, credential);
+        } catch (error) {
+          if (!(error instanceof InferenceCredentialRevocationUnavailableError)) throw error;
+          // error-policy:J2 background projection may retry one unavailable
+          // read with a fresh stub. A cold object can outlive the short check
+          // deadline; abandoning the projection leaves every later request
+          // paying origin auth again. Neither attempt authorizes inference,
+          // extends cache freshness, nor retries an explicit revocation.
+          logger.info("[InferenceAuth] retrying background credential projection", {
+            traceId: boundedTraceId(options.traceId),
+          });
+          await assertInferenceCredentialActive(result.ctx.orgId, credential);
+        }
         const startedAt = performance.now();
         const write = await writeInferenceAuthContext(result.ctx);
         const telemetry = freezeCacheWriteTrace(options.traceId, write, startedAt);

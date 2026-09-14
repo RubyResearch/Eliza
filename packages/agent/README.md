@@ -25,6 +25,37 @@ batch runner validates every report before writing one combined JUnit artifact.
 Missing, malformed or failed batch evidence rejects the run; entirely skipped
 suites do not satisfy the repository's required-work gate.
 
+## Backup restore generations
+
+Snapshot capture, local backup publication, and restore share an exclusive
+claim under the configured state directory's `.backup-authority` directory.
+Destructive domain workflows use `withAgentBackupAuthority` and retire the
+agent's previous generation before deleting data. Earlier snapshots remain
+stored but cannot restore that agent; this is a restore restriction, not proof
+that retained backup bytes have been purged. The domain must separately expose
+and execute its backup retention policy.
+
+Retirement remains pending until the domain verifies primary cleanup and calls
+`completeRetirement` with the matching operation ID and generation. Pending
+retirement blocks both capture and restore, including after a process restart.
+Retries of the same operation reuse its generation; a different operation cannot
+take over pending cleanup. The domain can inspect `pendingRetirement` to
+reconcile an uncertain transaction before retrying or acknowledging completion.
+
+New snapshots record the current generation. Legacy snapshots belong to the
+initial generation and remain restorable until that generation is retired.
+Authority files are excluded from capture and state pruning, and restore
+rejects payloads or configured targets that would replace them. A failed or
+uncertain deletion does not automatically reinstate an earlier generation.
+
+An interrupted process can leave `.backup-authority/operation.lock`. Operations
+then return `AGENT_BACKUP_AUTHORITY_UNAVAILABLE`; elapsed time never authorizes
+automatic removal. For recovery, stop every process using that state directory,
+inspect the interrupted operation and its domain journal, and reconcile any
+database or storage effects before removing that exact claim and syncing its
+parent directory. Preserve all generation records. Restart users only after
+reconciliation; removing a claim does not roll back a completed deletion.
+
 ## Research tasks
 
 `ResearchTaskExecutor` requires a provider registered for

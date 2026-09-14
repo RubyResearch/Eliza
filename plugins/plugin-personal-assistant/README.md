@@ -571,5 +571,22 @@ recheck admission before returning private data, including PDF reads that began
 before revocation. Export audit writes also require active admission. The planner
 reports revoked agreement context as explicitly unavailable while preserving
 unrelated work; it does not substitute an empty, apparently healthy pin set.
-These internal guards do not themselves expose a delete endpoint or establish a
-backup-retention policy.
+Owners review and confirm deletion in Family Operations through the private
+`/api/lifeops/family-workflows/deletion` routes. Confirmation binds the complete
+reviewed snapshot to an explicit backup-retention choice. A durable journal
+allows interrupted private-file cleanup to resume; backup restore generations
+are retired before primary removal. The job remains `backup_pending` until
+the owner separately reviews every eligible encrypted archive and acknowledges
+that removing a whole-agent archive also removes unrelated history in that
+archive. Current-generation copies and live provider records remain retained.
+
+The backup review binds authenticated file identities to the deletion operation
+and retention deadline. Admission persists before a shared `ScheduledTask` is
+created for that deadline; runner startup reconciles an interrupted task write.
+The dispatcher reloads the admitted journal before removing files. Changed or
+unreadable copies require fresh review, and an unacknowledged removal can be
+retried without deleting current-generation copies. Only verified archive
+removal and a committed completion journal change the job to `complete`.
+Owners can inspect or retry through the deletion panel and the owner-only
+`/backups/preview`, `/backups`, and `/backups/resume` routes under the deletion
+prefix. Scheduling and cleanup errors remain visible for recovery.

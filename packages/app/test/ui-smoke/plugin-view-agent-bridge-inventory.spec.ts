@@ -44,7 +44,7 @@ const PLUGIN_VIEW_TARGETS: readonly {
   {
     label: "Wallet",
     path: "/inventory",
-    viewId: "wallet.inventory",
+    viewId: "wallet",
     ready: { testId: "wallet-shell" },
     requiredIds: ["tab-tokens", "tab-defi", "tab-nfts"],
   },
@@ -170,14 +170,13 @@ test("registered app-shell plugin pages can be clicked through the bridge", asyn
   await expect(page.getByTestId("wallet-shell")).toBeVisible({
     timeout: 60_000,
   });
-  const nftsClick = (await interact(page, "wallet.inventory", "agent-click", {
+  const nftsClick = (await interact(page, "wallet", "agent-click", {
     id: "tab-nfts",
   })) as { ok?: boolean };
   expect(nftsClick?.ok).toBe(true);
   await expect
     .poll(
-      async () =>
-        (await describeElement(page, "wallet.inventory", "tab-nfts"))?.status,
+      async () => (await describeElement(page, "wallet", "tab-nfts"))?.status,
       { timeout: 5_000 },
     )
     .toBe("active");

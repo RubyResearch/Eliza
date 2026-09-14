@@ -49,7 +49,10 @@ import {
 import { inboxPlugin } from "@elizaos/plugin-inbox/plugin";
 import { pdfPlugin } from "@elizaos/plugin-pdf";
 import { remindersPlugin } from "@elizaos/plugin-reminders";
-import { waitForScheduledTaskRunnerService } from "@elizaos/plugin-scheduling";
+import {
+  registerScheduledTaskRunnerBootHook,
+  waitForScheduledTaskRunnerService,
+} from "@elizaos/plugin-scheduling";
 import { XDmAdapter } from "@elizaos/plugin-x/lifeops-message-adapter";
 import type {
   IPermissionsRegistry,
@@ -1083,6 +1086,15 @@ const rawPersonalAssistantPlugin: Plugin = {
     // probes, and anchor registry. First-wins, so this stays authoritative for
     // the lifetime of the runtime once registered.
     registerLifeOpsScheduledTaskRunnerDeps(runtime);
+    registerScheduledTaskRunnerBootHook(runtime, async (service) => {
+      const { ensureFamilyBackupCleanupSchedule } = await import(
+        "./lifeops/family-workflows/backup-cleanup-schedule.js"
+      );
+      await ensureFamilyBackupCleanupSchedule(
+        runtime,
+        service.getRunner({ agentId: runtime.agentId }),
+      );
+    });
 
     const sendPolicyRegistry = createSendPolicyRegistry();
     registerSendPolicyRegistry(runtime, sendPolicyRegistry);

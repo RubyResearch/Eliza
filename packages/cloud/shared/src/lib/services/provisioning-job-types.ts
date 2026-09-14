@@ -6,6 +6,8 @@ export const JOB_TYPES = {
   AGENT_PROVISION: "agent_provision",
   AGENT_DELETE: "agent_delete",
   AGENT_SUSPEND: "agent_suspend",
+  /** Deliver an already committed prepaid renewal to its exact Docker instance. */
+  AGENT_COMPUTE_LEASE: "agent_compute_lease",
   AGENT_RESUME: "agent_resume",
   AGENT_RESTART: "agent_restart",
   AGENT_LOGS: "agent_logs",
@@ -116,6 +118,13 @@ interface AgentLifecycleJobMetadata {
 }
 
 export const AGENT_LIFECYCLE_JOB_METADATA = [
+  {
+    type: JOB_TYPES.AGENT_COMPUTE_LEASE,
+    exclusive: false,
+    coldBoot: false,
+    ownsProvisioningStatus: false,
+    requiresContainerBackedTarget: true,
+  },
   {
     type: JOB_TYPES.AGENT_PROVISION,
     exclusive: true,

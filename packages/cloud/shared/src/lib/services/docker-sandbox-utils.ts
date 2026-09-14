@@ -647,7 +647,10 @@ export function requiresDockerHostGateway(targetUrl: string): boolean {
  * Validate that line so warnings or unexpected output do not get mistaken
  * for a container ID.
  */
-export function extractDockerCreateContainerId(output: string): string {
+export function extractDockerCreateContainerId(
+  output: string,
+  options: { requireFullId?: boolean } = {},
+): string {
   const lines = output
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -668,6 +671,12 @@ export function extractDockerCreateContainerId(output: string): string {
     );
   }
 
+  if (options.requireFullId) {
+    if (!/^[0-9a-f]{64}$/.test(containerId)) {
+      throw new Error("[docker-sandbox] paid compute requires the full immutable Docker id");
+    }
+    return containerId;
+  }
   return containerId.slice(0, 12);
 }
 

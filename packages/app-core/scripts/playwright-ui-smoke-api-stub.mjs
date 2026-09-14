@@ -3108,16 +3108,24 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && action === "stream") {
       const body = (await readJsonBody(req)) || {};
-      appendStubMessage(conversationId, createStubMessage("user", body.text));
+      const userMessage = createStubMessage("user", body.text);
+      appendStubMessage(conversationId, userMessage);
       const text = createDeterministicAssistantText({
         body,
         conversationId,
         transport: "sse",
       });
-      appendStubMessage(conversationId, createStubMessage("assistant", text));
+      const assistantMessage = createStubMessage("assistant", text);
+      appendStubMessage(conversationId, assistantMessage);
       sendSseHeaders(req, res);
       writeSseEvent(res, { type: "token", text, fullText: text });
-      writeSseEvent(res, { type: "done", fullText: text, agentName: "Eliza" });
+      writeSseEvent(res, {
+        type: "done",
+        fullText: text,
+        agentName: "Eliza",
+        messageId: assistantMessage.id,
+        userMessageId: userMessage.id,
+      });
       res.end();
       maybeBroadcastAssistantNavigation(body.text);
       return;
@@ -3125,14 +3133,21 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && action === null) {
       const body = (await readJsonBody(req)) || {};
-      appendStubMessage(conversationId, createStubMessage("user", body.text));
+      const userMessage = createStubMessage("user", body.text);
+      appendStubMessage(conversationId, userMessage);
       const text = createDeterministicAssistantText({
         body,
         conversationId,
         transport: "json",
       });
-      appendStubMessage(conversationId, createStubMessage("assistant", text));
-      sendJson(req, res, 200, { text, agentName: "Eliza" });
+      const assistantMessage = createStubMessage("assistant", text);
+      appendStubMessage(conversationId, assistantMessage);
+      sendJson(req, res, 200, {
+        text,
+        agentName: "Eliza",
+        messageId: assistantMessage.id,
+        userMessageId: userMessage.id,
+      });
       maybeBroadcastAssistantNavigation(body.text);
       return;
     }

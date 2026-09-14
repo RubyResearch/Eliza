@@ -319,7 +319,7 @@ describe("replacement lifecycle teardown is absence-proof", () => {
       });
       expect(provider.stopForReplacement).not.toHaveBeenCalled();
       expect(writes).toHaveLength(1);
-      expect(provision).toHaveBeenCalledWith(AGENT, ORG);
+      expect(provision).toHaveBeenCalledWith(AGENT, ORG, undefined);
       expect(recoverCredential).toHaveBeenCalledWith(AGENT, ORG);
     } finally {
       sandboxTransactions.implementation = null;
@@ -604,7 +604,20 @@ describe("replacement lifecycle teardown is absence-proof", () => {
         false,
       ),
     ];
-    return { svc, restore: () => spies.forEach((s) => s.mockRestore()) };
+    const previousTransaction = sandboxTransactions.implementation;
+    sandboxTransactions.implementation = async (fn) =>
+      fn({
+        execute: async () => {
+          throw new Error("Unexpected write before the backup gate");
+        },
+      });
+    return {
+      svc,
+      restore: () => {
+        sandboxTransactions.implementation = previousTransaction;
+        spies.forEach((s) => s.mockRestore());
+      },
+    };
   }
 
   function stoppableProvider(): SandboxProvider {
@@ -1074,6 +1087,7 @@ describe("replacement lifecycle teardown is absence-proof", () => {
         AGENT,
         ORG,
         expect.any(Date),
+        "billing_recovery",
       );
       expect(updates).toContainEqual(
         expect.objectContaining({ status: "superseded", last_error: "billing_recovered" }),

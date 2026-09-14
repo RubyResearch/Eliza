@@ -4,6 +4,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createZipArchive } from "@elizaos/agent/api/zip-utils";
 import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 const ONE_PX_PNG = Buffer.from(
@@ -580,9 +581,7 @@ export async function openSettingsSection(
       window.history.replaceState(null, "", nextUrl);
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     }, sectionId);
-    await expect(
-      settingsShell.getByRole("heading", { level: 1, name: sectionName }),
-    ).toBeVisible({
+    await expect(settingsShell.locator(`[id="${sectionId}"]`)).toBeVisible({
       timeout: READY_CHECK_TIMEOUT_MS,
     });
     return;
@@ -3095,9 +3094,45 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
     });
   });
 
-  // FamilyOperationsView loads four independent owner-only sections. The smoke
+  // FamilyOperationsView loads independent owner-only sections. The smoke
   // server does not install the personal-assistant services, so preserve the
   // real response envelopes while exercising the view's healthy empty state.
+  await page.route(
+    "**/api/lifeops/family-workflows/email-options",
+    async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        json: { options: { accounts: [], recipients: [] } },
+      });
+    },
+  );
+  await page.route("**/api/lifeops/family-workflows/export", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/zip",
+      headers: {
+        "Content-Disposition":
+          'attachment; filename="family-workspace-smoke.zip"',
+        "Cache-Control": "no-store",
+      },
+      body: createZipArchive([
+        {
+          name: "fixture.json",
+          data: JSON.stringify({
+            fixture: "family-workspace-download",
+            scope:
+              "Synthetic browser download; real export contents are covered by the owner integration suite.",
+          }),
+        },
+      ]),
+    });
+  });
   await page.route("**/api/lifeops/agreements", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -3597,26 +3632,29 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
   // smoke server has no native inference or secrets backends, so expose their
   // real healthy-empty envelopes instead of leaking its generic 501 response
   // into otherwise unrelated route and interaction coverage.
-  await page.route("**/api/local-inference/voice-models/preferences", async (route) => {
-    const method = route.request().method();
-    if (method !== "GET" && method !== "POST") {
-      await route.fallback();
-      return;
-    }
-    const preferences = {
-      autoUpdateOnWifi: true,
-      autoUpdateOnCellular: false,
-      autoUpdateOnMetered: false,
-      quietHours: [{ start: "22:00", end: "08:00" }],
-    };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(
-        method === "GET" ? { preferences } : { ok: true, preferences },
-      ),
-    });
-  });
+  await page.route(
+    "**/api/local-inference/voice-models/preferences",
+    async (route) => {
+      const method = route.request().method();
+      if (method !== "GET" && method !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const preferences = {
+        autoUpdateOnWifi: true,
+        autoUpdateOnCellular: false,
+        autoUpdateOnMetered: false,
+        quietHours: [{ start: "22:00", end: "08:00" }],
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          method === "GET" ? { preferences } : { ok: true, preferences },
+        ),
+      });
+    },
+  );
 
   await page.route("**/api/local-inference/voice-models", async (route) => {
     if (route.request().method() !== "GET") {

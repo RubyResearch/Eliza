@@ -13,12 +13,14 @@ import type {
   PermissionStatus,
 } from "@elizaos/shared";
 import { createRoot } from "react-dom/client";
+import { FamilyDeletionPanel } from "../../src/components/family-operations/FamilyDeletionPanel.js";
 import { FamilyOperationsView } from "../../src/components/family-operations/FamilyOperationsView.js";
 import { LifeOpsConnectionsView } from "../../src/components/lifeops-connections/LifeOpsConnectionsView.js";
 import type {
   LifeOpsConnectionsAdapter,
   LifeOpsConnectionsSnapshot,
 } from "../../src/components/lifeops-connections/types.js";
+import { createFamilyDeletionFixture } from "./family-deletion-fixture.js";
 import { createFamilyIntakeFixture } from "./family-intake-fixture.js";
 import { createFamilyPacketFixture } from "./family-packet-fixture.js";
 
@@ -441,7 +443,14 @@ const adapter: LifeOpsConnectionsAdapter = {
 const root = document.getElementById("root");
 if (!root) throw new Error("LifeOps fixture requires #root.");
 createRoot(root).render(
-  scenario === "family-packet" ? (
+  scenario === "family-deletion" ? (
+    <main style={{ padding: 20, maxWidth: 900, margin: "auto" }}>
+      <FamilyDeletionPanel
+        adapter={createFamilyDeletionFixture()}
+        onChange={async () => undefined}
+      />
+    </main>
+  ) : scenario === "family-packet" ? (
     <FamilyOperationsView
       intakeAdapter={createFamilyIntakeFixture()}
       adapter={createFamilyPacketFixture(

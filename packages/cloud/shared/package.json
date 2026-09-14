@@ -33,6 +33,7 @@
     "reconcile:container-delete-jobs": "bun scripts/reconcile-container-delete-jobs.ts",
     "test": "node scripts/run-bun-tests.mjs",
     "test:vitest": "vitest run",
+    "test:docker-compute-lease": "bun scripts/test-docker-compute-lease.ts",
     "verify:managed-accounts": "bun scripts/managed-accounts-doctor.mjs",
     "verify:managed-accounts:strict": "bun scripts/managed-accounts-doctor.mjs --strict",
     "preflight:messaging-gateways": "node scripts/messaging-gateway-preflight.mjs",

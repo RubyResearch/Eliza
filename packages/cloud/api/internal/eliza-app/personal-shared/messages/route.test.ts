@@ -33,6 +33,7 @@ let creditGateResult: { allowed: boolean; balance: number; error?: string } = {
   allowed: true,
   balance: 10,
 };
+const checkAgentCreditGate = mock(async () => creditGateResult);
 let workerHealthResult:
   | { ok: true; required: false }
   | {
@@ -170,7 +171,7 @@ mock.module("@/lib/services/agent-tier-upgrade-target", () => ({
   findActivePersonalDedicatedTarget,
 }));
 mock.module("@/lib/services/agent-billing-gate", () => ({
-  checkAgentCreditGate: async () => creditGateResult,
+  checkAgentCreditGate,
 }));
 mock.module("@/lib/services/provisioning-worker-health", () => ({
   checkProvisioningWorkerHealth: async () => workerHealthResult,
@@ -410,6 +411,7 @@ describe("personal Shared messaging deliveries", () => {
     enqueueAgentResumeOnce.mockClear();
     enqueueAgentWakeOnce.mockClear();
     triggerImmediate.mockClear();
+    checkAgentCreditGate.mockClear();
     creditGateResult = { allowed: true, balance: 10 };
     workerHealthResult = { ok: true, required: false };
   });
@@ -1925,87 +1927,29 @@ describe("personal Shared messaging deliveries", () => {
     expect(runtimeWaitUntil).not.toHaveBeenCalled();
   });
 
-  test("idempotently resumes stopped Dedicated and asks the gateway to retry", async () => {
-    activeTarget = {
-      id: "00000000-0000-4000-8000-000000000020",
-      status: "stopped",
-    };
-
-    const response = await request(valid);
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
-      code: "dedicated_starting",
-      retryable: true,
-      data: {
-        action: "resume",
-        activeAgentId: "00000000-0000-4000-8000-000000000020",
-        alreadyInProgress: false,
-        jobId: "resume-job-1",
-      },
-    });
-    expect(response.headers.get("retry-after")).toBe("5");
-    expect(enqueueAgentResumeOnce).toHaveBeenCalledWith({
-      agentId: "00000000-0000-4000-8000-000000000020",
-      organizationId: "00000000-0000-4000-8000-000000000001",
-      userId: "00000000-0000-4000-8000-000000000002",
-    });
-    expect(triggerImmediate).toHaveBeenCalledTimes(1);
-    expect(sharedRestMessageSend).not.toHaveBeenCalled();
-    expect(bridge).not.toHaveBeenCalled();
-  });
-
-  test("wakes sleeping Dedicated without reopening Shared", async () => {
-    activeTarget = {
-      id: "00000000-0000-4000-8000-000000000020",
-      status: "sleeping",
-    };
-    enqueueAgentWakeOnce.mockImplementationOnce(async () => ({
-      created: false,
-      job: { id: "wake-job-existing" },
-      appliedRestoreBackupId: null,
-      appliedForceFreshBoot: false,
-    }));
-
-    const response = await request(valid);
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
-      code: "dedicated_starting",
-      retryable: true,
-      data: {
-        action: "wake",
-        alreadyInProgress: true,
-        jobId: "wake-job-existing",
-      },
-    });
-    expect(enqueueAgentWakeOnce).toHaveBeenCalledTimes(1);
-    expect(enqueueAgentResumeOnce).not.toHaveBeenCalled();
-    expect(sharedRestMessageSend).not.toHaveBeenCalled();
-    expect(bridge).not.toHaveBeenCalled();
-  });
-
-  test("keeps paid-compute wake fail-closed when the account is unfunded", async () => {
-    activeTarget = {
-      id: "00000000-0000-4000-8000-000000000020",
-      status: "stopped",
-    };
-    creditGateResult = {
-      allowed: false,
-      balance: 0,
-      error: "Add funds before resuming Dedicated.",
-    };
-
-    const response = await request(valid);
-    expect(response.status).toBe(402);
-    expect(await response.json()).toMatchObject({
-      code: "insufficient_credits",
-      retryable: false,
-      currentBalance: 0,
-    });
-    expect(enqueueAgentResumeOnce).not.toHaveBeenCalled();
-    expect(enqueueAgentWakeOnce).not.toHaveBeenCalled();
-    expect(sharedRestMessageSend).not.toHaveBeenCalled();
-    expect(bridge).not.toHaveBeenCalled();
-  });
+  for (const status of ["stopped", "sleeping"] as const) {
+    for (const balance of [0, 10]) {
+      test(`${status} Dedicated requires app price review even with balance ${balance}`, async () => {
+        activeTarget = { id: "00000000-0000-4000-8000-000000000020", status };
+        creditGateResult = { allowed: balance > 0, balance };
+        const response = await request(valid);
+        expect(response.status).toBe(428);
+        expect(await response.json()).toMatchObject({
+          code: "DEDICATED_PRICE_CONFIRMATION_REQUIRED",
+          error:
+            "Open Eliza to review the current price and start your Dedicated agent.",
+          retryable: false,
+        });
+        expect(response.headers.get("retry-after")).toBeNull();
+        expect(checkAgentCreditGate).not.toHaveBeenCalled();
+        expect(enqueueAgentResumeOnce).not.toHaveBeenCalled();
+        expect(enqueueAgentWakeOnce).not.toHaveBeenCalled();
+        expect(triggerImmediate).not.toHaveBeenCalled();
+        expect(sharedRestMessageSend).not.toHaveBeenCalled();
+        expect(bridge).not.toHaveBeenCalled();
+      });
+    }
+  }
 
   test("surfaces a Dedicated bridge failure without reopening Shared", async () => {
     activeTarget = {

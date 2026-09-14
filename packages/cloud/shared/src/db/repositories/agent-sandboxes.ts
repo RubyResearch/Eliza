@@ -1466,6 +1466,52 @@ export class AgentSandboxesRepository {
     return { updated: swept, deferred };
   }
 
+  /** Failed asynchronous work may only mark its own execution, or its exact unleased generation. */
+  async markProvisionFailed(
+    expected: AgentSandbox,
+    message: string,
+  ): Promise<AgentSandbox | undefined> {
+    await ensureAgentSandboxSchema();
+    const execution =
+      expected.lifecycle_job_id !== null && expected.lifecycle_execution_generation !== null;
+    const [updated] = await dbWrite
+      .update(agentSandboxes)
+      .set({
+        status: "error",
+        error_message: message,
+        error_count: sql`COALESCE(${agentSandboxes.error_count}, 0) + 1`,
+        bridge_url: null,
+        health_url: null,
+        updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(agentSandboxes.id, expected.id),
+          eq(agentSandboxes.organization_id, expected.organization_id),
+          inArray(agentSandboxes.execution_tier, [...CONTAINER_BACKED_EXECUTION_TIERS]),
+          inArray(agentSandboxes.status, ["provisioning", "running"]),
+          eq(agentSandboxes.environment_revision, expected.environment_revision),
+          isNull(agentSandboxes.deletion_attempt_id),
+          isNull(agentSandboxes.deleted_at),
+          execution
+            ? and(
+                eq(agentSandboxes.lifecycle_job_id, expected.lifecycle_job_id!),
+                eq(
+                  agentSandboxes.lifecycle_execution_generation,
+                  expected.lifecycle_execution_generation!,
+                ),
+              )
+            : and(
+                isNull(agentSandboxes.lifecycle_job_id),
+                isNull(agentSandboxes.lifecycle_execution_generation),
+                eq(agentSandboxes.lifecycle_revision, expected.lifecycle_revision),
+              ),
+        ),
+      )
+      .returning();
+    return updated;
+  }
+
   async update(
     id: string,
     data: Partial<NewAgentSandbox>,

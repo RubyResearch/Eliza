@@ -336,7 +336,11 @@ export {
 export const TAB_PATHS = mapBuiltinRoutes((descriptor) => descriptor.path);
 
 const PATH_TO_TAB = new Map(
-  Object.entries(TAB_PATHS).map(([tab, p]) => [p, tab as Tab]),
+  Object.values(
+    mapBuiltinRoutes(
+      (descriptor) => [descriptor.path, descriptor.canonicalId] as const,
+    ),
+  ),
 );
 
 function normalizePathForLookup(pathname: string, basePath = ""): string {

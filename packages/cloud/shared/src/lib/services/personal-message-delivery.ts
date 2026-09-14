@@ -28,7 +28,7 @@ export type PersonalMessageDeliveryResult =
     }
   | {
       success: false;
-      status: 402 | 502 | 503;
+      status: 402 | 428 | 502 | 503;
       code: string;
       error: string;
       retryable: boolean;
@@ -58,38 +58,7 @@ export async function deliverPersonalTextMessage(params: {
     agent.id,
   );
   if (dedicated) {
-    const preparation = await preparePersonalDedicatedDelivery(
-      dedicated,
-      { organizationId: account.organization.id, userId: account.user.id },
-      params.env,
-      params.executionCtx,
-    );
-    if (preparation.state === "blocked") {
-      return {
-        success: false,
-        status: 402,
-        code: preparation.code,
-        error: preparation.error,
-        retryable: false,
-        currentBalance: preparation.currentBalance,
-      };
-    }
-    if (preparation.state === "starting") {
-      return {
-        success: false,
-        status: 503,
-        code: "dedicated_starting",
-        error: "Dedicated Eliza is waking up. Retry this turn shortly.",
-        retryable: true,
-        retryAfterSeconds: preparation.retryAfterSeconds,
-        data: {
-          action: preparation.action,
-          activeAgentId: dedicated.id,
-          alreadyInProgress: !preparation.created,
-          jobId: preparation.jobId,
-        },
-      };
-    }
+    const preparation = await preparePersonalDedicatedDelivery(dedicated);
     if (preparation.state === "unavailable") {
       return {
         success: false,

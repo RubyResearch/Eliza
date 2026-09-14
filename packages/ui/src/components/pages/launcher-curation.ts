@@ -182,9 +182,7 @@ const LEGACY_ID_ALIAS_FALLBACK: ReadonlyMap<string, string> = new Map([
   ["plugins-page", "plugins"],
   ["trajectory-logger", "trajectories"],
   ["trajectory-viewer", "trajectories"],
-  // `rolodex` is the legacy builtin tab for the contact book; its route has no
-  // renderer (App.tsx directViews) so a standalone tile would open "view
-  // unavailable" next to the working Relationships tile — collapse them.
+  // The legacy contact-book alias shares the Relationships renderer and tile.
   ["rolodex", "relationships"],
   ["log-viewer", "logs"],
   ["database-viewer", "database"],

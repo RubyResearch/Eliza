@@ -123,6 +123,24 @@ afterAll(async () => {
 });
 
 describe("enqueueAgentWakeOnce reuse vs. conflicting restore params", () => {
+  test("persists the admitted tariff and never upgrades it when reusing an old job", async () => {
+    const seeded = await seedSleepingAgent();
+    const first = await provisioningJobService.enqueueAgentWakeOnce(seeded);
+    expect(first.job.data.admittedComputePrice).toBe("dedicated-compute-v1:USD:0.150000:0.300000");
+    const oldPrice = "dedicated-compute-v1:USD:0.010000:0.020000";
+    await dbWrite
+      .update(jobs)
+      .set({ data: { ...first.job.data, admittedComputePrice: oldPrice } })
+      .where(eq(jobs.id, first.job.id));
+    const reused = await provisioningJobService.enqueueAgentWakeOnce(seeded);
+    expect(reused.created).toBe(false);
+    expect(reused.job.id).toBe(first.job.id);
+    expect(reused.job.data.admittedComputePrice).toBe(oldPrice);
+    const [persisted] = await dbWrite.select().from(jobs).where(eq(jobs.id, first.job.id));
+    expect(persisted.data.admittedComputePrice).toBe(oldPrice);
+    expect(await countWakeJobs(seeded.agentId)).toBe(1);
+  });
+
   test("bare wake reuses the in-flight bare wake and reports its (empty) params", async () => {
     const seeded = await seedSleepingAgent();
 

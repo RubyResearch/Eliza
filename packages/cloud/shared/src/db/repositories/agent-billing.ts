@@ -2,6 +2,8 @@
 
 import Decimal from "decimal.js";
 import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { settleFundedAgentBillingInTransaction } from "../../lib/services/agent-compute-billing";
+import { creditsService } from "../../lib/services/credits";
 import type { DbTransaction } from "../client";
 import { dbRead, dbWrite } from "../helpers";
 import {
@@ -67,6 +69,7 @@ export type AgentHourlyBillingOutcome =
       amountDecimal: string;
     }
   | { status: "already_billed_recently" }
+  | { status: "funded_until"; fundedUntil: Date; stopAfter: Date }
   | { status: "insufficient_credits" };
 
 const BILLABLE_BILLING_STATUSES: AgentBillingStatus[] = ["active", "warning", "shutdown_pending"];
@@ -341,8 +344,15 @@ export class AgentBillingRepository {
     sandboxId: string,
     organizationId: string,
     now: Date,
+    purpose: "lifecycle_transition" | "billing_recovery" = "lifecycle_transition",
   ): Promise<AgentHourlyBillingOutcome> {
-    return this.settleAccruedBillingBeforeLifecycleWithExecutor(tx, sandboxId, organizationId, now);
+    return this.settleAccruedBillingBeforeLifecycleWithExecutor(
+      tx,
+      sandboxId,
+      organizationId,
+      now,
+      purpose,
+    );
   }
 
   private async settleAccruedBillingBeforeLifecycleWithExecutor(
@@ -350,6 +360,7 @@ export class AgentBillingRepository {
     sandboxId: string,
     organizationId: string,
     now: Date,
+    purpose: "lifecycle_transition" | "billing_recovery" = "lifecycle_transition",
   ): Promise<AgentHourlyBillingOutcome> {
     const [sandbox] = await executor
       .select({
@@ -377,7 +388,7 @@ export class AgentBillingRepository {
         lowCreditWarningAmount: 0,
         now,
       },
-      { forceLifecycleSettlement: true },
+      { forceLifecycleSettlement: true, lifecyclePurpose: purpose },
       executor === dbWrite ? undefined : (executor as DbTransaction),
     );
   }
@@ -386,6 +397,7 @@ export class AgentBillingRepository {
     input: AgentHourlyBillingInput,
     options: {
       forceLifecycleSettlement?: boolean;
+      lifecyclePurpose?: "lifecycle_transition" | "billing_recovery";
       runAuthority?: AgentBillingRunLeaseAuthority;
     } = {},
     existingTx?: DbTransaction,
@@ -415,6 +427,7 @@ export class AgentBillingRepository {
           last_backup_at: agentSandboxes.last_backup_at,
           last_billed_at: agentSandboxes.last_billed_at,
           created_at: agentSandboxes.created_at,
+          lifecycle_revision: agentSandboxes.lifecycle_revision,
         })
         .from(agentSandboxes)
         .where(
@@ -474,6 +487,30 @@ export class AgentBillingRepository {
         periodEnd: input.now,
       });
       const chargeDecimal = settled.amount;
+      const funded = await settleFundedAgentBillingInTransaction(
+        tx,
+        input,
+        settled,
+        periodStart,
+        claimedSandbox.lifecycle_revision,
+        options.forceLifecycleSettlement === true &&
+          options.lifecyclePurpose !== "billing_recovery",
+      );
+      if (funded) {
+        if (funded.status === "billed" && options.runAuthority) {
+          await recordAgentBillingRunItemInTransaction(tx, options.runAuthority, {
+            sandboxId: input.sandboxId,
+            organizationId: input.organizationId,
+            agentName: input.agentName,
+            action: "billed",
+            amountDecimal: funded.amountDecimal,
+            newBalanceDecimal: funded.newBalanceDecimal,
+            transactionId: funded.transactionId,
+            completedAt: new Date(),
+          });
+        }
+        return funded;
+      }
       const charge = chargeDecimal.toNumber();
       const effectiveHourlyRate = chargeDecimal
         .mul(60 * 60 * 1000)
@@ -587,7 +624,12 @@ export class AgentBillingRepository {
         amountDecimal: chargeDecimal.toFixed(6),
       };
     };
-    return existingTx ? settle(existingTx) : await dbWrite.transaction(settle);
+    if (existingTx) return settle(existingTx);
+    const result = await dbWrite.transaction(settle);
+    if (result.status === "billed") {
+      await creditsService.invalidateCreditCaches(input.organizationId);
+    }
+    return result;
   }
 }
 

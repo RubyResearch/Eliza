@@ -30,24 +30,28 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "HS256", typ: "JWT" })}.${encode(payload)}.sig`;
 }
 
-export async function seedStewardToken(page: Page): Promise<void> {
+export async function seedStewardToken(
+  page: Page,
+  agentId = "6f9619ff-8b86-4d01-b42d-00c04fc964ff",
+): Promise<void> {
   const token = makeJwt({
     sub: "cloud-audit-smoke-user",
     email: "cloud-audit-smoke@agent.local",
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   await page.addInitScript(
-    ({ activeScopeKey, key, tokenScopeKey, value }) => {
+    ({ activeScopeKey, key, tokenScopeKey, value, agentId }) => {
       const scope = "eliza-cloud:production";
       localStorage.setItem(key, value);
       localStorage.setItem(tokenScopeKey, scope);
       localStorage.setItem(activeScopeKey, scope);
       localStorage.setItem("eliza:first-run-complete", "1");
+      localStorage.setItem("eliza:first-run-complete:cloud-only:v1", "1");
       localStorage.setItem("eliza:setup:step", "activate");
       localStorage.setItem(
         "elizaos:active-server",
         JSON.stringify({
-          id: "cloud:6f9619ff-8b86-4d01-b42d-00c04fc964ff",
+          id: `cloud:${agentId}`,
           kind: "cloud",
           label: "Eliza Cloud",
           accessToken: "ui-smoke-agent-access-token",
@@ -59,6 +63,7 @@ export async function seedStewardToken(page: Page): Promise<void> {
       key: STEWARD_TOKEN_KEY,
       tokenScopeKey: STEWARD_TOKEN_SCOPE_KEY,
       value: token,
+      agentId,
     },
   );
 }

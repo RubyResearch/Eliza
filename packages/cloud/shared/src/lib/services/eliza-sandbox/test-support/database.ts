@@ -4,6 +4,8 @@ import { mock, spyOn } from "bun:test";
 import * as realEnsureSchemaNs from "../../../../db/ensure-agent-sandbox-schema";
 import * as realHelpersNs from "../../../../db/helpers";
 import { agentBillingRepository } from "../../../../db/repositories/agent-billing";
+import { agentSandboxesRepository } from "../../../../db/repositories/agent-sandboxes";
+import * as computeStop from "../../agent-compute-stop";
 
 // `executeUpgrade()`'s blue/green swap runs inside `dbWrite.transaction(...)`.
 // `dbWrite` is a Proxy whose `get` trap always re-resolves the live connection,
@@ -66,6 +68,16 @@ export const upgradeDbWrite = new Proxy(realDbWrite, {
 });
 
 export function installSandboxDatabaseSimulation(): () => void {
+  // Existing orchestration fixtures simulate repository writes. The real
+  // failure-generation CAS is exercised against PostgreSQL/PGlite separately.
+  const failureSpy = spyOn(agentSandboxesRepository, "markProvisionFailed").mockImplementation(
+    (expected, message) =>
+      agentSandboxesRepository.update(expected.id, {
+        status: "error",
+        error_message: message,
+        error_count: (expected.error_count ?? 0) + 1,
+      }),
+  );
   mock.module(import.meta.resolve("../../../../db/helpers.ts"), () => ({
     ...realHelpers,
     dbWrite: upgradeDbWrite,
@@ -76,6 +88,7 @@ export function installSandboxDatabaseSimulation(): () => void {
   }));
 
   return () => {
+    failureSpy.mockRestore();
     mock.module(import.meta.resolve("../../../../db/helpers.ts"), () => realHelpers);
     mock.module(
       import.meta.resolve("../../../../db/ensure-agent-sandbox-schema.ts"),
@@ -85,6 +98,11 @@ export function installSandboxDatabaseSimulation(): () => void {
 }
 
 export function installSandboxBillingSimulation() {
+  // Legacy orchestration fixtures have no prepaid windows; real prepaid
+  // ownership and settlement are exercised by the PostgreSQL/SSH suite.
+  const computeFundingSpy = spyOn(computeStop, "hasOpenAgentComputeFunding").mockResolvedValue(
+    false,
+  );
   const reactivateBillingSpy = spyOn(
     agentBillingRepository,
     "reactivateSandboxBillingAfterFunding",
@@ -102,6 +120,7 @@ export function installSandboxBillingSimulation() {
     settleLifecycleBillingSpy,
     settleLifecycleBillingInTransactionSpy,
     restore() {
+      computeFundingSpy.mockRestore();
       reactivateBillingSpy.mockRestore();
       settleLifecycleBillingSpy.mockRestore();
       settleLifecycleBillingInTransactionSpy.mockRestore();

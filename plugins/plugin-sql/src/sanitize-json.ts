@@ -43,6 +43,7 @@ interface SanitizeContext {
   bytes: number;
   rejectNul?: boolean;
   maxBytes?: number;
+  documentText?: boolean;
 }
 
 function rejectUnsupportedNul(value: string, context: SanitizeContext): void {
@@ -143,8 +144,11 @@ export function sanitizeJsonObject(
 }
 
 /** Serialize memory JSON without silently removing unsupported NUL characters. */
-export function serializeJsonb(value: unknown): string | undefined {
-  return serializeJsonbWithBudget(value, MAX_SQL_JSON_SANITIZE_BYTES);
+export function serializeJsonb(
+  value: unknown,
+  options: { documentText?: boolean } = {}
+): string | undefined {
+  return serializeJsonbWithBudget(value, MAX_SQL_JSON_SANITIZE_BYTES, options.documentText);
 }
 
 /** Preserve complete document content within the supported upload envelope. */
@@ -152,7 +156,11 @@ export function serializeDocumentJsonb(value: unknown): string | undefined {
   return serializeJsonbWithBudget(value, MAX_DOCUMENT_JSON_BYTES);
 }
 
-function serializeJsonbWithBudget(value: unknown, maxBytes: number): string | undefined {
+function serializeJsonbWithBudget(
+  value: unknown,
+  maxBytes: number,
+  documentText = false
+): string | undefined {
   // Decode legacy JSON for structural validation; keep its original numeric
   // tokens so arbitrary-precision jsonb numbers never round through JS Number.
   let decoded = value;
@@ -182,7 +190,7 @@ function serializeJsonbWithBudget(value: unknown, maxBytes: number): string | un
     }
     sanitizeJsonValue(
       decoded,
-      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes },
+      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes, documentText },
       0
     );
     return value;
@@ -190,7 +198,7 @@ function serializeJsonbWithBudget(value: unknown, maxBytes: number): string | un
   return JSON.stringify(
     sanitizeJsonValue(
       decoded,
-      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes },
+      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes, documentText },
       0
     )
   );
@@ -355,7 +363,19 @@ function sanitizeJsonValue(value: unknown, context: SanitizeContext, depth: numb
         );
         serializedProperties += 1;
         const sanitizedKey = key.includes(NUL) ? key.replaceAll(NUL, "") : key;
-        const sanitizedValue = sanitizeJsonValue(descriptor.value, context, depth + 1);
+        // Document source text is intentionally source-sized. Keep the generic
+        // structural/metadata budget, but do not impose a log-body byte ceiling
+        // on this one known scalar. Accessors were rejected above; JSON.stringify
+        // still escapes the exact text, and unsupported NULs still fail closed.
+        const sourceText =
+          context.documentText &&
+          depth === 0 &&
+          key === "text" &&
+          typeof descriptor.value === "string";
+        if (sourceText) rejectUnsupportedNul(descriptor.value, context);
+        const sanitizedValue = sourceText
+          ? descriptor.value
+          : sanitizeJsonValue(descriptor.value, context, depth + 1);
         if (sanitizedKey === "toJSON" && typeof sanitizedValue === "function") {
           failUnbounded({ reason: "custom-toJSON" });
         }

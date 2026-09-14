@@ -1,7 +1,7 @@
 /**
  * Agent billing gate — pre-provisioning credit check.
  *
- * Ensures an organization has more than the minimum running balance before
+ * Ensures an organization has at least the minimum running balance before
  * allowing agent creation, provisioning, or resume.
  */
 
@@ -102,7 +102,7 @@ async function runCreditGate(
 
     const balance = parseGateCreditBalance(org.credit_balance);
 
-    if (balance <= minimumBalance) {
+    if (balance < minimumBalance) {
       // A successful credit transaction removes this marker atomically with
       // its balance increase. If it remains at zero, the org has never been
       // funded since signup and the original withheld reason is still honest.
@@ -151,7 +151,7 @@ async function runCreditGate(
 /**
  * Check whether an organization has sufficient credits for Eliza agent operations.
  *
- * Returns `{ allowed: true }` if `credit_balance > MINIMUM_DEPOSIT`,
+ * Returns `{ allowed: true }` if `credit_balance >= MINIMUM_DEPOSIT`,
  * otherwise returns a user-facing error message directing them to add funds.
  *
  * Fails CLOSED on a corrupt stored balance (distinct observable log) and on
@@ -161,7 +161,7 @@ async function runCreditGate(
 export async function checkAgentCreditGate(organizationId: string): Promise<CreditGateResult> {
   return runCreditGate(organizationId, AGENT_PRICING.MINIMUM_DEPOSIT, (balance) => {
     const deficit = Math.max(AGENT_PRICING.MINIMUM_DEPOSIT - balance, 0.01);
-    return `Insufficient credits. A balance greater than $${AGENT_PRICING.MINIMUM_DEPOSIT.toFixed(2)} is required to create or run Eliza agents. Please add at least $${deficit.toFixed(2)} to your account at /cloud/billing.`;
+    return `Insufficient credits. A balance of at least $${AGENT_PRICING.MINIMUM_DEPOSIT.toFixed(2)} is required to create or run Eliza agents. Please add at least $${deficit.toFixed(2)} to your account at /cloud/billing.`;
   });
 }
 
@@ -179,6 +179,6 @@ export async function checkAgentTierUpgradeCreditGate(
   const minimum = AGENT_PRICING.UPGRADE_MINIMUM_BALANCE;
   return runCreditGate(organizationId, minimum, (balance) => {
     const deficit = Math.max(minimum - balance, 0.01);
-    return `Insufficient credits to upgrade. A dedicated agent costs $${AGENT_PRICING.DAILY_RUNNING_COST.toFixed(2)}/day of hosting, and upgrading requires a balance above $${minimum.toFixed(2)} (${AGENT_PRICING.UPGRADE_MIN_HOSTING_DAYS} days of hosting). Please add at least $${deficit.toFixed(2)} to your account at /cloud/billing.`;
+    return `Insufficient credits to upgrade. A dedicated agent costs $${AGENT_PRICING.DAILY_RUNNING_COST.toFixed(2)}/day of hosting, and upgrading requires a balance of at least $${minimum.toFixed(2)} (${AGENT_PRICING.UPGRADE_MIN_HOSTING_DAYS} days of hosting). Please add at least $${deficit.toFixed(2)} to your account at /cloud/billing.`;
   });
 }

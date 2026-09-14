@@ -64,6 +64,17 @@ describe("parseGateCreditBalance", () => {
 });
 
 describe("checkAgentCreditGate", () => {
+  test.each([
+    ["0.299999", false],
+    ["0.300000", true],
+  ] as const)(
+    "the initial two-hour funding threshold admits balance %s: %s",
+    async (balance, allowed) => {
+      findById.mockResolvedValue({ credit_balance: balance });
+      expect((await checkAgentCreditGate("org-exact-threshold")).allowed).toBe(allowed);
+    },
+  );
+
   test("allows an org with a healthy balance above the minimum deposit", async () => {
     findById.mockResolvedValue({ credit_balance: "25.00" });
 
@@ -74,7 +85,7 @@ describe("checkAgentCreditGate", () => {
     expect(result.error).toBeUndefined();
   });
 
-  test("denies an org at or below the minimum deposit with a funding message", async () => {
+  test("denies an org below the minimum deposit with a funding message", async () => {
     findById.mockResolvedValue({ credit_balance: "0.05" });
 
     const result = await checkAgentCreditGate("org-broke");
@@ -203,14 +214,14 @@ describe("checkAgentTierUpgradeCreditGate", () => {
     expect(result.allowed).toBe(false);
     expect(result.balance).toBe(0.5);
     expect(result.error).toContain("3 days of hosting");
-    expect(result.error).toContain("$0.22");
+    expect(result.error).toContain("$10.30");
   });
 
-  test("allows an upgrade only above the dedicated-hosting threshold", async () => {
-    findById.mockResolvedValue({ credit_balance: "0.73" });
+  test("allows an upgrade at the dedicated-hosting threshold", async () => {
+    findById.mockResolvedValue({ credit_balance: "10.80" });
 
     const result = await checkAgentTierUpgradeCreditGate("org-funded-upgrade");
 
-    expect(result).toEqual({ allowed: true, balance: 0.73 });
+    expect(result).toEqual({ allowed: true, balance: 10.8 });
   });
 });

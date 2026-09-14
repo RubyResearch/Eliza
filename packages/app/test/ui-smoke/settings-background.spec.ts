@@ -17,17 +17,6 @@ import {
 } from "./helpers";
 import { captureScreenshotWithQualityRetry } from "./helpers/screenshot-quality";
 
-// #9143 follow-up — Settings now uses the TRANSPARENT app shell so the unified
-// AppBackground (the launcher wallpaper) shows through, including the
-// status-bar safe area. Previously Settings painted an opaque `bg-bg` box that
-// left a seam at the top safe area. This spec proves:
-//   (a) the safe-area seam is gone — the Settings shell ancestor carries no
-//       opaque `bg-bg`, so the fixed wallpaper is continuous to the top, and
-//   (b) Settings is captured over BOTH the default shader background AND a busy
-//       photo wallpaper, at desktop + mobile, for human readability review,
-//   (c) a launcher-over-the-same-photo reference is captured so the Settings
-//       look can be compared to the home look the user wants to match.
-
 const SCREENSHOT_DIR = path.join(
   process.cwd(),
   "aesthetic-audit-output",
@@ -139,6 +128,17 @@ async function installSettingsBackgroundRoutes(
   hubOverrides: Partial<ModelHubSnapshot> = {},
 ): Promise<void> {
   await installDefaultAppRoutes(page);
+  await page.route("**/api/cloud/credits", (route) =>
+    fulfillJson(route, {
+      balance: 100,
+      low: false,
+      critical: false,
+      authRejected: false,
+    }),
+  );
+  await page.route("**/api/local-inference/providers", (route) =>
+    fulfillJson(route, { providers: [] }),
+  );
 
   await page.route("**/api/config", async (route) => {
     if (route.request().method() !== "GET") {
@@ -271,6 +271,7 @@ async function seedSettingsBackgroundStorage(
 ): Promise<void> {
   await seedAppStorage(page, {
     "eliza:mobile-runtime-mode": "local",
+    "eliza:permissions-primed": "1",
     [UI_BACKGROUND_STORAGE_KEY]: JSON.stringify(background),
   });
 }
@@ -405,85 +406,6 @@ async function screenshot(page: Page, name: string): Promise<void> {
 const DESKTOP_VIEWPORT = { width: 1280, height: 900 };
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 
-interface SettingsSeamReport {
-  /** Class list of every ancestor from settings-shell up to the App root. */
-  shellAncestorClasses: string[];
-  /** Ancestors that paint an opaque `bg-bg` over the unified wallpaper. */
-  opaqueBgAncestors: string[];
-  /**
-   * The #9143 fix made `RoutedShellContent`'s shell transparent for the settings
-   * tab (APP_SHELL_CLASS_TRANSPARENT = no `bg-bg`). True when that fix is present
-   * — i.e. the element carrying the `font-body text-txt` shell marker is NOT
-   * painting an opaque `bg-bg`.
-   */
-  routedShellIsTransparent: boolean;
-  /**
-   * The opaque layer that STILL paints over the wallpaper despite the routed
-   * shell being transparent — in practice `AppWorkspaceChrome`'s root `bg-bg`,
-   * which every `TabContentView`/`TabScrollView` wraps the view in. `null` when
-   * nothing between the shell and the App root is opaque.
-   */
-  remainingOpaqueLayer: string | null;
-  /** The unified fixed background physically spans the full viewport (y=0..H). */
-  appBackgroundReachesTop: boolean;
-  backgroundKind: string | null;
-}
-
-/**
- * Walk up from the settings-shell to the App-root flex column (the element that
- * reserves the safe area via `paddingTop: var(--safe-area-top)`) and report
- * every opaque `bg-bg` ancestor. The #9143 fix made the routed shell transparent
- * for the settings tab; this inspector distinguishes that (now-correct) shell
- * from any OTHER opaque layer nested inside it that still covers the wallpaper.
- */
-async function inspectSettingsSeam(page: Page): Promise<SettingsSeamReport> {
-  return page.evaluate(() => {
-    const shell = document.querySelector('[data-testid="settings-shell"]');
-    const ancestorClasses: string[] = [];
-    const opaque: string[] = [];
-    let routedShellIsTransparent = true;
-    let node: Element | null = shell;
-    while (node && node !== document.body) {
-      const cls = node.className;
-      if (typeof cls === "string" && cls.length > 0) {
-        ancestorClasses.push(cls);
-        const tokens = cls.split(/\s+/);
-        const isOpaqueBg = tokens.includes("bg-bg");
-        if (isOpaqueBg) opaque.push(cls);
-        // The routed shell is the element carrying both shell markers; if it
-        // also carries `bg-bg`, the #9143 fix regressed.
-        if (
-          tokens.includes("font-body") &&
-          tokens.includes("text-txt") &&
-          isOpaqueBg
-        ) {
-          routedShellIsTransparent = false;
-        }
-      }
-      node = node.parentElement;
-    }
-
-    const bgEl =
-      document.querySelector('[data-testid="app-background-image"]') ??
-      document.querySelector('[data-testid="app-background-shader"]');
-    let reachesTop = false;
-    let kind: string | null = null;
-    if (bgEl) {
-      kind = bgEl.getAttribute("data-eliza-bg");
-      const rect = bgEl.getBoundingClientRect();
-      reachesTop = rect.top <= 0 && rect.bottom >= window.innerHeight - 1;
-    }
-    return {
-      shellAncestorClasses: ancestorClasses,
-      opaqueBgAncestors: opaque,
-      routedShellIsTransparent,
-      remainingOpaqueLayer: opaque[0] ?? null,
-      appBackgroundReachesTop: reachesTop,
-      backgroundKind: kind,
-    };
-  });
-}
-
 async function gotoSettings(page: Page): Promise<void> {
   await openAppPath(page, "/settings");
   await expect(page.getByTestId("settings-shell")).toBeVisible({
@@ -491,7 +413,7 @@ async function gotoSettings(page: Page): Promise<void> {
   });
 }
 
-test.describe("settings shares the unified app background (#9143)", () => {
+test.describe("Settings appearance and model controls", () => {
   test.beforeEach(({ page }) => {
     installPageDiagnosticsGuard(page);
   });
@@ -727,144 +649,58 @@ test.describe("settings shares the unified app background (#9143)", () => {
     await screenshot(page, "mobile-general-hover");
   });
 
-  test("captures settings over shader + photo backgrounds and diagnoses the safe-area seam", async ({
+  test("keeps Settings opaque while preserving the selected launcher wallpaper", async ({
     page,
   }) => {
     test.setTimeout(180_000);
     await rm(SCREENSHOT_DIR, { force: true, recursive: true });
-
     const wallpaper = await busyWallpaperDataUrl();
-
-    // -- 1) Default shader background -----------------------------------------
     await seedSettingsBackgroundStorage(page, {
-      mode: "shader",
+      mode: "image",
       color: "#ef5a1f",
+      imageUrl: wallpaper,
     });
     await installReadyDesktopStatusBridge(page);
     await installSettingsBackgroundRoutes(page);
 
-    await page.setViewportSize(DESKTOP_VIEWPORT);
-    await gotoSettings(page);
-
-    // The unified shader background must be mounted behind the shell. It is
-    // `aria-hidden` + `pointer-events-none` + `fixed`, so assert ATTACHED (in
-    // the DOM, painting) rather than Playwright-"visible".
-    await expect(page.getByTestId("app-background-shader")).toBeAttached({
-      timeout: 15_000,
-    });
-
-    // Capture for human review FIRST — the screenshots are the real deliverable.
-    await screenshot(page, "desktop-shader");
-
-    const shaderSeam = await inspectSettingsSeam(page);
-    console.log("SETTINGS_SEAM_SHADER>", JSON.stringify(shaderSeam));
-
-    await page.setViewportSize(MOBILE_VIEWPORT);
-    await expect(page.getByTestId("settings-shell")).toBeVisible();
-    await screenshot(page, "mobile-shader");
-
-    // -- 2) Photo / image background ------------------------------------------
-    // The surface-realm raw-globals guard (#15247) denies live view-realm
-    // writes to shell-reserved `eliza:` keys; seed via addInitScript so the
-    // write runs at document-start of the gotoSettings reload below, inside
-    // the guard-permitted window (same pattern as seedFirstRunCompleteBeforeLoad).
-    await page.addInitScript(
-      ({ key, value }) => {
-        localStorage.setItem(key, value);
-      },
-      {
-        key: UI_BACKGROUND_STORAGE_KEY,
-        value: JSON.stringify({
-          mode: "image",
-          color: "#ef5a1f",
-          imageUrl: wallpaper,
-        }),
-      },
-    );
-
-    await page.setViewportSize(DESKTOP_VIEWPORT);
-    await gotoSettings(page);
-
-    await expect(page.getByTestId("app-background-image")).toBeAttached({
-      timeout: 15_000,
-    });
-    await screenshot(page, "desktop-image");
-
-    const imageSeam = await inspectSettingsSeam(page);
-    console.log("SETTINGS_SEAM_IMAGE>", JSON.stringify(imageSeam));
-
-    // The text-dense Settings view gets a translucent readability scrim over the
-    // wallpaper (full viewport, incl. the safe area) so flat text stays legible
-    // while the wallpaper still reads through. Assert it WHILE on Settings —
-    // the scrim is gated to `isSettingsPage`, so it is (correctly) absent on the
-    // sparse launcher captured below.
-    await expect(page.getByTestId("app-background-scrim")).toBeAttached();
-
-    await page.setViewportSize(MOBILE_VIEWPORT);
-    await expect(page.getByTestId("settings-shell")).toBeVisible();
-    await screenshot(page, "mobile-image");
-
-    // -- 3) Launcher reference over the SAME photo -------------------------
-    // The user wants Settings to match the launcher look; capture the home
-    // launcher over the identical wallpaper so the two can be compared.
-    // Depending on nav history the launcher renders either the ViewCatalog
-    // ("Views" heading) or the iOS-style home-screen tile grid — accept either,
-    // then confirm the image wallpaper is attached (painting) behind it.
-    await page.setViewportSize(DESKTOP_VIEWPORT);
-    await openAppPath(page, "/views");
-    await expect(
-      page
-        .getByRole("heading", { name: "Views" })
-        .or(page.getByTestId("home-screen"))
-        .or(page.getByRole("navigation", { name: /Pinned views/i }))
-        .first(),
-    ).toBeVisible({ timeout: 30_000 });
-    // The image background is `aria-hidden` + `pointer-events-none` + `fixed`,
-    // which trips Playwright's strict visibility heuristic; assert it is
-    // ATTACHED (in the DOM, painting the wallpaper) rather than "visible".
-    await expect(page.getByTestId("app-background-image")).toBeAttached({
-      timeout: 15_000,
-    });
-    await screenshot(page, "launcher-image-desktop");
-
-    // -- Assertions: what the #9143 fix DOES guarantee ------------------------
-    // The committed fix makes the routed shell transparent and the unified
-    // background span the full viewport (incl. the safe-area top).
-    for (const seam of [shaderSeam, imageSeam]) {
-      expect(
-        seam.routedShellIsTransparent,
-        "the routed settings shell must be transparent (APP_SHELL_CLASS_TRANSPARENT, no bg-bg) — the #9143 fix",
-      ).toBe(true);
-      expect(
-        seam.appBackgroundReachesTop,
-        "the unified background must span the full viewport including the safe-area top",
-      ).toBe(true);
+    for (const [name, viewport] of [
+      ["desktop", DESKTOP_VIEWPORT],
+      ["mobile", MOBILE_VIEWPORT],
+    ] as const) {
+      await page.setViewportSize(viewport);
+      await gotoSettings(page);
+      await expect(page.getByTestId("app-background-image")).toHaveCount(0);
+      const hasOpaqueSurface = await page
+        .getByTestId("settings-shell")
+        .evaluate((shell) => {
+          let node: Element | null = shell;
+          while (node && node !== document.body) {
+            const color = getComputedStyle(node).backgroundColor;
+            if (
+              color.startsWith("rgb(") ||
+              /rgba\([^,]+,[^,]+,[^,]+,\s*1\)/.test(color)
+            )
+              return true;
+            node = node.parentElement;
+          }
+          return false;
+        });
+      expect(hasOpaqueSurface, "Settings needs an opaque reading surface").toBe(
+        true,
+      );
+      await screenshot(page, `${name}-settings-opaque`);
+      await openAppPath(page, "/views");
+      const image = page.getByTestId("app-background-image");
+      await expect(image).toBeAttached();
+      await expect
+        .poll(() =>
+          image.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.top <= 0 && rect.bottom >= window.innerHeight - 1;
+          }),
+        )
+        .toBe(true);
+      await screenshot(page, `${name}-launcher-image`);
     }
-    expect(shaderSeam.backgroundKind).toBe("shader");
-    expect(imageSeam.backgroundKind).toBe("image");
-
-    // -- No opaque layer remains over the wallpaper ---------------------------
-    // The full fix also made `AppWorkspaceChrome` (wrapping Settings via
-    // TabContentView) transparent, so NO ancestor between settings-shell and the
-    // App root paints an opaque `bg-bg` — the wallpaper is continuous, edge to
-    // edge, matching the launcher.
-    console.log(
-      "SETTINGS_REMAINING_OPAQUE_LAYER>",
-      JSON.stringify({
-        shader: shaderSeam.remainingOpaqueLayer,
-        image: imageSeam.remainingOpaqueLayer,
-      }),
-    );
-    for (const seam of [shaderSeam, imageSeam]) {
-      expect(
-        seam.remainingOpaqueLayer,
-        "no ancestor of settings-shell may paint an opaque bg-bg over the wallpaper",
-      ).toBeNull();
-    }
-
-    // Sparse views (the launcher) get NO scrim — the scrim is gated to
-    // `isSettingsPage`, so on `/views` it must be absent. This confirms the
-    // readability scrim is scoped to text-dense Settings, not painted globally.
-    await expect(page.getByTestId("app-background-scrim")).toHaveCount(0);
   });
 });

@@ -4129,9 +4129,11 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
     // Ensure we always pass a JSON string to the SQL bind parameter; if we pass an
     // object directly PG sees `[object Object]` and fails the `::jsonb` cast.
     const contentToInsert =
-      tableName === "documents" || tableName === "document_fragments"
-        ? serializeDocumentJsonb(memory.content)
-        : serializeJsonb(memory.content);
+      tableName === "documents"
+        ? serializeJsonb(memory.content, { documentText: true })
+        : tableName === "document_fragments"
+          ? serializeDocumentJsonb(memory.content)
+          : serializeJsonb(memory.content);
 
     const metadataToInsert = serializeJsonb(memory.metadata ?? {});
 
@@ -4218,11 +4220,13 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
               .select({ type: memoryTable.type })
               .from(memoryTable)
               .where(eq(memoryTable.id, memory.id))
-              .limit(1);
+              .for("update");
             const contentToUpdate =
-              stored?.type === "documents" || stored?.type === "document_fragments"
-                ? serializeDocumentJsonb(memory.content)
-                : serializeJsonb(memory.content);
+              stored?.type === "documents"
+                ? serializeJsonb(memory.content, { documentText: true })
+                : stored?.type === "document_fragments"
+                  ? serializeDocumentJsonb(memory.content)
+                  : serializeJsonb(memory.content);
 
             const metadataToUpdate = serializeJsonb(memory.metadata ?? {});
 

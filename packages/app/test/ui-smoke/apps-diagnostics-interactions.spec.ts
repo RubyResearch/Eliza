@@ -28,10 +28,7 @@ test("logs page search really filters entries and clear restores them", async ({
   const entries = page.getByTestId("log-entry");
   await expect(entries).toHaveCount(1);
 
-  // #8597 moved the logs search box into the floating chat composer: while Logs
-  // is open the composer adopts the "Search logs..." placeholder and feeds the
-  // live query into the view via onQuery.
-  const search = page.getByPlaceholder(/Search logs/i);
+  const search = page.getByRole("combobox", { name: "message", exact: true });
   await search.fill("zzqq-no-such-log-line");
   await expect(entries).toHaveCount(0);
 

@@ -70,11 +70,14 @@ import { logger } from "@/lib/utils/logger";
 import type { AppEnv } from "@/types/cloud-worker-env";
 
 const CORS_METHODS = "GET, POST, OPTIONS";
-const DEDICATED_QUOTE_VERSION = "personal-dedicated-v1";
+const DEDICATED_QUOTE_VERSION = "personal-dedicated-v2";
 
 const ActivationBody = z.object({
   action: z.literal("activate_dedicated"),
   quoteId: z.string().regex(/^[a-f0-9]{64}$/),
+  minimumActivationChargeUsd: z.literal(
+    AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
+  ),
 });
 
 type AgentRow = NonNullable<
@@ -198,6 +201,7 @@ async function quoteIdFor(
     sourceAgentId,
     balance.toFixed(6),
     AGENT_PRICING.RUNNING_HOURLY_RATE.toFixed(6),
+    AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE.toFixed(6),
     AGENT_PRICING.UPGRADE_MINIMUM_BALANCE.toFixed(6),
   ].join(":");
   const digest = await crypto.subtle.digest(
@@ -234,6 +238,7 @@ async function dedicatedQuote(
     currentMode: "shared" as const,
     targetMode: "dedicated" as const,
     hourlyRateUsd: AGENT_PRICING.RUNNING_HOURLY_RATE,
+    minimumActivationChargeUsd: AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
     dailyRateUsd: AGENT_PRICING.DAILY_RUNNING_COST,
     minimumBalanceUsd,
     minimumRunwayDays: AGENT_PRICING.UPGRADE_MIN_HOSTING_DAYS,

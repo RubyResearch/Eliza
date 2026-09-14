@@ -183,7 +183,13 @@ async function postProvision() {
   return app.fetch(
     new Request(
       `https://api.example.test/api/v1/eliza/agents/${AGENT_ID}/provision`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: {
+          "X-Eliza-Dedicated-Price":
+            "dedicated-compute-v1:USD:0.150000:0.300000",
+        },
+      },
     ),
   );
 }

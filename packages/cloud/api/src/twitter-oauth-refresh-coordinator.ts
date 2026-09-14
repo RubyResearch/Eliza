@@ -5,10 +5,7 @@
  */
 
 import { runWithCloudBindingsAsync } from "@/lib/runtime/cloud-bindings";
-import {
-  type TwitterBrokerCredentials,
-  twitterAutomationService,
-} from "@/lib/services/twitter-automation";
+import type { TwitterBrokerCredentials } from "@/lib/services/twitter-automation";
 import { logger } from "@/lib/utils/logger";
 import type { AppEnv } from "@/types/cloud-worker-env";
 
@@ -82,13 +79,13 @@ function publicCredentialResponse(
 
 export class TwitterOAuthRefreshCoordinator {
   private readonly env: AppEnv["Bindings"];
-  private readonly broker: TwitterCredentialBroker;
+  private readonly broker: TwitterCredentialBroker | undefined;
   private operationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     _state: DurableObjectState,
     env: AppEnv["Bindings"],
-    broker: TwitterCredentialBroker = twitterAutomationService,
+    broker?: TwitterCredentialBroker,
   ) {
     this.env = env;
     this.broker = broker;
@@ -124,12 +121,21 @@ export class TwitterOAuthRefreshCoordinator {
             { status: 400 },
           );
         }
-        const credentials = await runWithCloudBindingsAsync(this.env, () =>
-          this.broker.getBrokerCredentials(
-            body.organizationId,
-            body.userId,
-            body.connectionRole,
-          ),
+        const credentials = await runWithCloudBindingsAsync(
+          this.env,
+          async () => {
+            // Credential vending must not load the automation/provider graph
+            // when an unrelated Worker route or Durable Object starts.
+            const broker =
+              this.broker ??
+              (await import("@/lib/services/twitter-automation"))
+                .twitterAutomationService;
+            return broker.getBrokerCredentials(
+              body.organizationId,
+              body.userId,
+              body.connectionRole,
+            );
+          },
         );
         return publicCredentialResponse(credentials, body.connectionRole);
       } catch (error) {

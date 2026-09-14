@@ -146,10 +146,17 @@ function buildApp() {
   return app;
 }
 
-function post(query = "") {
+function post(
+  query = "",
+  acceptance: string | null = "dedicated-compute-v1:USD:0.150000:0.300000",
+) {
   return buildApp().request(
     `/api/v1/eliza/agents/${AGENT_ID}/provision${query}`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers:
+        acceptance === null ? {} : { "X-Eliza-Dedicated-Price": acceptance },
+    },
     ENV,
   );
 }
@@ -194,6 +201,25 @@ describe("POST /api/v1/eliza/agents/:id/provision sync identity", () => {
     checkProvisioningWorkerHealth.mockClear();
     claimWarmContainer.mockClear();
   });
+
+  test.each([null, "dedicated-compute-v1:USD:0.010000:0.020000", "invalid"])(
+    "rejects missing or stale price acceptance %s before paid effects",
+    async (acceptance) => {
+      getAgentForWrite.mockImplementationOnce(async () =>
+        provisionAgent({
+          status: "stopped",
+          bridge_url: null,
+          health_url: null,
+        }),
+      );
+      const response = await post("", acceptance);
+      expect(response.status).toBe(428);
+      expect(await response.json()).toMatchObject({
+        code: "DEDICATED_PRICE_CONFIRMATION_REQUIRED",
+      });
+      expectNoProvisionEffects();
+    },
+  );
 
   test.each(["", "?sync=", "?sync=false"])(
     "accepts %s as async provision (already-running fast path)",

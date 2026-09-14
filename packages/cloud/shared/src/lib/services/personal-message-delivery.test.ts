@@ -5,14 +5,16 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { ChannelType } from "@elizaos/core/edge";
 
-let dedicatedTarget: { id: string; status: "running"; bridge_url: string } | null = null;
+let dedicatedTarget: {
+  id: string;
+  status: "running" | "stopped" | "sleeping" | "provisioning";
+  bridge_url: string;
+} | null = null;
 const findActivePersonalDedicatedTarget = mock(async () => dedicatedTarget);
-const preparePersonalDedicatedDelivery = mock(async () => ({ state: "ready" as const }));
 const sharedRestMessageSend = mock(async () => ({ text: "Shared reply", agentName: "Eliza" }));
 const bridge = mock(async () => ({ result: { text: "Dedicated reply" } }));
 
 mock.module("./agent-tier-upgrade-target", () => ({ findActivePersonalDedicatedTarget }));
-mock.module("./personal-dedicated-delivery", () => ({ preparePersonalDedicatedDelivery }));
 mock.module("./shared-runtime/personal-shared-agent", () => ({
   personalSharedAgent: () => ({
     id: "personal-shared-agent",
@@ -88,6 +90,34 @@ describe("deliverPersonalTextMessage", () => {
       reply: "Dedicated reply",
     });
     expect(bridge).toHaveBeenCalledTimes(1);
+    expect(sharedRestMessageSend).not.toHaveBeenCalled();
+  });
+  for (const status of ["stopped", "sleeping"] as const) {
+    test(`${status} Dedicated requires explicit app start without bridge or Shared fallback`, async () => {
+      dedicatedTarget = { id: "dedicated-agent", status, bridge_url: "" };
+      const result = await deliverPersonalTextMessage(base);
+      expect(result).toMatchObject({
+        success: false,
+        status: 428,
+        code: "DEDICATED_PRICE_CONFIRMATION_REQUIRED",
+        retryable: false,
+      });
+      expect(bridge).not.toHaveBeenCalled();
+      expect(sharedRestMessageSend).not.toHaveBeenCalled();
+    });
+  }
+
+  test("an already provisioning Dedicated target remains retryable without delivering", async () => {
+    dedicatedTarget = { id: "dedicated-agent", status: "provisioning", bridge_url: "" };
+    const result = await deliverPersonalTextMessage(base);
+    expect(result).toMatchObject({
+      success: false,
+      status: 503,
+      code: "dedicated_starting",
+      retryable: true,
+      retryAfterSeconds: 5,
+    });
+    expect(bridge).not.toHaveBeenCalled();
     expect(sharedRestMessageSend).not.toHaveBeenCalled();
   });
 });

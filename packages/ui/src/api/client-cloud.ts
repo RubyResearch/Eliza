@@ -4674,6 +4674,7 @@ export interface DedicatedAdoptionConfirmationQuote {
   status: string;
   startsCompute: boolean;
   hourlyRateUsd: number;
+  minimumActivationChargeUsd: number;
   dailyRateUsd: number;
   minimumBalanceUsd: number;
   minimumRunwayDays: number;
@@ -4734,6 +4735,9 @@ function parseDedicatedAdoptionQuote(
   const adoptionState = firstString(quote?.adoptionState);
   const status = firstString(quote?.status);
   const hourlyRateUsd = finiteNumber(quote?.hourlyRateUsd);
+  const minimumActivationChargeUsd = finiteNumber(
+    quote?.minimumActivationChargeUsd,
+  );
   const dailyRateUsd = finiteNumber(quote?.dailyRateUsd);
   const minimumBalanceUsd = finiteNumber(quote?.minimumBalanceUsd);
   const minimumRunwayDays = finiteNumber(quote?.minimumRunwayDays);
@@ -4748,6 +4752,8 @@ function parseDedicatedAdoptionQuote(
     !status ||
     typeof quote?.startsCompute !== "boolean" ||
     hourlyRateUsd === null ||
+    minimumActivationChargeUsd === null ||
+    minimumActivationChargeUsd < 0 ||
     dailyRateUsd === null ||
     minimumBalanceUsd === null ||
     minimumRunwayDays === null ||
@@ -4770,6 +4776,7 @@ function parseDedicatedAdoptionQuote(
     status,
     startsCompute: quote.startsCompute,
     hourlyRateUsd,
+    minimumActivationChargeUsd,
     dailyRateUsd,
     minimumBalanceUsd,
     minimumRunwayDays,
@@ -4925,7 +4932,10 @@ async function adoptSelectedPersonalDedicatedEliza(
           "Content-Type": "application/json",
           Authorization: `Bearer ${options.authToken}`,
         },
-        body: JSON.stringify(confirmation),
+        body: JSON.stringify({
+          ...confirmation,
+          minimumActivationChargeUsd: quote.minimumActivationChargeUsd,
+        }),
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
@@ -5228,7 +5238,11 @@ async function ensurePersonalDedicatedElizaWithinDeadline(
           "Content-Type": "application/json",
           Authorization: `Bearer ${options.authToken}`,
         },
-        body: JSON.stringify({ action: "activate_dedicated", quoteId }),
+        body: JSON.stringify({
+          action: "activate_dedicated",
+          quoteId,
+          minimumActivationChargeUsd: reviewedQuote.minimumActivationChargeUsd,
+        }),
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );

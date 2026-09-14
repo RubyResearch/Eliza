@@ -16,6 +16,7 @@ import {
   installRenderTelemetryGuard,
   seedAppStorage,
 } from "./helpers";
+import { installDesktopBridgeFixture } from "./helpers/desktop-bridge";
 import { saveBrowserVideoArtifact } from "./helpers/video-artifacts";
 
 // Every other ui-smoke spec seeds `eliza:first-run-complete = "1"`, so the
@@ -74,6 +75,7 @@ async function captureFirstRunRestoreEvidence(
 // runtime choices (Cloud / On this device) regardless ("Bring your own keys" is
 // a provider sub-choice, not a runtime location — removed as a chip in #11509).
 async function injectFullCapabilityHost(page: Page): Promise<void> {
+  await installDesktopBridgeFixture(page);
   await page.addInitScript(() => {
     // Production onboarding is cloud-only by default. This smoke explicitly
     // exercises the retained developer-only local/remote chooser.

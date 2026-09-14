@@ -2158,6 +2158,7 @@ export async function registerAgentWithSteward(
 // ---------------------------------------------------------------------------
 
 export class DockerSandboxProvider implements SandboxProvider {
+  readonly computeFundingCapability = "host-lease-v1" as const;
   readonly replacementCreateSettlementCapability = "exact-success" as const;
   readonly exactRestoreCreateCapability = "stopped-quarantine-v1" as const;
 
@@ -2261,6 +2262,20 @@ export class DockerSandboxProvider implements SandboxProvider {
           severity: "fatal",
         },
       );
+    }
+
+    // Customer runtime must enter through committed funding, including image
+    // replacements. Reject before node selection, autoscale or SSH effects.
+    // Exact restore returned above with a stopped, network-isolated candidate;
+    // the explicit platform pool remains separately operator-controlled.
+    if (
+      config.organizationId !== WARM_POOL_ORG_ID &&
+      typeof config.startFundedContainer !== "function"
+    ) {
+      throw new ElizaError("Dedicated container creation requires committed runtime funding", {
+        code: "SANDBOX_COMPUTE_FUNDING_REQUIRED",
+        context: { agentId: config.agentId, organizationId: config.organizationId },
+      });
     }
 
     // Freeze one attempt identity at the public boundary. It is one-shot: an
@@ -3237,6 +3252,7 @@ export class DockerSandboxProvider implements SandboxProvider {
         {
           image: resolvedImage,
           platform: imagePlatform,
+          requiredMemoryMb: containerMemoryMb,
         },
         remoteCompletionTracker,
       );
@@ -3820,35 +3836,34 @@ export class DockerSandboxProvider implements SandboxProvider {
             );
           },
         }),
+        { requireFullId: Boolean(config.startFundedContainer) },
       );
       createdContainerId = containerId;
-      const persistCreatedReplacement = config.onReplacementCreated;
-      if (persistCreatedReplacement) {
-        await persistCreatedReplacement({
-          sandboxId: containerName,
-          bridgeUrl: `http://${hostname}:${bridgePort}`,
-          healthUrl: `http://${hostname}:${webUiPort}/api`,
-          metadata: {
-            provider: "docker",
-            nodeId,
-            hostname,
-            ...replacementPlacementMetadata,
-            containerName,
-            bridgePort,
-            webUiPort,
-            agentId,
-            volumePath,
-            dockerImage: resolvedImage,
-            imageDigest: null,
-            replacementAttemptId,
-            containerId,
-            allocationCounted: Boolean(dbNode),
-            vpnNodeName: vpnEnvVars.TS_HOSTNAME,
-            vpnRegistrationStartedAt,
-            previousVpnNodeId,
-          } satisfies DockerSandboxMetadata,
-        });
-      }
+      const createdHandle: SandboxHandle = {
+        sandboxId: containerName,
+        bridgeUrl: `http://${hostname}:${bridgePort}`,
+        healthUrl: `http://${hostname}:${webUiPort}/api`,
+        metadata: {
+          provider: "docker",
+          nodeId,
+          hostname,
+          ...replacementPlacementMetadata,
+          containerName,
+          bridgePort,
+          webUiPort,
+          agentId,
+          volumePath,
+          dockerImage: resolvedImage,
+          imageDigest: null,
+          replacementAttemptId,
+          containerId,
+          allocationCounted: Boolean(dbNode),
+          vpnNodeName: vpnEnvVars.TS_HOSTNAME,
+          vpnRegistrationStartedAt,
+          previousVpnNodeId,
+        } satisfies DockerSandboxMetadata,
+      };
+      await config.onReplacementCreated?.(createdHandle);
 
       // Pre-seed the cloud runtime config on the HOST side of the
       // `${volumePath}/eliza:/root/.eliza` mount BEFORE starting the container,
@@ -3872,7 +3887,11 @@ export class DockerSandboxProvider implements SandboxProvider {
         );
       }
 
-      await ssh.exec(`docker start ${shellQuote(containerName)}`, DOCKER_CMD_TIMEOUT_MS);
+      if (config.startFundedContainer) {
+        await config.startFundedContainer(createdHandle);
+      } else {
+        await ssh.exec(`docker start ${shellQuote(containerName)}`, DOCKER_CMD_TIMEOUT_MS);
+      }
       logger.info(
         `[docker-sandbox] Container created on ${nodeId}: ${containerId} (${containerName})`,
       );
@@ -4404,9 +4423,11 @@ export class DockerSandboxProvider implements SandboxProvider {
     {
       image,
       platform,
+      requiredMemoryMb,
     }: {
       image: string;
       platform?: string;
+      requiredMemoryMb: number;
     },
     remoteCompletionTracker?: RemoteCompletionTracker,
   ): Promise<DockerNode | null> {
@@ -4428,6 +4449,10 @@ export class DockerSandboxProvider implements SandboxProvider {
       });
       const provisioned = await getNodeAutoscaler().provisionNode(
         {
+          // A single paying Dedicated agent must cover its newly purchased
+          // node without relying on future users filling a larger server.
+          serverType: "ccx13",
+          capacity: 1,
           prePullImages: [image],
           labels: { purpose: "agent-provisioning" },
         },
@@ -4445,6 +4470,7 @@ export class DockerSandboxProvider implements SandboxProvider {
           node &&
           (await dockerNodeManager.ensureNodeReady(node, {
             requiredPlatform: platform,
+            ...(requiredMemoryMb > 0 ? { requiredMemoryMb } : {}),
           }))
         ) {
           logger.info("[docker-sandbox] Autoscaled Docker node is ready", {
@@ -5303,13 +5329,14 @@ export class DockerSandboxProvider implements SandboxProvider {
    * abandonment policy. The old container may resume when its node returns, so
    * an unresolved stop must retain the database fence and block replacement.
    */
-  async stopForReplacement(sandboxId: string): Promise<void> {
-    // Suspend, shutdown, sleep, warm-claim retire and ghost cleanup all route
-    // here. None has a durable generation to own the slot, and each stops
-    // exactly once under a fence, so the provider still releases capacity for
-    // them — the same per-operation ownership `stopOnSpecificNodeWithPolicy`
-    // already declares.
-    await this.stopWithPolicy(sandboxId, false, true);
+  async stopForReplacement(
+    sandboxId: string,
+    options?: { readonly releaseCapacity?: false },
+  ): Promise<void> {
+    // Legacy callers retain provider-owned slot release. Paid sleep opts out:
+    // its database transaction recounts remaining workloads so a retry after
+    // physical removal cannot decrement a live sibling's allocation.
+    await this.stopWithPolicy(sandboxId, false, options?.releaseCapacity !== false);
   }
 
   private async stopWithPolicy(

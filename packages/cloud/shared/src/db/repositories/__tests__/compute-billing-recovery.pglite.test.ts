@@ -4,6 +4,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { pushSchema } from "drizzle-kit/api";
 import { and, eq, sql } from "drizzle-orm";
 import { getPgliteClientForTests } from "../../client";
@@ -63,7 +64,6 @@ beforeAll(async () => {
       agentSandboxes,
       apiKeys,
       creditTransactions,
-      agentBillingRecords,
       agentBillingRuns,
       agentBillingRunItems,
       computeBillingRateSegments,
@@ -77,6 +77,25 @@ beforeAll(async () => {
     const { apply } = await pushSchema(schema as never, dbWrite as never);
     await apply();
     await installOrganizationPolicyTestSchema((query) => getPgliteClientForTests().exec(query));
+    // Install the dependent tables from migrations after their referenced
+    // unique indexes exist; pushSchema emits those indexes after foreign keys.
+    const migration = (name: string) =>
+      readFile(new URL(`../../migrations/${name}`, import.meta.url), "utf8");
+    await getPgliteClientForTests().exec(await migration("0387_agent_compute_funding.sql"));
+    await getPgliteClientForTests().exec(await migration("0389_agent_compute_stop_receipts.sql"));
+    const receiptDDL = await migration("0265_compute_billing_recovery.sql");
+    const receiptTable = receiptDDL.match(/CREATE TABLE agent_billing_records \([\s\S]*?\n\);/);
+    if (!receiptTable) throw new Error("Missing canonical agent billing receipt DDL");
+    await getPgliteClientForTests().exec(receiptTable[0]);
+    for (const index of receiptDDL.matchAll(
+      /CREATE (?:UNIQUE )?INDEX agent_billing_records_[\s\S]*?;/g,
+    )) {
+      await getPgliteClientForTests().exec(index[0]);
+    }
+    await getPgliteClientForTests().exec(await migration("0388_agent_compute_funded_receipts.sql"));
+    await getPgliteClientForTests().exec(
+      await migration("0394_agent_billing_activation_minimum.sql"),
+    );
     await dbWrite.execute(
       sql.raw(`CREATE TABLE jobs (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -474,10 +474,10 @@ export const containersEnv = {
    * (observed fleet-wide on staging 2026-08-05: node `available` memory driven
    * to 4MB, kernel OOM killing unrelated agents every ~10-30s).
    *
-   * Default: 3072 MiB — comfortably above the observed ~2.1GB boot-time RSS
-   * spike of the current agent image, and aligned with the ~4GB/agent budget
-   * the ccx33 + capacity-8 sizing was designed around (see
-   * defaultAutoscaleNodeCapacity). Clamped to [0, 65536].
+   * Default: 6144 MiB. Restoring a persisted runtime and exporting its next
+   * snapshot require headroom beyond boot-time RSS. Placement and bootstrap
+   * capacity use this same ceiling with a separate host reserve; the paid
+   * single-agent ccx13 profile remains 8 GiB. Clamped to [0, 65536].
    */
   agentContainerMemoryLimitMb(): number {
     const env = getCloudAwareEnv();
@@ -486,7 +486,7 @@ export const containersEnv = {
     if (Number.isFinite(parsed) && parsed >= 0) {
       return Math.min(65536, Math.floor(parsed));
     }
-    return 3072;
+    return 6144;
   },
 
   /**

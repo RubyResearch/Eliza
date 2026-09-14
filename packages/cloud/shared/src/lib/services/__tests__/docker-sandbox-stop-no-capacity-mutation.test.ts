@@ -499,4 +499,22 @@ describe("provider stop never mutates node capacity", () => {
     expect(decrementSpy).toHaveBeenCalledTimes(1);
     expect(decrementSpy).toHaveBeenCalledWith(NODE_ID);
   });
+  test("caller-owned replacement capacity is unchanged across removal retries", async () => {
+    const commands: string[] = [];
+    execBehavior = async (command) => {
+      commands.push(command);
+      return "";
+    };
+    const provider = new DockerSandboxProvider();
+    seedContainer(provider);
+    await expect(
+      provider.stopForReplacement(SANDBOX_ID, { releaseCapacity: false }),
+    ).resolves.toBeUndefined();
+    seedContainer(provider);
+    await expect(
+      provider.stopForReplacement(SANDBOX_ID, { releaseCapacity: false }),
+    ).resolves.toBeUndefined();
+    expect(commands.filter((command) => command.startsWith("docker rm -f"))).toHaveLength(2);
+    expect(decrementSpy).not.toHaveBeenCalled();
+  });
 });

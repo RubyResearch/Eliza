@@ -1874,6 +1874,9 @@ const VENDOR_DRACO_TEST = /\/node_modules\/draco3d(gltf)?\//;
  */
 function resolveManualChunk(id: string): string | undefined {
   const normalizedId = id.split(path.sep).join("/");
+  // A global vendor stylesheet must not make its JavaScript chunk eager.
+  // Vite extracts CSS independently; these groups only own executable modules.
+  if (/\.css(?:\?|$)/.test(normalizedId)) return undefined;
 
   // Build-generated leaf shims shared by the eager entry graph AND the pinned
   // vendor-crypto graph: Vite's dynamic-import preload helper, the node-builtin

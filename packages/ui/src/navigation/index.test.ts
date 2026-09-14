@@ -11,6 +11,7 @@ import {
   ALL_TAB_GROUPS,
   BUILTIN_ROUTE_IDS,
   LEGACY_PREFIX_TAB_ALIASES,
+  pathForTab,
   resolveBuiltinRouteDescriptor,
   resolveLegacyBuiltinRoute,
   TAB_PATHS,
@@ -27,6 +28,17 @@ afterEach(() => {
 });
 
 describe("navigation tabFromPath", () => {
+  it.each(["/rolodex", "/ROLODEX/"])(
+    "routes legacy contact-book links %s to Relationships",
+    (path) => {
+      expect(tabFromPath(path)).toBe("relationships");
+      expect(resolveLegacyBuiltinRoute(path)).toEqual({
+        tab: "relationships",
+        canonicalPath: TAB_PATHS.relationships,
+      });
+      expect(pathForTab("rolodex")).toBe(TAB_PATHS.relationships);
+    },
+  );
   it.each(["/home", "/HOME/"])(
     "canonicalizes the Home alias %s to the chat canvas",
     (path) => {

@@ -80,6 +80,15 @@ bun run --cwd packages/cloud/shared preflight:messaging-gateways
 
 There is no build step here (`build:linked-workspaces` defers to the repo-root `build:core`).
 
+The paid Docker runtime guard has an explicit Linux/root integration lane:
+`bun run --cwd packages/cloud/shared test:docker-compute-lease --image=<existing-local-image-id>`.
+Use an existing image containing `/bin/sh`, `sleep`, and `cat`. The test creates
+two containers with networking disabled and resource limits, exercises actual
+start, renewal, expiry, stale-command rejection and retained data, then removes
+only those containers. It does not pull images, supply agent credentials, install
+a system service, or change the host clock. This host boundary test does not
+establish that application billing and provisioning use the guard.
+
 ## Config
 
 `db/database-url.ts` resolves the Postgres URL: explicit `DATABASE_URL` / `TEST_DATABASE_URL` (Railway in production) wins; otherwise local dev falls back to a file-backed PGlite store at `pglite://<cwd>/.eliza/.pgdata` (override the path with `PGLITE_DATA_DIR` / `LOCAL_DATABASE_PATH`). The `lib/` services read service-specific env (Stripe, Steward session/JWT secrets, BitRouter/provider keys, Telegram/Discord/WhatsApp, Hetzner/container infra). See `.env.example` for the full set.

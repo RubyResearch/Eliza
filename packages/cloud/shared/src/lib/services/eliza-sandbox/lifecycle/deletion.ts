@@ -2,7 +2,7 @@
 
 import crypto from "node:crypto";
 import { ElizaError } from "@elizaos/core";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { ensureAgentSandboxSchema } from "../../../../db/ensure-agent-sandbox-schema";
 import { dbWrite } from "../../../../db/helpers";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../../../../db/repositories/agent-sandboxes";
 import { userCharactersRepository } from "../../../../db/repositories/characters";
 import { sharedRuntimeHistoryRepository } from "../../../../db/repositories/shared-runtime-history";
+import { agentComputeFunding } from "../../../../db/schemas/agent-compute-funding";
 import {
   type AgentBackupStateData,
   agentSandboxes,
@@ -22,7 +23,12 @@ import { jobs } from "../../../../db/schemas/jobs";
 import type { RuntimeDurableObjectNamespace } from "../../../../types/cloud-worker-env";
 import { getCloudBinding } from "../../../runtime/cloud-bindings";
 import { logger } from "../../../utils/logger";
+import {
+  cancelUnboundAgentComputeInTransaction,
+  stopFundedAgentInTransaction,
+} from "../../agent-compute-stop";
 import { apiKeysService } from "../../api-keys";
+import { creditsService } from "../../credits";
 import { holdsCountedNodeSlot, isDeletionContinuation } from "../../docker-node-workload-queries";
 import { reusesExistingElizaCharacter } from "../../eliza-agent-config";
 import { JOB_TYPES } from "../../provisioning-job-types";
@@ -240,8 +246,8 @@ export class SandboxDeletion {
       }
     }
 
-    // Phase 1 — short transaction: take the lifecycle lock, validate
-    // preconditions, and capture the fields needed for teardown. We deliberately
+    // Phase 1 — take the lifecycle lock, validate
+    // preconditions, capture recovery, and revoke/settle paid compute. We deliberately
     // do NOT run the container teardown inside this transaction:
     // provider.stopForDeletion()
     // can hang on an early SSH connect / provider init, and holding the row lock
@@ -517,8 +523,8 @@ export class SandboxDeletion {
    * Phase 1 of `deleteAgent` (see there): short write transaction that takes
    * the lifecycle lock, validates delete preconditions, and captures the
    * sandbox id + status for the (out-of-transaction) teardown. Kept separate so
-   * the lock/transaction is held only for these quick DB ops, never across the
-   * bounded container teardown.
+   * paid stop and refund commit before the separate destructive teardown.
+   * Provider removal never runs under this transaction.
    */
   async prepareAgentDelete(
     agentId: string,
@@ -563,7 +569,8 @@ export class SandboxDeletion {
     // (its deploy does not gate on migrate-db). Ensure is memoized, so the DDL
     // runs once per isolate rather than once per delete.
     await ensureAgentSandboxSchema();
-    return dbWrite.transaction(async (tx) => {
+    let purchasedCreditRefunded = false;
+    const result = await dbWrite.transaction(async (tx) => {
       await this.host.lockLifecycle(tx, agentId, orgId);
 
       const rec = await this.host.getAgentForLifecycleMutation(tx, agentId, orgId);
@@ -737,6 +744,45 @@ export class SandboxDeletion {
         lifecycleRevision = persisted.lifecycleRevision;
       }
 
+      // Commit the stop receipt and refund before phase 2 destroys the container.
+      // The existing deletion generation continues to own its capacity release.
+      if (!isSharedRuntime && rec.pool_status === null) {
+        const [window] = await tx
+          .select()
+          .from(agentComputeFunding)
+          .where(
+            and(
+              eq(agentComputeFunding.agent_id, agentId),
+              eq(agentComputeFunding.organization_id, orgId),
+              isNull(agentComputeFunding.settled_at),
+            ),
+          )
+          .for("update");
+        if (window) {
+          const identity = {
+            agentId,
+            organizationId: orgId,
+            lifecycleRevision,
+            fundingId: window.id,
+          };
+          const settled =
+            window.provider_container_id === null
+              ? await cancelUnboundAgentComputeInTransaction(tx, identity)
+              : await stopFundedAgentInTransaction(tx, identity);
+          if (!settled) throw new Error("Deletion lost its paid stop authority");
+          purchasedCreditRefunded = settled.purchasedCreditRefunded;
+          // The provider is now stopped. Cancelling a later failed delete must
+          // not restore the queued intent's formerly-running state.
+          const [stopped] = await tx
+            .update(agentSandboxes)
+            .set({ deletion_previous_status: null, updated_at: new Date() })
+            .where(and(eq(agentSandboxes.id, agentId), eq(agentSandboxes.organization_id, orgId)))
+            .returning({ lifecycleRevision: agentSandboxes.lifecycle_revision });
+          if (!stopped) throw new Error("Deletion lost its stopped generation");
+          lifecycleRevision = stopped.lifecycleRevision;
+        }
+      }
+
       let deletionLocator: SandboxDeletionLocator | null = null;
       if (rec.sandbox_id && rec.node_id && rec.container_name) {
         const nodeAuthority = await tx.execute<{
@@ -783,6 +829,8 @@ export class SandboxDeletion {
         deletionLocator,
       };
     });
+    if (result.ok && purchasedCreditRefunded) await creditsService.invalidateCreditCaches(orgId);
+    return result;
   }
 
   /**

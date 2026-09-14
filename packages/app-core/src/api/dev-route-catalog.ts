@@ -403,7 +403,7 @@ const ROUTES: DevRouteEntry[] = [
   },
   {
     tabId: "rolodex",
-    path: "/rolodex",
+    path: "/apps/relationships",
     label: "Rolodex",
     group: "Hidden",
     visibility: "all",

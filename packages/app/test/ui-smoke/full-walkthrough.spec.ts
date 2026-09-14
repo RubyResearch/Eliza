@@ -119,6 +119,10 @@ async function runJourneyAtViewport(
     viewport: profile.size,
     isMobile: profile.isMobile,
     hasTouch: profile.hasTouch,
+    recordVideo:
+      process.env.E2E_RECORD === "1"
+        ? { dir: join(RUN_DIR, profile.id, "video"), size: profile.size }
+        : undefined,
   });
   const page = await context.newPage();
   const recorder = new WalkthroughRecorder(

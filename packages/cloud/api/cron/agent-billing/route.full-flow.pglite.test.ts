@@ -13,6 +13,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { pushSchema } from "drizzle-kit/api";
 import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -25,8 +26,13 @@ process.env.TEST_DATABASE_URL ||= "pglite://memory";
 process.env.NODE_ENV ||= "test";
 process.env.MOCK_REDIS = "1";
 
-import { closeDatabaseConnectionsForTests, dbWrite } from "@/db/client";
+import {
+  closeDatabaseConnectionsForTests,
+  dbWrite,
+  getPgliteClientForTests,
+} from "@/db/client";
 import { agentBillingRunRepository } from "@/db/repositories/agent-billing-runs";
+import { installOrganizationPolicyTestSchema } from "@/db/repositories/organization-policy-test-fixture";
 import { agentComputeStopIntents } from "@/db/schemas/agent-compute-stop-intents";
 import { agentSandboxes } from "@/db/schemas/agent-sandboxes";
 import { apiKeys } from "@/db/schemas/api-keys";
@@ -120,7 +126,6 @@ beforeAll(async () => {
         jobs,
         agentComputeStopIntents,
         creditTransactions,
-        agentBillingRecords,
         agentBillingRuns,
         agentBillingRunItems,
         computeBillingRateSegments,
@@ -128,6 +133,33 @@ beforeAll(async () => {
       dbWrite as never,
     );
     await apply();
+    await installOrganizationPolicyTestSchema((query) =>
+      getPgliteClientForTests().exec(query),
+    );
+    // Funding's tenant indexes must exist before installing the receipt FK.
+    const migration = (name: string) =>
+      readFile(
+        new URL(`../../../shared/src/db/migrations/${name}`, import.meta.url),
+        "utf8",
+      );
+    const receiptDDL = await migration("0265_compute_billing_recovery.sql");
+    const receiptTable = receiptDDL.match(
+      /CREATE TABLE agent_billing_records \([\s\S]*?\n\);/,
+    );
+    if (!receiptTable)
+      throw new Error("Missing canonical agent billing receipt DDL");
+    await getPgliteClientForTests().exec(receiptTable[0]);
+    for (const index of receiptDDL.matchAll(
+      /CREATE (?:UNIQUE )?INDEX agent_billing_records_[\s\S]*?;/g,
+    )) {
+      await getPgliteClientForTests().exec(index[0]);
+    }
+    await getPgliteClientForTests().exec(
+      await migration("0388_agent_compute_funded_receipts.sql"),
+    );
+    await getPgliteClientForTests().exec(
+      await migration("0394_agent_billing_activation_minimum.sql"),
+    );
     await dbWrite.execute(
       sql.raw(`
       CREATE TABLE IF NOT EXISTS jobs (

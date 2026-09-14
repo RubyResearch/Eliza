@@ -40,6 +40,7 @@ const ACTIVATION_TERMS = {
   sourceAgentId: "personal:3b9e517b-5c33-5c5f-a6f9-f78c764dc41b",
   hourlyRateUsd: 0.01,
   dailyRateUsd: 0.24,
+  minimumActivationChargeUsd: 0.3,
   minimumBalanceUsd: 0.72,
   minimumRunwayDays: 3,
   balanceUsd: 10,
@@ -399,6 +400,7 @@ describe("ensurePersonalDedicatedEliza", () => {
         if (url.endsWith("/upgrade-tier") && init?.method === "POST") {
           events.push("activation");
           expect(JSON.parse(String(init.body))).toEqual({
+            minimumActivationChargeUsd: 0.3,
             action: "activate_dedicated",
             quoteId: "a".repeat(64),
           });
@@ -645,6 +647,7 @@ describe("ensurePersonalDedicatedEliza", () => {
               startsCompute: false,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 115.54,
@@ -662,6 +665,7 @@ describe("ensurePersonalDedicatedEliza", () => {
           init?.method === "POST"
         ) {
           expect(JSON.parse(String(init.body))).toEqual({
+            minimumActivationChargeUsd: 0.3,
             action: "adopt_existing_dedicated",
             quoteId: adoptionQuoteId,
           });
@@ -688,6 +692,7 @@ describe("ensurePersonalDedicatedEliza", () => {
         }
         if (url.endsWith("/upgrade-tier") && init?.method === "POST") {
           expect(JSON.parse(String(init.body))).toEqual({
+            minimumActivationChargeUsd: 0.3,
             action: "activate_dedicated",
             quoteId: activationQuoteId,
           });
@@ -810,6 +815,7 @@ describe("ensurePersonalDedicatedEliza", () => {
               startsCompute: true,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 115.54,
@@ -933,6 +939,7 @@ describe("ensurePersonalDedicatedEliza", () => {
               startsCompute: true,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 115.54,
@@ -1045,6 +1052,7 @@ describe("ensurePersonalDedicatedEliza", () => {
               startsCompute: true,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 115.54,
@@ -1143,6 +1151,7 @@ describe("ensurePersonalDedicatedEliza", () => {
                 startsCompute: true,
                 hourlyRateUsd: 0.01,
                 dailyRateUsd: 0.24,
+                minimumActivationChargeUsd: 0.3,
                 minimumBalanceUsd: 0.72,
                 minimumRunwayDays: 3,
                 balanceUsd: 0,
@@ -1243,6 +1252,7 @@ describe("ensurePersonalDedicatedEliza", () => {
                 startsCompute: true,
                 hourlyRateUsd: 0.01,
                 dailyRateUsd: 0.24,
+                minimumActivationChargeUsd: 0.3,
                 minimumBalanceUsd: 0.72,
                 minimumRunwayDays: 3,
                 balanceUsd: 115.54,
@@ -1261,6 +1271,7 @@ describe("ensurePersonalDedicatedEliza", () => {
           ) {
             adoptionPosts += 1;
             expect(JSON.parse(String(init.body))).toEqual({
+              minimumActivationChargeUsd: 0.3,
               action: "adopt_existing_dedicated",
               quoteId: "b".repeat(64),
             });
@@ -1344,6 +1355,7 @@ describe("ensurePersonalDedicatedEliza", () => {
         startsCompute: true,
         hourlyRateUsd: 0.01,
         dailyRateUsd: 0.24,
+        minimumActivationChargeUsd: 0.3,
         minimumBalanceUsd: 0.72,
         minimumRunwayDays: 3,
         balanceUsd,
@@ -1518,6 +1530,7 @@ describe("ensurePersonalDedicatedEliza", () => {
               startsCompute: false,
               hourlyRateUsd: 0.01,
               dailyRateUsd: 0.24,
+              minimumActivationChargeUsd: 0.3,
               minimumBalanceUsd: 0.72,
               minimumRunwayDays: 3,
               balanceUsd: 115.54,
@@ -1810,6 +1823,7 @@ describe("ensurePersonalDedicatedEliza", () => {
         }
         if (url.endsWith("/upgrade-tier") && init?.method === "POST") {
           expect(JSON.parse(String(init.body))).toEqual({
+            minimumActivationChargeUsd: 0.3,
             action: "activate_dedicated",
             quoteId: "f".repeat(64),
           });

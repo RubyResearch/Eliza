@@ -9,6 +9,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { useAgentElement } from "../../agent-surface";
 import { client } from "../../api/client";
+import { dispatchChatPrefill } from "../../events";
 import { useFetchData } from "../../hooks";
 import {
   type TranslationContextValue,
@@ -194,10 +195,11 @@ export function CharacterLearnedSkillsSection({
             <Button
               type="button"
               size="sm"
+              data-chat-open="true"
               onClick={() =>
-                client.sendChatMessage(
-                  "Help me learn a new skill. Ask what capability I want to practice.",
-                )
+                dispatchChatPrefill({
+                  text: "Help me learn a new skill. Ask what capability I want to practice.",
+                })
               }
             >
               {t("learnedskills.startLearning", {

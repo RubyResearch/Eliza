@@ -7,6 +7,7 @@ import { writeFile } from "node:fs/promises";
 import { STEWARD_TOKEN_KEY } from "@elizaos/shared/steward-session-client";
 import { expect, test } from "@playwright/test";
 import {
+  CLOUD_AUDIT_DEDICATED_AGENT_ID,
   installCloudApiStubs,
   seedStewardToken,
 } from "./helpers/cloud-audit-fixtures";
@@ -37,7 +38,7 @@ for (const viewport of [
       });
       await route.fulfill({ response });
     });
-    await seedStewardToken(page);
+    await seedStewardToken(page, CLOUD_AUDIT_DEDICATED_AGENT_ID);
     await installCloudApiStubs(page);
     let failLogout = true;
     let requests = 0;

@@ -253,6 +253,7 @@ export class ElizaSandboxService {
     pushState: (...args) => this.pushState(...args),
   });
   readonly #warmClaim = new SandboxWarmClaim({
+    getProvider: (...args) => this.getProvider(...args),
     fetchAgentApi: (...args) => this.fetchAgentApi(...args),
     lockLifecycle: (...args) => this.lockLifecycle(...args),
     getAgentForLifecycleMutation: (...args) => this.getAgentForLifecycleMutation(...args),
@@ -273,6 +274,7 @@ export class ElizaSandboxService {
     retirePersistedReplacementCleanup: (...args) => this.retirePersistedReplacementCleanup(...args),
   });
   readonly #power = new SandboxPower({
+    getProvider: (...args) => this.getProvider(...args),
     getAgentForWrite: (...args) => this.getAgentForWrite(...args),
     fetchSnapshotState: (...args) => this.fetchSnapshotState(...args),
     lockLifecycle: (...args) => this.lockLifecycle(...args),
@@ -1253,6 +1255,7 @@ export class ElizaSandboxService {
    */
   private async runBoundedSandboxStopForReplacement(
     sandboxId: string,
+    options?: Parameters<NonNullable<SandboxProvider["stopForReplacement"]>>[1],
   ): Promise<BoundedSandboxStopResult> {
     return withTimeout(
       (async (): Promise<null | { error: unknown }> => {
@@ -1261,7 +1264,8 @@ export class ElizaSandboxService {
           if (!provider.stopForReplacement) {
             throw new Error("Sandbox provider cannot prove workload absence before replacement");
           }
-          await provider.stopForReplacement(sandboxId);
+          if (options) await provider.stopForReplacement(sandboxId, options);
+          else await provider.stopForReplacement(sandboxId);
           return null;
         } catch (error) {
           // error-policy:J1 provider boundary translation — replacement remains
@@ -3105,6 +3109,10 @@ export class ElizaSandboxService {
     rec = probeSource;
 
     const provider = await this.getProvider();
+    // Paid provisioning may be midway through restoring application state.
+    // Health alone must not publish it; the owning provision job completes it.
+    if (provider.computeFundingCapability === "host-lease-v1") return "unresolved";
+
     const handle: SandboxHandle = {
       sandboxId: probeSource.sandbox_id,
       bridgeUrl: rec.bridge_url ?? "",

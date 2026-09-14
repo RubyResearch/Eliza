@@ -15,6 +15,7 @@ import { selectedFamilyPacketPeriod } from "../lifeops/family-workflows/period.j
 
 import { exportFamilyWorkspace } from "../lifeops/family-workflows/workspace-export.js";
 import { CONCORD_SCHOOL_CALENDAR_SOURCE } from "../lifeops/school/calendar-workflow.js";
+import { handleFamilyDeletionRoutes } from "./family-deletion.js";
 import { handleFamilyIntakeRoutes } from "./family-intake.js";
 import type { LifeOpsRouteContext } from "./lifeops-routes.js";
 
@@ -37,6 +38,7 @@ export async function handleFamilyWorkflowRoutes(
 ): Promise<boolean> {
   const { method, pathname, req, res, json, readJsonBody, url } = ctx;
   if (!pathname.startsWith("/api/lifeops/family-workflows")) return false;
+  if (await handleFamilyDeletionRoutes(ctx)) return true;
   const runtimeService = service(ctx);
   if (!runtimeService) return true;
   try {

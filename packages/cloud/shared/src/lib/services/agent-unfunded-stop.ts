@@ -14,6 +14,7 @@ import {
 } from "../../db/repositories/agent-billing-runs";
 import { agentSandboxes, CONTAINER_BACKED_EXECUTION_TIERS } from "../../db/schemas/agent-sandboxes";
 import { type AgentBillingRunItem, agentBillingRunItems } from "../../db/schemas/compute-billing";
+import { deferFundedAgentStopInTransaction } from "./agent-compute-stop-schedule";
 import { lockAgentSuspendTargetInTx, provisioningJobService } from "./provisioning-jobs";
 
 export async function enqueueAgentUnfundedStopForRun(
@@ -82,8 +83,9 @@ export async function enqueueAgentUnfundedStopForRun(
         input.sandboxId,
         input.organizationId,
         input.now,
+        "billing_recovery",
       );
-    if (settlement.status !== "insufficient_credits") {
+    if (settlement.status !== "insufficient_credits" && settlement.status !== "funded_until") {
       return (
         await recordAgentBillingRunItemInTransaction(tx, input, {
           ...receipt,
@@ -116,12 +118,30 @@ export async function enqueueAgentUnfundedStopForRun(
           eq(agentSandboxes.organization_id, input.organizationId),
         ),
       );
-    await provisioningJobService.enqueueAgentSuspendOnceInTransaction(tx, {
+    const queued = await provisioningJobService.enqueueAgentSuspendOnceInTransaction(tx, {
       agentId: input.sandboxId,
       organizationId: input.organizationId,
       userId: sandbox.user_id,
       authorization: "billing_request",
     });
+    if (
+      settlement.status === "funded_until" &&
+      (await deferFundedAgentStopInTransaction(tx, {
+        agentId: input.sandboxId,
+        organizationId: input.organizationId,
+        jobId: queued.job.id,
+        stopAfter: settlement.stopAfter,
+      }))
+    ) {
+      return (
+        await recordAgentBillingRunItemInTransaction(tx, input, {
+          ...receipt,
+          action: "skipped",
+          detailCode: "existing_runtime_funded",
+          detailMessage: `Runtime remains funded; stop recheck scheduled for ${settlement.stopAfter.toISOString()}`,
+        })
+      ).item;
+    }
     return (
       await recordAgentBillingRunItemInTransaction(tx, input, {
         ...receipt,

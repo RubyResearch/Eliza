@@ -6906,15 +6906,17 @@ export function ChatOverlay({
                               ? "Sign in to get started"
                               : firstRunOpen
                                 ? firstRunComposerPlaceholder
-                                : noProviderConfigured
-                                  ? "Connect a model provider in Settings to chat"
-                                  : modelBlocksSend
-                                    ? modelStatus?.kind === "downloading"
-                                      ? `Downloading ${modelStatus.modelName ?? "your model"} — you can keep typing`
-                                      : `Getting ${modelStatus?.modelName ?? "your model"} ready — you can keep typing`
-                                    : booting
-                                      ? `Message ${agentName} — waking up…`
-                                      : "Hey Eliza…"
+                                : viewChatBinding?.placeholder
+                                  ? viewChatBinding.placeholder
+                                  : noProviderConfigured
+                                    ? "Connect a model provider in Settings to chat"
+                                    : modelBlocksSend
+                                      ? modelStatus?.kind === "downloading"
+                                        ? `Downloading ${modelStatus.modelName ?? "your model"} — you can keep typing`
+                                        : `Getting ${modelStatus?.modelName ?? "your model"} ready — you can keep typing`
+                                      : booting
+                                        ? `Message ${agentName} — waking up…`
+                                        : "Hey Eliza…"
                         }
                         aria-label="message"
                         data-testid="chat-composer-textarea"

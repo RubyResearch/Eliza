@@ -376,6 +376,62 @@ describe("run-all-tests --require-work vacuous-green guard", () => {
   );
 
   test(
+    "reconciles agent batch evidence after its required mobile preflight",
+    () => {
+      const directory = join(repoRoot, "packages", "__agent_batch_preflight__");
+      rmSync(directory, { recursive: true, force: true });
+      mkdirSync(join(directory, "scripts"), { recursive: true });
+      try {
+        writeFileSync(
+          join(directory, "package.json"),
+          JSON.stringify({
+            name: "@elizaos/agent-batch-preflight-fixture",
+            private: true,
+            type: "module",
+            scripts: {
+              test: "bun run test:mobile-workspace-entry && node scripts/run-vitest-batches.mjs",
+              "test:mobile-workspace-entry": "node scripts/preflight.mjs",
+            },
+          }),
+        );
+        writeFileSync(
+          join(directory, "scripts", "preflight.mjs"),
+          'import { writeFileSync } from "node:fs"; if (process.env.REJECT_PREFLIGHT === "1") process.exit(7); writeFileSync("admitted", "yes");',
+        );
+        writeFileSync(
+          join(directory, "scripts", "run-vitest-batches.mjs"),
+          [
+            'import { readFileSync, writeFileSync } from "node:fs";',
+            'if (readFileSync("admitted", "utf8") !== "yes") throw new Error("preflight missing");',
+            "const args = process.argv.slice(2);",
+            'const output = args.find(arg => arg.startsWith("--outputFile.junit="))?.slice("--outputFile.junit=".length);',
+            'if (!args.includes("--reporter=junit") || !output) throw new Error("missing batch evidence arguments");',
+            'writeFileSync(output, `<testsuites tests="1" failures="0" errors="0" skipped="0"><testsuite name="batch" tests="1" failures="0" errors="0" skipped="0"><testcase name="observed batch" /></testsuite></testsuites>`);',
+          ].join("\n"),
+        );
+        const args = [
+          "--only=test",
+          "--no-cloud",
+          "--filter=@elizaos/agent-batch-preflight-fixture",
+          "--require-work",
+        ];
+        const result = run(args);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain(
+          "EVIDENCE reports=1 tests=1 executed=1 skipped=0 unobserved-tasks=0",
+        );
+        rmSync(join(directory, "admitted"));
+        const rejected = run(args, { REJECT_PREFLIGHT: "1" });
+        expect(rejected.status).not.toBe(0);
+        expect(rejected.stdout).not.toContain("executed=1");
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  test(
     "does not reclassify arbitrary failing scripts as no-test skips",
     () => {
       rmSync(TEMP_PACKAGE_DIR, { recursive: true, force: true });

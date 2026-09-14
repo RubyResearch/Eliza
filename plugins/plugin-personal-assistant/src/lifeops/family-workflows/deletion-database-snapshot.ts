@@ -73,6 +73,7 @@ const sources: readonly DependencySource[] = [
       "title",
       "document_id",
       "media_file_name",
+      "content_sha256",
     ],
   },
   {
@@ -464,4 +465,42 @@ export async function withReviewedFamilyDeletionDatabase<T>(
     // receipts until the executor has completed or explicitly reconciled it.
     return revoke(tx, snapshot);
   });
+}
+
+/** Remove only the locked, reviewed owned rows; shared references and the fence survive. */
+export async function purgeReviewedFamilyDatabaseRows(
+  tx: TransactionalDb,
+  snapshot: FamilyDeletionDatabaseSnapshot,
+): Promise<number> {
+  let removed = 0;
+  for (const source of [...sources].reverse()) {
+    if (
+      source.kind === "workspaceLifecycle" ||
+      source.kind === "workspaceOperations"
+    )
+      continue;
+    for (const record of snapshot.records.filter(
+      (record) =>
+        record.kind === source.kind && record.classification === "owned",
+    )) {
+      const identity = source.fields.map(
+        (field) =>
+          `to_jsonb(record)->${sqlQuote(field)} = ${sqlQuote(JSON.stringify(record.identity[field]))}::jsonb`,
+      );
+      const rows = await executeRawSqlTx(
+        tx,
+        `DELETE FROM ${source.table} AS record WHERE agent_id::text=${sqlQuote(snapshot.agentId)} AND ${identity.join(" AND ")} RETURNING 1`,
+      );
+      if (rows.length !== 1)
+        throw new ElizaError(
+          "[FamilyDeletion] A reviewed row changed during purge",
+          {
+            code: "FAMILY_DELETION_PURGE_CONFLICT",
+            context: { kind: source.kind },
+          },
+        );
+      removed += 1;
+    }
+  }
+  return removed;
 }

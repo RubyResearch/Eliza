@@ -192,6 +192,51 @@ describe("ElizaSandboxService.executeUpgrade blue/green rollback + CAS guard (LA
     sandboxTransactions.implementation = null;
   });
 
+  test.each(["upgrade", "downgrade"] as const)(
+    "%s without replacement funding preserves the running agent",
+    async (operation) => {
+      const { ElizaSandboxService } = await import("../eliza-sandbox.ts?actual");
+      const { DockerSandboxProvider } = await import("../docker-sandbox-provider");
+      const { dockerNodeManager } = await import("../docker-node-manager");
+      const { DockerSSHClient } = await import("../docker-ssh");
+      const agent = { ...liveAgentRow(), previous_image_digest: TO_DIGEST };
+      const originalAgent = structuredClone(agent);
+      const provider = new DockerSandboxProvider();
+      const spies = [
+        spyOn(agentSandboxesRepository, "findByIdAndOrgForWrite").mockResolvedValue(agent),
+        spyOn(dockerNodesRepository, "findByNodeId").mockResolvedValue(oldNode()),
+      ];
+      const selectNode = spyOn(dockerNodeManager, "getAvailableNode");
+      const ssh = spyOn(DockerSSHClient, "getClient");
+      const stop = spyOn(provider, "stop");
+      const retire = spyOn(provider, "stopOnSpecificNodeForReplacement");
+      let cutoverAttempted = false;
+      sandboxTransactions.implementation = async () => {
+        cutoverAttempted = true;
+        throw new Error("Unfunded replacement cannot reach cutover");
+      };
+      try {
+        const service = new ElizaSandboxService(provider);
+        const result =
+          operation === "upgrade"
+            ? await service.executeUpgrade(AGENT, ORG, TO_DIGEST, DOCKER_IMAGE, FROM_DIGEST)
+            : await service.executeDowngrade(AGENT, ORG, DOCKER_IMAGE, FROM_DIGEST);
+        expect(result).toMatchObject({
+          success: false,
+          oldNodeId: "node-old",
+          oldContainerName: "agent-old-1",
+        });
+        if (operation === "upgrade") expect(result.rolledBack).toBe(true);
+        expect(result.error).toContain("requires committed runtime funding");
+        expect(agent).toEqual(originalAgent);
+        expect(cutoverAttempted).toBe(false);
+        for (const effect of [selectNode, ssh, stop, retire]) expect(effect).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of [...spies, selectNode, ssh, stop, retire]) spy.mockRestore();
+      }
+    },
+  );
+
   test("a pending warm-claim credential fence blocks blue provisioning", async () => {
     const { ElizaSandboxService } = await import("../eliza-sandbox.ts?actual");
     const agent = {

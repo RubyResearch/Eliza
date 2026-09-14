@@ -270,16 +270,24 @@ function quote(agentId = PERSONAL_A) {
   );
 }
 
-function confirm(
+async function confirm(
   quoteId: string,
   agentId = PERSONAL_A,
   executionCtx?: unknown,
 ) {
+  const current = (await (await quote(agentId)).json()) as {
+    data?: { minimumActivationChargeUsd: number };
+  };
   const path = `/api/v1/eliza/agents/${encodeURIComponent(agentId)}/upgrade-tier/adopt-existing`;
   const init = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "adopt_existing_dedicated", quoteId }),
+    body: JSON.stringify({
+      action: "adopt_existing_dedicated",
+      quoteId,
+      minimumActivationChargeUsd:
+        current.data?.minimumActivationChargeUsd ?? 0.3,
+    }),
   };
   if (executionCtx) {
     return app.request(path, init, ENV, executionCtx as never);
@@ -648,8 +656,8 @@ describe("GET/POST adopt-existing Dedicated", () => {
       expect(quoteBody.data).toMatchObject({
         dedicatedAgentId: TARGET_A,
         startsCompute: true,
-        hourlyRateUsd: 0.01,
-        dailyRateUsd: 0.24,
+        hourlyRateUsd: 0.15,
+        dailyRateUsd: 3.6,
         action: "adopt_existing_dedicated",
       });
       expect(await targetJobs(TARGET_A)).toHaveLength(0);
@@ -1097,6 +1105,7 @@ describe("GET/POST adopt-existing Dedicated", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "activate_dedicated",
+          minimumActivationChargeUsd: 0.3,
           quoteId: "0".repeat(64),
         }),
       },

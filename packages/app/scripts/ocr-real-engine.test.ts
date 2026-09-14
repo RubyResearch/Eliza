@@ -143,12 +143,14 @@ describe("real OCR blank-vs-unreadable classification", () => {
     const auditDir = join(dir, "launcher-audit");
     const viewportDir = join(auditDir, "mobile-portrait");
     mkdirSync(viewportDir, { recursive: true });
-    copyFileSync(LAUNCHER_CAPTURE, join(viewportDir, "builtin-rolodex.png"));
+    // The archive filename records its original route, but these pixels are
+    // the launcher and must use the launcher semantic contract.
+    copyFileSync(LAUNCHER_CAPTURE, join(viewportDir, "builtin-views.png"));
     writeFileSync(
       join(auditDir, "report.json"),
       JSON.stringify([
         {
-          slug: "builtin-rolodex",
+          slug: "builtin-views",
           viewport: "mobile-portrait",
           viewType: "gui",
           verdict: "good",

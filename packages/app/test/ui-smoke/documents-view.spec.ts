@@ -11,7 +11,6 @@ import {
   seedAppStorage,
 } from "./helpers";
 import { captureScreenshotWithQualityRetry } from "./helpers/screenshot-quality";
-import { assertSharedViewHeaderContract } from "./helpers/view-header";
 
 /**
  * Visual + smoke coverage for the builtin standalone Knowledge surface at
@@ -119,13 +118,24 @@ test.describe("Knowledge/Documents view visual + smoke (desktop + mobile)", () =
       // Registered AFTER the defaults so these take precedence (Playwright runs
       // route handlers in reverse registration order). Match the list endpoint
       // exactly so the populated fixture renders.
-      await page.route("**/api/documents?**", (route) =>
-        route.fulfill({
+      await page.route("**/api/documents?**", (route) => {
+        const facet = new URL(route.request().url()).searchParams.get(
+          "knowledgeFacet",
+        );
+        const documents =
+          facet === "transcript"
+            ? DOCS_FIXTURE.documents.filter((document) => document.transcriptId)
+            : DOCS_FIXTURE.documents;
+        return route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(DOCS_FIXTURE),
-        }),
-      );
+          body: JSON.stringify({
+            ...DOCS_FIXTURE,
+            documents,
+            total: documents.length,
+          }),
+        });
+      });
       await page.route("**/api/documents", (route) =>
         route.fulfill({
           status: 200,
@@ -168,16 +178,26 @@ test.describe("Knowledge/Documents view visual + smoke (desktop + mobile)", () =
 
       await openAppPath(page, "/character/documents");
 
-      // Knowledge owns a standalone route and header outside the Character
-      // editor. Anchor both so an unrelated character shell cannot satisfy the
-      // visual probe.
       const viewRoot = page.getByTestId("documents-view");
       await expect(viewRoot).toBeVisible({ timeout: 60_000 });
-      await assertSharedViewHeaderContract(page, {
-        requireTapTarget: vp.name === "mobile",
-        within: '[data-testid="documents-view"]',
-        title: "Knowledge",
+      const uploaded = viewRoot.getByRole("button", {
+        name: "Open q3-strategy.pdf",
+        exact: true,
       });
+      await expect(uploaded).toBeVisible();
+      const facets = viewRoot.getByRole("navigation", {
+        name: "Filter knowledge by media type",
+      });
+      await facets.getByRole("button", { name: /^Transcripts/ }).click();
+      await expect(uploaded).toHaveCount(0);
+      await expect(
+        viewRoot.getByRole("button", {
+          name: "Open Standup recording",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await facets.getByRole("button", { name: /^All/ }).click();
+      await expect(uploaded).toBeVisible();
       await expect
         .poll(
           async () =>

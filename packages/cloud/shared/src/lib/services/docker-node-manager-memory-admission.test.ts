@@ -203,6 +203,15 @@ describe("parseNodeMemorySnapshot", () => {
 });
 
 describe("admitsRequiredMemory", () => {
+  test("admits one restore-sized agent and refuses a second even while the first is idle", () => {
+    const empty = parseNodeMemorySnapshot(meminfo(7745, 7300), "");
+    expect(admitsRequiredMemory(empty!, 6144).admitted).toBe(true);
+    const occupied = parseNodeMemorySnapshot(meminfo(7745, 7300), ceilings(6144));
+    expect(admitsRequiredMemory(occupied!, 6144).admitted).toBe(false);
+    const busyHost = parseNodeMemorySnapshot(meminfo(7745, 6144), "");
+    expect(admitsRequiredMemory(busyHost!, 6144).admitted).toBe(false);
+  });
+
   test("refuses the placement that actually OOM-killed the fleet", () => {
     const snapshot = parseNodeMemorySnapshot(meminfo(7745, 2058), ceilings(3072, 3072));
     const verdict = admitsRequiredMemory(snapshot!, 3072);

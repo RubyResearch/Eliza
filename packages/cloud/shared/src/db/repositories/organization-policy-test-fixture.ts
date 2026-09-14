@@ -37,4 +37,19 @@ export async function installOrganizationPolicyTestSchema(
     for (const statement of migration.split("--> statement-breakpoint"))
       if (statement.trim()) await execute(statement);
   }
+  await execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS policy_fixture_agent_identity ON agent_sandboxes(id,organization_id)",
+  );
+  for (const name of [
+    "0387_agent_compute_funding.sql",
+    "0389_agent_compute_stop_receipts.sql",
+    "0390_agent_compute_runtime_readiness.sql",
+    "0392_agent_compute_retirement_backup.sql",
+    "0393_agent_compute_activation_minimum.sql",
+  ]) {
+    const migration = await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8");
+    // The fixture's connection search_path owns all of its tables. Generated
+    // public-qualified foreign keys must resolve there too, including self references.
+    await execute(migration.replaceAll('"public".', ""));
+  }
 }

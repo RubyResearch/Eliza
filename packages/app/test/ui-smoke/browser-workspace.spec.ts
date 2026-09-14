@@ -119,13 +119,14 @@ test("browser workspace can create, navigate, switch, and close tabs", async ({
   const foldControl = browserWorkspaceView.getByTestId(
     "browser-workspace-tab-fold-control",
   );
-  await expect(goButton).toBeVisible({ timeout: 120_000 });
   await expect(foldControl).toBeVisible({ timeout: 120_000 });
   const compactToolbar = await mobileMoreButton.isVisible();
   if (compactToolbar) {
+    await expect(goButton).toBeHidden();
     await expect(newTabButton).toBeHidden();
     await expect(closeAllButton).toBeHidden();
   } else {
+    await expect(goButton).toBeVisible({ timeout: 120_000 });
     await expect(newTabButton).toBeVisible({ timeout: 120_000 });
     await expect(closeAllButton).toBeVisible({ timeout: 120_000 });
   }
@@ -241,7 +242,8 @@ test("browser workspace can create, navigate, switch, and close tabs", async ({
   await addressInput.fill("");
   await addressInput.pressSequentially("example.com");
   await expect(addressInput).toHaveValue("example.com");
-  await goButton.click();
+  if (compactToolbar) await addressInput.press("Enter");
+  else await goButton.click();
 
   // The new tab is now the active one; the fold control names it and counts 1.
   await expect(
@@ -276,7 +278,8 @@ test("browser workspace can create, navigate, switch, and close tabs", async ({
 
   await addressInput.fill("docs.elizaos.ai");
   await expect(addressInput).toHaveValue("docs.elizaos.ai");
-  await goButton.click();
+  if (compactToolbar) await addressInput.press("Enter");
+  else await goButton.click();
   await expect(addressInput).toHaveValue("https://docs.elizaos.ai/");
 
   // Shell navigation plus browser back/forward preserves the folded browser
@@ -317,6 +320,43 @@ test("browser page clears the resting chat and keeps compact mobile chrome touch
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await resetBrowserWorkspaceTabs(request);
+  // Focusing an empty composer deliberately stays collapsed. This geometry
+  // case needs a restored thread to exercise the expanded overlay.
+  const conversation = {
+    id: "browser-geometry-thread",
+    roomId: "browser-geometry-room",
+    title: "Browser review",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const threadText = "The browser review is ready to continue.";
+  await page.route("**/api/conversations", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    await route.fulfill({ json: { conversations: [conversation] } });
+  });
+  await page.route(`**/api/conversations/${conversation.id}`, async (route) => {
+    if (!["GET", "PATCH"].includes(route.request().method()))
+      return route.fallback();
+    await route.fulfill({ json: { conversation } });
+  });
+  await page.route(
+    `**/api/conversations/${conversation.id}/messages**`,
+    async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      await route.fulfill({
+        json: {
+          messages: [
+            {
+              id: "browser-review-message",
+              role: "assistant",
+              text: threadText,
+              timestamp: Date.now(),
+            },
+          ],
+        },
+      });
+    },
+  );
   await openAppPath(page, "/browser");
   const browserWorkspaceView = page.getByTestId("browser-workspace-view");
   await expect(browserWorkspaceView).toBeVisible({ timeout: 60_000 });
@@ -486,6 +526,9 @@ test("browser page clears the resting chat and keeps compact mobile chrome touch
   await composer.focus();
   const chatOverlay = page.getByTestId("chat-overlay");
   await expect(chatOverlay).toHaveAttribute("data-open", "true");
+  await expect(
+    chatOverlay.getByText(threadText, { exact: true }),
+  ).toBeVisible();
   const expandedGeometry = await page.evaluate(() => {
     const surface = document.querySelector<HTMLElement>(
       '[data-testid="browser-workspace-surface-panel"]',

@@ -94,6 +94,12 @@ export function ElizaAgentPricingBanner({
             <p className="text-2xs text-white/30 font-mono">
               {formatMonthlyEstimate(AGENT_PRICING.RUNNING_HOURLY_RATE)}
             </p>
+            <p className="text-xs text-white/72">
+              {t("cloud.containers.pricingBanner.activationMinimum", {
+                defaultValue: "{{minimum}} minimum per successful start",
+                minimum: formatUSD(AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE),
+              })}
+            </p>
           </div>
 
           {/* Idle rate */}

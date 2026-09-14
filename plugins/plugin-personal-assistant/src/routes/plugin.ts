@@ -476,6 +476,19 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   { type: "POST", path: "/api/lifeops/family-workflows/school/apply" },
   { type: "POST", path: "/api/lifeops/family-workflows/run-now" },
   { type: "POST", path: "/api/lifeops/family-workflows/export" },
+  { type: "GET", path: "/api/lifeops/family-workflows/deletion/preview" },
+  { type: "GET", path: "/api/lifeops/family-workflows/deletion" },
+  { type: "POST", path: "/api/lifeops/family-workflows/deletion" },
+  { type: "POST", path: "/api/lifeops/family-workflows/deletion/resume" },
+  {
+    type: "GET",
+    path: "/api/lifeops/family-workflows/deletion/backups/preview",
+  },
+  { type: "POST", path: "/api/lifeops/family-workflows/deletion/backups" },
+  {
+    type: "POST",
+    path: "/api/lifeops/family-workflows/deletion/backups/resume",
+  },
   { type: "GET", path: "/api/lifeops/family-workflows/email-options" },
   {
     type: "POST",

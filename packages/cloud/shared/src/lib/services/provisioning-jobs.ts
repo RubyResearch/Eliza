@@ -13,6 +13,7 @@
  * - agent_restore: Restore from backup
  */
 
+import { getDedicatedComputePriceAcceptance } from "@elizaos/cloud-sdk/browser-contracts";
 import { ElizaError } from "@elizaos/core";
 import {
   and,
@@ -81,6 +82,10 @@ import {
   isAdminCanaryImageJobData,
   isPendingAdminCanaryCutoverAudit,
 } from "./admin-canary-image";
+import {
+  executeAgentComputeLeaseJob,
+  readAgentComputeLeaseJobData,
+} from "./agent-compute-lease-jobs";
 import {
   AppCacheInvalidationRetryError,
   dispatchAppCacheInvalidationJob,
@@ -163,6 +168,12 @@ function safeErrorKind<T extends Error>(
 
 const CONTAINER_BACKED_TARGET_REQUIRED_MESSAGE =
   "Agent job requires a container-backed execution tier";
+const PRICED_AGENT_START_JOB_TYPES: readonly string[] = [
+  JOB_TYPES.AGENT_PROVISION,
+  JOB_TYPES.AGENT_RESUME,
+  JOB_TYPES.AGENT_WAKE,
+  JOB_TYPES.AGENT_RESTART,
+];
 export const CONTAINER_BACKED_TARGET_REJECTION_REASON = "agent_job_target_not_container_backed";
 
 function isContainerBackedExecutionTier(tier: AgentExecutionTier): boolean {
@@ -1984,6 +1995,15 @@ export class ProvisioningJobService {
 
     await opts.beforeInsert?.(tx, sandbox);
 
+    // Persist admission-time terms only on new jobs. Reuse and recovery must
+    // retain their original terms, never manufacture acceptance of a new price.
+    if (PRICED_AGENT_START_JOB_TYPES.includes(opts.jobType)) {
+      newJob.data = {
+        ...newJob.data,
+        admittedComputePrice: getDedicatedComputePriceAcceptance(),
+      };
+    }
+
     const [job] = await tx
       .insert(jobs)
       .values(await prepareJobInsertData(newJob))
@@ -2615,6 +2635,15 @@ export class ProvisioningJobService {
         // Do not rewrite the claimed job envelope. An executor may
         // already hold its hydrated snapshot and settlement CAS; the
         // locked intent is the monotonic authority boundary.
+        if (billingJob.status === "pending") {
+          const [immediate] = await tx
+            .update(jobs)
+            .set({ scheduled_for: now, updated_at: now })
+            .where(and(eq(jobs.id, billingJob.id), eq(jobs.status, "pending")))
+            .returning();
+          if (!immediate) throw new Error("Promoted user stop lost its pending job");
+          return immediate;
+        }
         return billingJob;
       },
       validateSandbox: validateTarget,
@@ -4779,6 +4808,9 @@ export class ProvisioningJobService {
     let identity: { agentId: string; organizationId: string };
     try {
       switch (job.type) {
+        case JOB_TYPES.AGENT_COMPUTE_LEASE:
+          identity = readAgentComputeLeaseJobData(job);
+          break;
         case JOB_TYPES.AGENT_PROVISION:
           identity = readAgentProvisionJobData(job);
           break;
@@ -5080,7 +5112,32 @@ export class ProvisioningJobService {
   }
 
   private async executeJobDispatch(job: Job): Promise<void> {
+    if (
+      PRICED_AGENT_START_JOB_TYPES.includes(job.type) &&
+      job.data.admittedComputePrice !== getDedicatedComputePriceAcceptance()
+    ) {
+      throw new RejectedAgentExecutionError(
+        "Dedicated start price is missing or changed. Review the current price and submit a new start request; no runtime action was dispatched.",
+        {
+          jobId: job.id,
+          jobType: job.type,
+          columnAgentId: job.agent_id,
+          columnOrganizationId: job.organization_id,
+          cause: "dedicated_compute_price_confirmation_required",
+        },
+      );
+    }
     switch (job.type) {
+      case JOB_TYPES.AGENT_COMPUTE_LEASE: {
+        const result = await executeAgentComputeLeaseJob(job, () =>
+          this.assertExecutionMutationLease(job),
+        );
+        await this.settleClaimedExecution(job, "completed", {
+          result,
+          completed_at: new Date(),
+        });
+        break;
+      }
       case JOB_TYPES.AGENT_PROVISION:
         await this.executeAgentProvision(job);
         break;
@@ -6745,6 +6802,11 @@ export class ProvisioningJobService {
       });
     }
     return { total, recovered, unresolved, failed };
+  }
+
+  async reconcileExpiredAgentCompute() {
+    const { reconcileExpiredAgentComputeBatch } = await import("./agent-compute-recovery");
+    return reconcileExpiredAgentComputeBatch();
   }
 
   /**

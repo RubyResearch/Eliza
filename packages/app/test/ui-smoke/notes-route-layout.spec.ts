@@ -64,18 +64,9 @@ function rectanglesOverlap(
   );
 }
 
-test("Notes uses one shell header and a readable desktop collection", async ({
-  page,
-}) => {
+test("Notes keeps the desktop collection readable", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await openNotes(page);
-
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Notes" }),
-  ).toHaveCount(1);
-  await expect(
-    page.getByRole("button", { name: "Back to launcher" }),
-  ).toHaveCount(1);
 
   const cards = page.getByRole("listitem");
   const first = await cards.nth(0).boundingBox();
