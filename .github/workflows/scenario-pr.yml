@@ -459,8 +459,9 @@ jobs:
   # (packages/app/test/ui-smoke/.pr-deny-list.json). That makes any NEW spec land
   # on the PR path by default; the only way to exclude one is to record it in the
   # deny-list with a category and a reason. The spec set is emitted by
-  # packages/app/scripts/ui-smoke-pr-specs.mjs and the wiring is enforced by
-  # packages/app/test/ui-smoke-coverage.test.ts.
+  # packages/app/scripts/ui-smoke-pr-specs.mjs. The test that enforced this
+  # wiring was removed with the other non-behavioral suites in #28109, so the
+  # deny-list contract is currently documented here rather than asserted.
   app-browser-auto-discovered:
     name: Zero-Key app browser auto-discovered specs
     needs: changes

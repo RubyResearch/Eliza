@@ -586,9 +586,6 @@ jobs:
       - name: UI dynamic view interaction coverage
         run: bun run --cwd packages/ui test -- src/App.navigate-view-wiring.test.tsx src/app-navigate-view.test.ts src/components/shell/__tests__/shell-assistant-flow.test.tsx src/components/views/DynamicViewLoader.test.tsx src/hooks/useAvailableViews.test.tsx src/hooks/useDesktopTabs.test.tsx src/state/startup-phase-hydrate.view-interact.test.ts
 
-      - name: App route + ui-smoke spec coverage gates
-        run: bun run --cwd packages/app test -- test/route-coverage.test.ts test/ui-smoke-coverage.test.ts test/view-interaction-coverage.test.ts
-
   zero-key-browser:
     name: Zero-Key app browser
     needs: changes
@@ -710,7 +707,7 @@ jobs:
         run: bun run --cwd packages/cloud/routing build
 
       - name: Electrobun window and dynamic-view coverage
-        run: bun run --cwd packages/app-core/platforms/electrobun test src/native/desktop-window.test.ts src/rpc-handlers.test.ts src/dynamic-view-rpc-schema.test.ts src/surface-windows.test.ts src/dynamic-views/host.test.ts src/application-menu.test.ts
+        run: bun run --cwd packages/app-core/platforms/electrobun test src/native/desktop-window.test.ts src/rpc-handlers.test.ts src/surface-windows.test.ts src/application-menu.test.ts
 
       - name: View management action coverage
         run: bun run --cwd plugins/plugin-app-control test -- src/actions/views-management.test.ts
