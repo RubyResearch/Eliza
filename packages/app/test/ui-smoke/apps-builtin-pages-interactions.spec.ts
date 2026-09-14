@@ -143,6 +143,12 @@ test("learning a skill opens an editable conversation draft", async ({
   await composer.fill("Help me practice Spanish conversation.");
   await expect(composer).toHaveValue("Help me practice Spanish conversation.");
   expect(sentMessages).toBe(before);
+  // The stub keeps one message list per conversation for the whole run, so
+  // fixture replies from earlier specs in this worker are already in the
+  // thread; assert the send added exactly one, not that it is the only one.
+  const thread = page.getByTestId("chat-thread");
+  const fixtureReplies = thread.getByText(/"fixture":"ui-smoke-assistant-v1"/);
+  const repliesBefore = await fixtureReplies.count();
   const submitted = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&
@@ -154,11 +160,8 @@ test("learning a skill opens an editable conversation draft", async ({
   expect((await submitted).postDataJSON()).toMatchObject({
     text: "Help me practice Spanish conversation.",
   });
-  const thread = page.getByTestId("chat-thread");
   await expect(thread).toBeVisible();
-  await expect(
-    thread.getByText(/"fixture":"ui-smoke-assistant-v1"/),
-  ).toHaveCount(1);
+  await expect(fixtureReplies).toHaveCount(repliesBefore + 1);
   expect(sentMessages).toBe(before + 1);
 });
 
