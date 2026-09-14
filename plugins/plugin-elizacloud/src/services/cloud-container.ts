@@ -208,7 +208,27 @@ export class CloudContainerService
         return;
       }
 
-      const container = await this.getContainer(containerId);
+      // Backoff for the next poll; computed once so the failure branch below
+      // re-arms on exactly the schedule a successful poll would have used.
+      const delay = Math.min(baseInterval * 2 ** Math.min(attempt - 1, 3), maxInterval);
+
+      let container: CloudContainer;
+      try {
+        container = await this.getContainer(containerId);
+      } catch (error) {
+        // error-policy:J7 diagnostics must not kill the loop — a transient API
+        // failure counts as one attempt and the chain re-arms; the maxAttempts
+        // budget above still terminates it. Unhandled, this rejection escaped
+        // the setTimeout callback and froze the container at its last observed
+        // status for the life of the process.
+        logger.warn(
+          `[CloudContainer] Poll #${attempt} for ${containerId} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        tracked.pollingTimer = setTimeout(poll, delay);
+        return;
+      }
       const status = container.status;
 
       logger.debug(`[CloudContainer] Poll #${attempt} for ${containerId}: status=${status}`);
@@ -230,7 +250,6 @@ export class CloudContainerService
       }
 
       // Schedule next poll with exponential backoff
-      const delay = Math.min(baseInterval * 2 ** Math.min(attempt - 1, 3), maxInterval);
       tracked.pollingTimer = setTimeout(poll, delay);
     };
 
