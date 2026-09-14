@@ -10,7 +10,7 @@
  * POST /api/eliza-app/user/phone
  */
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import { failureResponse } from "@/lib/api/cloud-worker-errors";
 import {
@@ -163,11 +163,35 @@ async function handleLinkPhone(request: Request): Promise<Response> {
 }
 
 const honoRouter = new Hono<AppEnv>();
-honoRouter.post("/", rateLimit(RateLimitPresets.STANDARD), async (c) => {
-  try {
-    return await handleLinkPhone(c.req.raw);
-  } catch (error) {
-    return failureResponse(c, error);
+
+// `handleLinkPhone` already answers a missing Authorization header with this
+// exact 401, so running the shared limiter first spends a Redis round trip on
+// a request that can only fail. The global per-IP backstop in bootstrap-app
+// still bounds credential-less floods; this only removes the distributed hop.
+const rejectMissingAuthHeader: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (!c.req.header("Authorization")) {
+    return c.json(
+      {
+        success: false,
+        error: "Authorization header required",
+        code: "UNAUTHORIZED",
+      },
+      401,
+    );
   }
-});
+  await next();
+};
+
+honoRouter.post(
+  "/",
+  rejectMissingAuthHeader,
+  rateLimit(RateLimitPresets.STANDARD),
+  async (c) => {
+    try {
+      return await handleLinkPhone(c.req.raw);
+    } catch (error) {
+      return failureResponse(c, error);
+    }
+  },
+);
 export default honoRouter;
