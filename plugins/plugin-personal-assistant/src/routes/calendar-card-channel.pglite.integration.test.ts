@@ -5,6 +5,8 @@
  */
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { resolveKnowledgeGraphService } from "@elizaos/agent";
+import { AuthStore } from "@elizaos/app-core/services/auth-store";
 import type { Plugin } from "@elizaos/core";
 import { expect, it } from "vitest";
 import { tryHandleRuntimePluginRoute } from "../../../../packages/agent/src/api/runtime-plugin-routes.ts";
@@ -13,6 +15,7 @@ import { createLifeOpsTestRuntime } from "../../test/helpers/runtime.js";
 import { executeApprovedRequest } from "../actions/resolve-request.js";
 import { createApprovalQueue } from "../lifeops/approval-queue.js";
 import { verifyCalendarCardApproval } from "../lifeops/calendar-card.js";
+import { bindMachineAuthIdentityToEntity } from "./authenticated-entity-principal.js";
 
 const storage: Plugin = {
   name: "calendar-channel-private-storage",
@@ -51,6 +54,36 @@ it("queues the selected channel and rejects transport or recipient changes befor
     if (!address || typeof address === "string")
       throw new Error("Missing HTTP address");
     const queue = createApprovalQueue(runtime, { agentId: runtime.agentId });
+    const graph = resolveKnowledgeGraphService(runtime);
+    if (!graph) throw new Error("Knowledge graph did not initialize");
+    const guest = await graph.getEntityStore(runtime.agentId).upsert({
+      type: "person",
+      preferredName: "Synthetic calendar recipient",
+      identities: [],
+      tags: [],
+      state: {},
+      visibility: "owner_only",
+    });
+    const db = (
+      runtime as typeof runtime & {
+        adapter: { db: ConstructorParameters<typeof AuthStore>[0] };
+      }
+    ).adapter.db;
+    const identityId = crypto.randomUUID();
+    await new AuthStore(db).createIdentity({
+      id: identityId,
+      kind: "machine",
+      displayName: "Synthetic calendar guest",
+      createdAt: Date.now(),
+      passwordHash: null,
+      cloudUserId: null,
+    });
+    await bindMachineAuthIdentityToEntity({
+      runtime,
+      entityId: guest.entityId,
+      authIdentityId: identityId,
+    });
+
     for (const channel of ["imessage", "telegram", "discord"] as const) {
       const response = await fetch(
         `http://127.0.0.1:${address.port}/api/lifeops/calendar/cards`,
@@ -65,7 +98,8 @@ it("queues the selected channel and rejects transport or recipient changes befor
             date: "2026-09-15",
             timeZone: "America/New_York",
             privacyMode: "times_only",
-            recipient: `self-${channel}`,
+            recipient: `guest-${channel}`,
+            recipientEntityId: guest.entityId,
             events: [],
             ttlMs: 60_000,
           }),
@@ -82,6 +116,25 @@ it("queues the selected channel and rejects transport or recipient changes befor
       if (request?.payload.action !== "send_message")
         throw new Error("Missing queued card");
       expect(request.channel).toBe(channel);
+      expect(request.subjectUserId).not.toBe(guest.entityId);
+      expect(request.payload.calendarCard).toMatchObject({
+        version: 3,
+        ownerEntityId: request.subjectUserId,
+        recipientEntityId: guest.entityId,
+      });
+      await expect(
+        queue.approve(request.id, guest.entityId, {
+          resolvedBy: guest.entityId,
+          resolutionReason: "guest cannot approve owner sends",
+        }),
+      ).rejects.toThrow();
+      const wrongOwner = await executeApprovedRequest({
+        runtime,
+        queue,
+        request: { ...request, subjectUserId: guest.entityId },
+      });
+      expect(wrongOwner.success).toBe(false);
+      expect(wrongOwner.data?.error).toBe("CALENDAR_CARD_IDENTITY_MISMATCH");
       const link = request.payload.body.match(/https?:\/\/\S+/)?.[0];
       if (!link) throw new Error("Missing private card link");
       expect(new URL(link).origin).toBe(publicOrigin);
@@ -111,6 +164,11 @@ it("queues the selected channel and rejects transport or recipient changes befor
       const retained = await queue.byId(request.id, request.subjectUserId);
       expect(retained?.state).toBe("pending");
       expect(retained?.execution).toBeNull();
+      const approved = await queue.approve(request.id, request.subjectUserId, {
+        resolvedBy: request.subjectUserId,
+        resolutionReason: "Owner reviewed synthetic guest card",
+      });
+      expect(approved.state).toBe("approved");
     }
     const before = await queue.list({
       subjectUserId: null,

@@ -1314,6 +1314,7 @@ export async function handleLifeOpsRoutes(
       );
     }
     const payload = calendarCardApprovalPayload({
+      ownerEntityId: authenticatedEntityId,
       channel: cardRequest.channel,
       recipient: cardRequest.recipient,
       recipientEntityId,
@@ -1325,12 +1326,12 @@ export async function handleLifeOpsRoutes(
     try {
       approval = await queue.enqueue({
         requestedBy: "OWNER_CALENDAR_CARD",
-        subjectUserId: recipientEntityId,
+        subjectUserId: authenticatedEntityId,
         action: "send_message",
         payload,
         channel: cardRequest.channel,
         reason: `Send the private ${cardRequest.privacyMode} calendar card for ${cardRequest.date}.`,
-        idempotencyKey: `calendar-card:v2:${cardRequest.channel}:${composition.envelopeSha256}`,
+        idempotencyKey: `calendar-card:v3:${authenticatedEntityId}:${cardRequest.channel}:${composition.envelopeSha256}`,
         expiresAt: new Date(Date.now() + ttlMs),
       });
       await queue.surfaceEnqueuedApproval(approval);

@@ -70,6 +70,13 @@ export type CalendarCardApprovalCorrelation = CalendarCardApprovalContent &
         readonly recipient: string;
         readonly deliverySha256: string;
       }
+    | {
+        readonly version: 3;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly ownerEntityId: string;
+        readonly deliverySha256: string;
+      }
   );
 
 export type ApprovalRequestState =

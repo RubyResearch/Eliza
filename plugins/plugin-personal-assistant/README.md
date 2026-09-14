@@ -45,8 +45,9 @@ bun run --cwd plugins/plugin-personal-assistant test:connections:e2e
 Telegram targets are chat identifiers and Discord targets are channel
 identifiers. Creation queues an owner review and does not send. The approval
 binds its exact recipient, channel, calendar content, and private card identity;
-changing any of them requires a new review. Existing version-one approvals
-remain iMessage-only.
+changing any of them requires a new review. Version-three reviews bind the approving owner separately from the intended
+reader. Legacy version-one approvals remain iMessage-only; version-two reviews
+retain their original same-owner/recipient contract.
 
 Set `ELIZA_EXTERNAL_BASE_URL` to the agent's public HTTPS origin before issuing
 cards. Missing, non-HTTPS, private-network, or path-bearing addresses stop

@@ -147,7 +147,7 @@ describe("daily calendar card composition", () => {
         })?.matches,
       ).toBe(false);
       const correlation = payload.calendarCard;
-      if (correlation?.version !== 2)
+      if (correlation?.version !== 3)
         throw new Error("Missing bound card review");
       expect(
         verifyCalendarCardApproval({
@@ -162,6 +162,12 @@ describe("daily calendar card composition", () => {
         verifyCalendarCardApproval({
           ...payload,
           calendarCard: { ...correlation, recipientEntityId: "another-person" },
+        })?.matches,
+      ).toBe(false);
+      expect(
+        verifyCalendarCardApproval({
+          ...payload,
+          calendarCard: { ...correlation, ownerEntityId: "another-owner" },
         })?.matches,
       ).toBe(false);
     },

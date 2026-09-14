@@ -1135,10 +1135,13 @@ export async function executeApprovedRequest(args: {
   if (calendarCard) {
     if (
       args.request.channel !==
-        (calendarCard.correlation.version === 2
+        (calendarCard.correlation.version !== 1
           ? calendarCard.correlation.channel
           : "imessage") ||
-      args.request.subjectUserId !== calendarCard.correlation.recipientEntityId
+      args.request.subjectUserId !==
+        (calendarCard.correlation.version === 3
+          ? calendarCard.correlation.ownerEntityId
+          : calendarCard.correlation.recipientEntityId)
     ) {
       return preflightFailureResult(
         args.request,

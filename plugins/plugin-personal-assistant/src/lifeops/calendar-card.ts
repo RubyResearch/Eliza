@@ -444,12 +444,14 @@ export function composeDailyCalendarCard(args: {
 
 export function calendarCardApprovalPayload(args: {
   channel?: CalendarCardChannel;
+  ownerEntityId?: string;
   recipient: string;
   recipientEntityId: string;
   cardId: string;
   composition: CalendarCardComposition;
 }): Extract<ApprovalPayload, { action: "send_message" }> {
   const channel = args.channel ?? "imessage";
+  const ownerEntityId = args.ownerEntityId ?? args.recipientEntityId;
   return {
     action: "send_message",
     recipient: args.recipient,
@@ -457,10 +459,12 @@ export function calendarCardApprovalPayload(args: {
     replyToMessageId: null,
     calendarCard: {
       kind: "calendar_card",
-      version: 2,
+      version: 3,
+      ownerEntityId,
       channel,
       recipient: args.recipient,
-      deliverySha256: calendarCardDeliverySha256({
+      deliverySha256: calendarCardOwnerDeliverySha256({
+        ownerEntityId,
         channel,
         recipient: args.recipient,
         recipientEntityId: args.recipientEntityId,
@@ -489,6 +493,17 @@ function calendarCardDeliverySha256(input: {
   return sha256(stableStringify({ version: 2, ...input }));
 }
 
+function calendarCardOwnerDeliverySha256(input: {
+  ownerEntityId: string;
+  channel: CalendarCardChannel;
+  recipient: string;
+  recipientEntityId: string;
+  cardId: string;
+  envelopeSha256: string;
+}): string {
+  return sha256(stableStringify({ version: 3, ...input }));
+}
+
 export function verifyCalendarCardApproval(payload: ApprovalPayload): {
   correlation: CalendarCardApprovalCorrelation;
   actualTextSha256: string;
@@ -510,6 +525,19 @@ export function verifyCalendarCardApproval(payload: ApprovalPayload): {
       equalDigest(
         payload.calendarCard.deliverySha256,
         calendarCardDeliverySha256({
+          channel: payload.calendarCard.channel,
+          recipient: payload.recipient,
+          recipientEntityId: payload.calendarCard.recipientEntityId,
+          cardId: payload.calendarCard.cardId,
+          envelopeSha256: actualEnvelopeSha256,
+        }),
+      )) ||
+    (payload.calendarCard.version === 3 &&
+      payload.recipient === payload.calendarCard.recipient &&
+      equalDigest(
+        payload.calendarCard.deliverySha256,
+        calendarCardOwnerDeliverySha256({
+          ownerEntityId: payload.calendarCard.ownerEntityId,
           channel: payload.calendarCard.channel,
           recipient: payload.recipient,
           recipientEntityId: payload.calendarCard.recipientEntityId,
