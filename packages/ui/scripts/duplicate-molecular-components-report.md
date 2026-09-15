@@ -1,6 +1,6 @@
 # Molecular component duplicate inventory
 
-Scanned 928 maintained React files. 109 exported compositions have a recognized molecular role and at least two atomic dependencies.
+Scanned 929 maintained React files. 110 exported compositions have a recognized molecular role and at least two atomic dependencies.
 
 Clusters share both a role and an atomic dependency signature. Detection creates a review queue; this committed report contains only final dispositions based on product behavior, state ownership, and responsive layout.
 
@@ -20,10 +20,10 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 
 | Role | Atomic dependencies | Components | Decision |
 | --- | --- | ---: | --- |
+| form | button, input | 4 | distinct-domain-compositions |
 | row | button, card | 4 | distinct-domain-compositions |
 | dialog | button, dialog | 3 | distinct-domain-compositions |
 | dialog | button, dialog, input | 3 | distinct-domain-compositions |
-| form | button, input | 3 | distinct-domain-compositions |
 | form | button, input, textarea | 3 | distinct-domain-compositions |
 | list | badge, button, card | 3 | distinct-domain-compositions |
 | panel | button, card, input | 3 | distinct-domain-compositions |
@@ -34,6 +34,15 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 | row | button, card, statusDot | 2 | distinct-domain-compositions |
 
 ## Reviewed clusters
+
+### form: button + input
+
+- `TriggerForm` in `packages/ui/src/components/pages/TriggerForm.tsx:231`
+- `TagEditor` in `packages/ui/src/components/ui/tag-editor.tsx:29`
+- `LoginForm` in `packages/ui/src/login/components/LoginForm.tsx:180`
+- `MonthlyScheduleEditor` in `plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx:8`
+- Fingerprint: `sha256:dabb8a0a48c8ffa8aa2ca60e407ccb9a3260d7951005a8b4824602a47d885519`
+- Decision: **distinct-domain-compositions**. Workflow-trigger configuration, tag editing, login and monthly family timing share canonical Button and Input primitives. Login owns credential challenges and session handoff; tag editing emits string lists; TriggerForm owns workflow definitions, execution history and templates. MonthlyScheduleEditor edits the existing family ScheduledTask through its owner adapter, preserves timezone and lifecycle state, and focuses save failures. These forms have separate domain contracts.
 
 ### row: button + card
 
@@ -59,14 +68,6 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 - `PromptDialog` in `packages/ui/src/components/ui/confirm-dialog.tsx:95`
 - Fingerprint: `sha256:baf8c850cab849f7ceb04e8ad6ff718d448b16337368fe64e9786a51414a8fa5`
 - Decision: **distinct-domain-compositions**. Command persistence, conversation renaming, and generic prompting have different validation, pending, error, and result contracts. Their stable shared behavior already belongs to Dialog, Input, and Button.
-
-### form: button + input
-
-- `TriggerForm` in `packages/ui/src/components/pages/TriggerForm.tsx:231`
-- `TagEditor` in `packages/ui/src/components/ui/tag-editor.tsx:29`
-- `LoginForm` in `packages/ui/src/login/components/LoginForm.tsx:180`
-- Fingerprint: `sha256:fcf873875a506f36121cec3f220e955971468c53d28e938874b7b2890cdeccf6`
-- Decision: **distinct-domain-compositions**. Trigger configuration, tag editing and login share generic controls but not a domain lifecycle. Login performs provider discovery, credential challenges and session handoff; trigger configuration edits scheduling state; tag editing emits a list of strings. Each composes the canonical Button and Input primitives.
 
 ### form: button + input + textarea
 

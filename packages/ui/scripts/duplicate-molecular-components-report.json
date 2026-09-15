@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "sourceAtomicSchemaVersion": 1,
-  "scannedFiles": 928,
+  "scannedFiles": 929,
   "canonicalContracts": [
     {
       "id": "auth-result-shell",
@@ -108,8 +108,126 @@
       "maintainedReferences": 2
     }
   ],
-  "eligibleComponents": 109,
+  "eligibleComponents": 110,
   "clusters": [
+    {
+      "archetype": "form",
+      "atomicDependencies": [
+        "button",
+        "input"
+      ],
+      "entries": [
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/components/pages/TriggerForm.tsx",
+          "line": 231,
+          "name": "TriggerForm",
+          "renderedTags": [
+            "AgentSelectField",
+            "Button",
+            "CronInputSection",
+            "DurationValueInput",
+            "EventInputSection",
+            "FieldLabel",
+            "FieldSwitch",
+            "FormSelect",
+            "FormSelectItem",
+            "Input",
+            "IntervalHostWarningBanner",
+            "PagePanel",
+            "PagePanel.Notice",
+            "SchedulePreview",
+            "ScheduledAtInput",
+            "TriggerKindSection",
+            "TriggerRunHistory",
+            "div",
+            "h2"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/components/ui/tag-editor.tsx",
+          "line": 29,
+          "name": "TagEditor",
+          "renderedTags": [
+            "Button",
+            "Input",
+            "Label",
+            "X",
+            "div",
+            "span"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/login/components/LoginForm.tsx",
+          "line": 180,
+          "name": "LoginForm",
+          "renderedTags": [
+            "Button",
+            "DiscordIcon",
+            "EVMPanel",
+            "EmailIcon",
+            "EthereumIcon",
+            "FarcasterIcon",
+            "GitHubIcon",
+            "GoogleIcon",
+            "Input",
+            "PasskeyIcon",
+            "SolanaPanel",
+            "TelegramIcon",
+            "XIcon",
+            "code",
+            "div",
+            "h2",
+            "p",
+            "span",
+            "strong"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx",
+          "line": 8,
+          "name": "MonthlyScheduleEditor",
+          "renderedTags": [
+            "Button",
+            "Input",
+            "div",
+            "fieldset",
+            "form",
+            "label",
+            "p"
+          ],
+          "archetype": "form"
+        }
+      ],
+      "signature": "form:button+input",
+      "disposition": "distinct-domain-compositions",
+      "rationale": "Workflow-trigger configuration, tag editing, login and monthly family timing share canonical Button and Input primitives. Login owns credential challenges and session handoff; tag editing emits string lists; TriggerForm owns workflow definitions, execution history and templates. MonthlyScheduleEditor edits the existing family ScheduledTask through its owner adapter, preserves timezone and lifecycle state, and focuses save failures. These forms have separate domain contracts.",
+      "memberComponentIds": [
+        "packages/ui/src/components/pages/TriggerForm.tsx:TriggerForm",
+        "packages/ui/src/components/ui/tag-editor.tsx:TagEditor",
+        "packages/ui/src/login/components/LoginForm.tsx:LoginForm",
+        "plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx:MonthlyScheduleEditor"
+      ],
+      "semanticFingerprint": "sha256:dabb8a0a48c8ffa8aa2ca60e407ccb9a3260d7951005a8b4824602a47d885519"
+    },
     {
       "archetype": "row",
       "atomicDependencies": [
@@ -381,104 +499,6 @@
         "packages/ui/src/components/ui/confirm-dialog.tsx:PromptDialog"
       ],
       "semanticFingerprint": "sha256:baf8c850cab849f7ceb04e8ad6ff718d448b16337368fe64e9786a51414a8fa5"
-    },
-    {
-      "archetype": "form",
-      "atomicDependencies": [
-        "button",
-        "input"
-      ],
-      "entries": [
-        {
-          "atomicDependencies": [
-            "button",
-            "input"
-          ],
-          "file": "packages/ui/src/components/pages/TriggerForm.tsx",
-          "line": 231,
-          "name": "TriggerForm",
-          "renderedTags": [
-            "AgentSelectField",
-            "Button",
-            "CronInputSection",
-            "DurationValueInput",
-            "EventInputSection",
-            "FieldLabel",
-            "FieldSwitch",
-            "FormSelect",
-            "FormSelectItem",
-            "Input",
-            "IntervalHostWarningBanner",
-            "PagePanel",
-            "PagePanel.Notice",
-            "SchedulePreview",
-            "ScheduledAtInput",
-            "TriggerKindSection",
-            "TriggerRunHistory",
-            "div",
-            "h2"
-          ],
-          "archetype": "form"
-        },
-        {
-          "atomicDependencies": [
-            "button",
-            "input"
-          ],
-          "file": "packages/ui/src/components/ui/tag-editor.tsx",
-          "line": 29,
-          "name": "TagEditor",
-          "renderedTags": [
-            "Button",
-            "Input",
-            "Label",
-            "X",
-            "div",
-            "span"
-          ],
-          "archetype": "form"
-        },
-        {
-          "atomicDependencies": [
-            "button",
-            "input"
-          ],
-          "file": "packages/ui/src/login/components/LoginForm.tsx",
-          "line": 180,
-          "name": "LoginForm",
-          "renderedTags": [
-            "Button",
-            "DiscordIcon",
-            "EVMPanel",
-            "EmailIcon",
-            "EthereumIcon",
-            "FarcasterIcon",
-            "GitHubIcon",
-            "GoogleIcon",
-            "Input",
-            "PasskeyIcon",
-            "SolanaPanel",
-            "TelegramIcon",
-            "XIcon",
-            "code",
-            "div",
-            "h2",
-            "p",
-            "span",
-            "strong"
-          ],
-          "archetype": "form"
-        }
-      ],
-      "signature": "form:button+input",
-      "disposition": "distinct-domain-compositions",
-      "rationale": "Trigger configuration, tag editing and login share generic controls but not a domain lifecycle. Login performs provider discovery, credential challenges and session handoff; trigger configuration edits scheduling state; tag editing emits a list of strings. Each composes the canonical Button and Input primitives.",
-      "memberComponentIds": [
-        "packages/ui/src/components/pages/TriggerForm.tsx:TriggerForm",
-        "packages/ui/src/components/ui/tag-editor.tsx:TagEditor",
-        "packages/ui/src/login/components/LoginForm.tsx:LoginForm"
-      ],
-      "semanticFingerprint": "sha256:fcf873875a506f36121cec3f220e955971468c53d28e938874b7b2890cdeccf6"
     },
     {
       "archetype": "form",
@@ -1164,7 +1184,7 @@
   ],
   "summary": {
     "clusterCount": 12,
-    "clusteredComponents": 33,
+    "clusteredComponents": 34,
     "largestCluster": 4
   }
 }

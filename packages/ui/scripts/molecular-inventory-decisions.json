@@ -81,13 +81,14 @@
     },
     "form:button+input": {
       "disposition": "distinct-domain-compositions",
-      "rationale": "Trigger configuration, tag editing and login share generic controls but not a domain lifecycle. Login performs provider discovery, credential challenges and session handoff; trigger configuration edits scheduling state; tag editing emits a list of strings. Each composes the canonical Button and Input primitives.",
+      "rationale": "Workflow-trigger configuration, tag editing, login and monthly family timing share canonical Button and Input primitives. Login owns credential challenges and session handoff; tag editing emits string lists; TriggerForm owns workflow definitions, execution history and templates. MonthlyScheduleEditor edits the existing family ScheduledTask through its owner adapter, preserves timezone and lifecycle state, and focuses save failures. These forms have separate domain contracts.",
       "memberComponentIds": [
         "packages/ui/src/components/pages/TriggerForm.tsx:TriggerForm",
         "packages/ui/src/components/ui/tag-editor.tsx:TagEditor",
-        "packages/ui/src/login/components/LoginForm.tsx:LoginForm"
+        "packages/ui/src/login/components/LoginForm.tsx:LoginForm",
+        "plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx:MonthlyScheduleEditor"
       ],
-      "semanticFingerprint": "sha256:fcf873875a506f36121cec3f220e955971468c53d28e938874b7b2890cdeccf6"
+      "semanticFingerprint": "sha256:dabb8a0a48c8ffa8aa2ca60e407ccb9a3260d7951005a8b4824602a47d885519"
     },
     "panel:button+input": {
       "disposition": "distinct-domain-compositions",
