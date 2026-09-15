@@ -31,6 +31,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { CloudCredentials, DeviceAuthResponse, DevicePlatform } from "../types/cloud";
 import { DEFAULT_CLOUD_CONFIG } from "../types/cloud";
 import { CloudApiClient, CloudApiError } from "../utils/cloud-api";
+import { getSetting, isTruthyCloudFlag } from "../utils/config";
 import type { CloudBootstrapService } from "./cloud-bootstrap";
 
 /** SHA-256 hash of hostname + platform + arch + cpu + memory. */
@@ -559,9 +560,10 @@ export class CloudAuthService extends Service {
       return;
     }
 
-    // Device-based auto-signup when explicitly enabled
-    const enabled = this.runtime.getSetting("ELIZAOS_CLOUD_ENABLED");
-    if (enabled === "true" || enabled === "1") {
+    // Device-based auto-signup when explicitly enabled. The runtime hands the
+    // flag back as boolean `true` for "true", so it is read through the
+    // stringifying helper rather than compared against string literals.
+    if (isTruthyCloudFlag(getSetting(this.runtime, "ELIZAOS_CLOUD_ENABLED"))) {
       try {
         await this.authenticateWithDevice();
       } catch (err) {

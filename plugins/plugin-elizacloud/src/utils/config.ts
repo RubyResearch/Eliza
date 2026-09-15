@@ -213,9 +213,11 @@ export function getAppId(runtime: IAgentRuntime): string | undefined {
  * Truthiness for host-written cloud flags: "true" or "1" (trimmed,
  * case-insensitive), mirroring how core `isCloudConnected` reads
  * `ELIZAOS_CLOUD_ENABLED`. Runtime boolean `true` arrives here as the
- * string "true" (getSetting/resolveSetting coerce to string).
+ * string "true" (getSetting/resolveSetting coerce to string), so callers
+ * must read the flag through {@link getSetting} rather than the raw
+ * `runtime.getSetting`, which returns the coerced boolean.
  */
-function isTruthyCloudFlag(value: string | undefined): boolean {
+export function isTruthyCloudFlag(value: string | undefined): boolean {
   if (!value) return false;
   const lower = value.trim().toLowerCase();
   return lower === "true" || lower === "1";
