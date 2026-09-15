@@ -1,5 +1,7 @@
-// Exercises cloud API v1 coding containers route.test behavior with deterministic Worker route fixtures.
+/** Exercises cloud API v1 coding containers route.test behavior with deterministic Worker route fixtures. */
+
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { AGENT_PRICING } from "@elizaos/cloud-sdk/browser-contracts";
 
 const requireUserOrApiKeyWithOrg = mock(async () => ({
   id: "user-1",
@@ -245,7 +247,7 @@ describe("coding containers route", () => {
       code: "insufficient_credits",
       error: "Insufficient credits",
       currentBalance: 0,
-      requiredBalance: 0.1,
+      requiredBalance: AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
     });
     expect(checkAgentCreditGate).toHaveBeenCalledWith("org-1");
     // The gate must short-circuit BEFORE any paid compute is provisioned.

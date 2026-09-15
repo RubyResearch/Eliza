@@ -450,7 +450,9 @@ describe("collectTelegramDesktopExport", () => {
 
       const hardlinkDir = await makeTempDir();
       const hardlink = path.join(hardlinkDir, "result.json");
-      await fs.link(FIXTURE_PATH, hardlink);
+      // Both inode names must live on the temporary filesystem, which may be
+      // a different mount from the checkout.
+      await fs.link(await copyFixture(), hardlink);
       await expect(collectFixture(hardlink, outDir)).rejects.toMatchObject({
         code: "TELEGRAM_EXPORT_BAD_PATH",
       });

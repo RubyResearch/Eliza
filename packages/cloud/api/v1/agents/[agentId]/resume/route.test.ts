@@ -1,5 +1,7 @@
-// Exercises cloud API v1 agents agentid resume route.test behavior with deterministic Worker route fixtures.
+/** Exercises cloud API v1 agents agentid resume route.test behavior with deterministic Worker route fixtures. */
+
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { AGENT_PRICING } from "@elizaos/cloud-sdk/browser-contracts";
 import { Hono } from "hono";
 
 const requireServiceKey = mock(async () => ({
@@ -164,7 +166,7 @@ describe("service agent resume route", () => {
       success: false,
       code: "insufficient_credits",
       error: "Insufficient credits",
-      requiredBalance: 0.1,
+      requiredBalance: AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
       currentBalance: 0,
     });
     expect(checkAgentCreditGate).toHaveBeenCalledWith("agent-org");

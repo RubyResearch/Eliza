@@ -13,6 +13,7 @@
 import crypto from "node:crypto";
 import { type BigIntStats, constants, type Dirent } from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { AgentRuntime, IAgentRuntime } from "@elizaos/core";
 import { ElizaError, logger, timeInferenceSpan } from "@elizaos/core";
@@ -1977,6 +1978,68 @@ async function pruneExtraFiles(
   await visit(root);
 }
 
+/** Derives empty PostgreSQL directories from this PGlite version for legacy file-only vault archives. */
+async function prepareVaultRestoreDirectories(
+  vault: AgentBackupFileSet,
+): Promise<string[]> {
+  const version = vault.files.find(
+    (file) => file.path === `${VAULT_PGLITE_DIR_NAME}/PG_VERSION`,
+  );
+  if (!version) return [];
+  const { PGlite } = await import("@electric-sql/pglite");
+  const template = await fs.mkdtemp(
+    path.join(os.tmpdir(), "eliza-vault-restore-layout-"),
+  );
+  try {
+    const database = await PGlite.create(template);
+    await database.close();
+    if (
+      !(await fs.readFile(path.join(template, "PG_VERSION"))).equals(
+        verifyFileEntry(version),
+      )
+    ) {
+      throw new ElizaError(
+        "[AgentBackup] Vault database version does not match the installed PGlite version",
+        {
+          code: "AGENT_BACKUP_VAULT_VERSION_MISMATCH",
+        },
+      );
+    }
+    const directories = [VAULT_PGLITE_DIR_NAME];
+    const visit = async (directory: string): Promise<void> => {
+      for (const entry of await fs.readdir(directory, {
+        withFileTypes: true,
+      })) {
+        if (!entry.isDirectory()) continue;
+        const absolute = path.join(directory, entry.name);
+        const relative = normalizeRelativePath(
+          path.relative(template, absolute),
+        );
+        directories.push(`${VAULT_PGLITE_DIR_NAME}/${relative}`);
+        await visit(absolute);
+      }
+    };
+    await visit(template);
+    const files = new Set(
+      vault.files.map((file) => normalizeRelativePath(file.path)),
+    );
+    for (const directory of directories) {
+      if (files.has(directory)) {
+        throw new ElizaError(
+          "[AgentBackup] Vault archive replaces a required database directory with a file",
+          {
+            code: "AGENT_BACKUP_VAULT_DIRECTORY_CONFLICT",
+            context: { directory },
+          },
+        );
+      }
+    }
+    return directories.sort();
+  } finally {
+    await fs.rm(template, { recursive: true, force: true });
+  }
+}
+
 async function restoreFileSet(
   root: string,
   fileSet: AgentBackupFileSet,
@@ -1984,6 +2047,7 @@ async function restoreFileSet(
     replaceRoot?: boolean;
     include?: (relativePath: string) => boolean;
     pruneExtra?: (relativePath: string) => boolean;
+    directories?: readonly string[];
   } = {},
 ): Promise<void> {
   verifyFileSet(fileSet);
@@ -2002,6 +2066,13 @@ async function restoreFileSet(
   );
   if (options.pruneExtra) {
     await pruneExtraFiles(resolvedRoot, options.pruneExtra, keepPaths);
+  }
+  for (const directory of options.directories ?? []) {
+    const relative = normalizeRelativePath(directory);
+    await fs.mkdir(path.join(resolvedRoot, relative), {
+      recursive: true,
+      mode: 0o700,
+    });
   }
   for (const entry of filesToRestore) {
     const relative = normalizeRelativePath(entry.path);
@@ -2244,6 +2315,11 @@ async function restoreAuthorizedAgentSnapshot(
   if (manifest.components.character.configFile) {
     verifyFileEntry(manifest.components.character.configFile);
   }
+  // A file-only archive omits empty database directories. Resolve and validate
+  // their layout before shutting down the runtime or replacing any data.
+  const vaultDirectories = await prepareVaultRestoreDirectories(
+    manifest.components.vault,
+  );
   let pgliteDirForStateFiles: string | null = null;
   if (database.kind === "postgres-rows") {
     const postgresUrl = hasPostgresUrl(runtime);
@@ -2317,6 +2393,7 @@ async function restoreAuthorizedAgentSnapshot(
   );
   await restoreFileSet(stateDir, manifest.components.vault, {
     pruneExtra: vaultFileInclude,
+    directories: vaultDirectories,
   });
   await restoreFileSet(stateDir, manifest.components.stateFiles, {
     pruneExtra: makeStateFileInclude(stateDir, pgliteDirForStateFiles),

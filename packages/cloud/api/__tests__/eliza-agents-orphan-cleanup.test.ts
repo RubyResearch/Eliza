@@ -1,5 +1,10 @@
-// Exercises cloud API agent orphan deletion behavior with deterministic Worker route fixtures.
+/** Exercises cloud API agent orphan deletion behavior with deterministic Worker route fixtures. */
+
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  DEDICATED_COMPUTE_PRICE_HEADER,
+  getDedicatedComputePriceAcceptance,
+} from "@elizaos/cloud-sdk/browser-contracts";
 import {
   AgentImageNotAllowedError,
   AgentQuotaExceededError,
@@ -138,6 +143,7 @@ function postAgent() {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        [DEDICATED_COMPUTE_PRICE_HEADER]: getDedicatedComputePriceAcceptance(),
         "X-API-Key": "test-key",
       },
       body: JSON.stringify({

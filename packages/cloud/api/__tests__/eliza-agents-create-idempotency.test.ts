@@ -13,6 +13,11 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  AGENT_PRICING,
+  DEDICATED_COMPUTE_PRICE_HEADER,
+  getDedicatedComputePriceAcceptance,
+} from "@elizaos/cloud-sdk/browser-contracts";
 import { Hono } from "hono";
 
 const requireUserOrApiKeyWithOrg = mock(async () => ({
@@ -151,11 +156,17 @@ function pendingAgent() {
   };
 }
 
-async function postCreate(body: unknown) {
+async function postCreate(
+  body: unknown,
+  priceAcceptance: string | null = getDedicatedComputePriceAcceptance(),
+) {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (priceAcceptance !== null)
+    headers.set(DEDICATED_COMPUTE_PRICE_HEADER, priceAcceptance);
   return app.fetch(
     new Request("https://api.example.test/api/v1/eliza/agents", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body),
     }),
   );
@@ -176,6 +187,22 @@ describe("POST /api/v1/eliza/agents — reuse idempotency", () => {
     loggerInfo.mockClear();
     loggerError.mockClear();
   });
+
+  test.each([null, "expired-price-acceptance"])(
+    "rejects missing or stale price acceptance before provisioning: %s",
+    async (priceAcceptance) => {
+      const response = await postCreate(
+        { agentName: "alpha", dockerImage: "ghcr.io/example/agent:latest" },
+        priceAcceptance,
+      );
+      expect(response.status).toBe(428);
+      expect(createAgent).not.toHaveBeenCalled();
+      expect(checkAgentCreditGate).not.toHaveBeenCalled();
+      expect(enqueueAgentProvision).not.toHaveBeenCalled();
+      expect(triggerImmediate).not.toHaveBeenCalled();
+      expect(prepareManagedElizaEnvironment).not.toHaveBeenCalled();
+    },
+  );
 
   test("(d) reuse → 200 with the existing agent, no second provision job", async () => {
     const agent = pendingAgent();
@@ -259,7 +286,7 @@ describe("POST /api/v1/eliza/agents — reuse idempotency", () => {
       success: false,
       code: "insufficient_credits",
       error: "Insufficient credits. Please add funds.",
-      requiredBalance: 0.1,
+      requiredBalance: AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
       currentBalance: 0,
     });
     expect(createAgent).not.toHaveBeenCalled();

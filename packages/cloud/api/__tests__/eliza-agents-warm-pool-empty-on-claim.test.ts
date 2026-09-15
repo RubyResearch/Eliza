@@ -19,6 +19,10 @@
  */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  DEDICATED_COMPUTE_PRICE_HEADER,
+  getDedicatedComputePriceAcceptance,
+} from "@elizaos/cloud-sdk/browser-contracts";
 import { Hono } from "hono";
 
 const requireUserOrApiKeyWithOrg = mock(async () => ({
@@ -152,7 +156,10 @@ async function postCreate(body: unknown) {
   return app.fetch(
     new Request("https://api.example.test/api/v1/eliza/agents", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        [DEDICATED_COMPUTE_PRICE_HEADER]: getDedicatedComputePriceAcceptance(),
+      },
       body: JSON.stringify(body),
     }),
   );

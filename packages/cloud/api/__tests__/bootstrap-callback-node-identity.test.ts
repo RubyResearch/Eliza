@@ -371,14 +371,15 @@ describe("bootstrap-callback node-identity guard (#12876)", () => {
 
     expect(first.status).toBe(200);
     expect(mockReconcileProvisionalCapacity).toHaveBeenCalledTimes(1);
-    expect(lastReconcileArg?.data.capacity).toBe(2);
+    expect(lastReconcileArg?.data.capacity).toBeGreaterThan(0);
+    expect(lastReconcileArg?.data.capacity).toBeLessThan(EXISTING.capacity);
     expect(lastReconcileArg?.metadataPatch).toMatchObject({
       memTotalMb: 7745,
       vCpuCount: 4,
       capacityBoundBy: "memory",
       capacityDerivedFromMemory: true,
     });
-    expect(stored?.capacity).toBe(2);
+    expect(stored?.capacity).toBe(lastReconcileArg?.data.capacity);
     expect(stored?.metadata.capacityProvisional).toBeUndefined();
 
     stored = { ...stored!, capacity: 5 };

@@ -1,6 +1,7 @@
 /** Exercises service-agent creation through deterministic Worker route fixtures. */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { AGENT_PRICING } from "@elizaos/cloud-sdk/browser-contracts";
 
 const requireServiceKey = mock(async () => ({
   organizationId: "service-org",
@@ -717,7 +718,7 @@ describe("service agent provisioning route", () => {
       success: false,
       code: "insufficient_credits",
       error: "Insufficient credits",
-      requiredBalance: 0.1,
+      requiredBalance: AGENT_PRICING.MINIMUM_ACTIVATION_CHARGE,
       currentBalance: 0,
     });
     expect(checkAgentCreditGate).toHaveBeenCalledWith("agent-wallet-org");

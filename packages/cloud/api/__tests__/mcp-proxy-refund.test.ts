@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Hono } from "hono";
 import { ApiError } from "@/lib/api/cloud-worker-errors";
+import * as creditsActual from "@/lib/services/credits";
 import { __mcpProxyHopTestHooks } from "../mcp/proxy/[mcpId]/proxy-body-budget";
 
 const requireGenerativeRouteCaller = mock();
@@ -46,6 +47,7 @@ class InsufficientCreditsError extends Error {
   }
 }
 mock.module("@/lib/services/credits", () => ({
+  ...creditsActual,
   InsufficientCreditsError,
 }));
 
