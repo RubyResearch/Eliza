@@ -102,6 +102,9 @@ export interface CalendarRouteService {
     request: SeedLifeOpsCalendarRequest,
   ): Promise<unknown>;
   listLinkedCalendarEvents(): Promise<unknown>;
+  listLinkedCalendarEventViews(): Promise<
+    import("@elizaos/shared").LifeOpsLinkedCalendarEventView[]
+  >;
   getLinkedCalendarControl(): Promise<
     import("@elizaos/shared").LifeOpsLinkedCalendarControl
   >;

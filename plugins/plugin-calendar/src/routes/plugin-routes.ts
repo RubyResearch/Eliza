@@ -147,6 +147,8 @@ function isCalendarRouteService(
       "function" &&
     typeof (service as CalendarRouteService).listLinkedCalendarEvents ===
       "function" &&
+    typeof (service as CalendarRouteService).listLinkedCalendarEventViews ===
+      "function" &&
     typeof (service as CalendarRouteService).getLinkedCalendarEvent ===
       "function"
   );
