@@ -3144,17 +3144,20 @@ export async function installDefaultAppRoutes(page: Page): Promise<void> {
       body: JSON.stringify({ agreements: [] }),
     });
   });
-  await page.route("**/api/lifeops/calendar/links", async (route) => {
-    if (route.request().method() !== "GET") {
-      await route.fallback();
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ links: [] }),
-    });
-  });
+  await page.route(
+    /\/api\/lifeops\/calendar\/links(?:\?.*)?$/,
+    async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ links: [] }),
+      });
+    },
+  );
   await page.route(
     "**/api/lifeops/family-workflows/school/status",
     async (route) => {
