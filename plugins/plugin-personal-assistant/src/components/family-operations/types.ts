@@ -8,6 +8,7 @@ import type {
 import type {
   FamilyDraftApprovalStatus,
   FamilyEmailOptions,
+  FamilyMonthlyScheduleView,
 } from "../../lifeops/family-workflows/runtime.js";
 import type {
   AgreementGuestAccessOptions,
@@ -34,6 +35,7 @@ export interface LinkedCalendarView {
 }
 
 export interface SchoolWorkflowView {
+  monthlySchedule: Loadable<FamilyMonthlyScheduleView | null>;
   sourceId: string;
   label: string;
   state:

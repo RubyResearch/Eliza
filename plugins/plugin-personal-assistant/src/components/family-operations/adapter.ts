@@ -8,12 +8,10 @@ import type {
 import type {
   FamilyDraftApprovalStatus,
   FamilyEmailOptions,
+  FamilySchoolWorkflowStatus,
 } from "../../lifeops/family-workflows/runtime.js";
 import type { ParentingAgreementView } from "../../lifeops/household/agreement-knowledge.js";
-import type {
-  SchoolCalendarRunReview,
-  SchoolCalendarWorkflowStatus,
-} from "../../lifeops/school/calendar-workflow.js";
+import type { SchoolCalendarRunReview } from "../../lifeops/school/calendar-workflow.js";
 import type {
   FamilyOperationsAdapter,
   FamilyOperationsSnapshot,
@@ -108,11 +106,18 @@ async function loadSection<T>(path: string, key: string): Promise<Loadable<T>> {
 }
 
 function schoolView(
-  status: SchoolCalendarWorkflowStatus,
+  status: FamilySchoolWorkflowStatus,
   review: SchoolCalendarRunReview | null,
 ): SchoolWorkflowView {
   const state = status.lastRun?.state ?? "never_run";
   return {
+    monthlySchedule: Object.hasOwn(status, "monthlySchedule")
+      ? { status: "ready", data: status.monthlySchedule }
+      : {
+          status: "unavailable",
+          message:
+            "The connected runtime does not report its saved family schedule. Update the runtime to verify it.",
+        },
     sourceId: status.sourceId,
     label: "Concord Public Schools calendar",
     state:
@@ -182,7 +187,7 @@ function packetView(
 
 async function loadSchool(): Promise<Loadable<SchoolWorkflowView>> {
   try {
-    const status = await request<SchoolCalendarWorkflowStatus>(
+    const status = await request<FamilySchoolWorkflowStatus>(
       "/api/lifeops/family-workflows/school/status",
     );
     const review = status.lastRun?.runId

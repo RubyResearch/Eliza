@@ -59,6 +59,18 @@ import {
 } from "./period.js";
 import { ensureFamilyWorkflowRunStore } from "./run-store.js";
 
+export interface FamilyMonthlyScheduleView {
+  taskId: string;
+  status: ScheduledTask["state"]["status"];
+  trigger: ScheduledTask["trigger"];
+  lastFiredAt: string | null;
+}
+
+export interface FamilySchoolWorkflowStatus
+  extends SchoolCalendarWorkflowStatus {
+  monthlySchedule: FamilyMonthlyScheduleView | null;
+}
+
 export const FAMILY_WORKFLOW_RUNTIME_SERVICE = "lifeops_family_workflows";
 export interface FamilyEmailOptions {
   accounts: Array<{ grantId: string; label: string }>;
@@ -217,8 +229,32 @@ export class FamilyWorkflowRuntimeService extends Service {
     return this.school.configure(config);
   }
 
-  schoolStatus(): Promise<SchoolCalendarWorkflowStatus> {
-    return this.school.status();
+  async schoolStatus(): Promise<FamilySchoolWorkflowStatus> {
+    const { FAMILY_COORDINATION_RECORD_IDS } = await import(
+      "../../default-packs/family-coordination.js"
+    );
+    const runner = getScheduledTaskRunner(this.runtime, {
+      agentId: this.runtime.agentId,
+    });
+    const [status, tasks] = await Promise.all([
+      this.school.status(),
+      runner.list(),
+    ]);
+    const task = tasks.find(
+      (candidate) =>
+        candidate.idempotencyKey === FAMILY_COORDINATION_RECORD_IDS.monthly,
+    );
+    return {
+      ...status,
+      monthlySchedule: task
+        ? {
+            taskId: task.taskId,
+            status: task.state.status,
+            trigger: task.trigger,
+            lastFiredAt: task.state.firedAt ?? null,
+          }
+        : null,
+    };
   }
 
   async ensureMonthlySchedule(): Promise<ScheduledTask> {

@@ -832,8 +832,12 @@ function SchoolPanel({
           </Select>
         </div>
         <p>
-          Checks monthly. Unchanged files add no events. Unclear dates stop for
-          review; changes apply only to events managed by this school source.
+          Saving creates a monthly school check and packet preparation task if
+          one does not exist. The default is the first day of each month at 9:00
+          AM America/New_York; an existing schedule and its status are
+          preserved. It never sends email automatically. Unchanged files add no
+          events. Unclear dates stop for review; changes apply only to events
+          managed by this school source.
         </p>
         <Button
           onClick={() =>
@@ -843,6 +847,36 @@ function SchoolPanel({
           Save school settings
         </Button>
       </fieldset>
+      <section aria-label="Saved family schedule">
+        <h3>Saved family schedule</h3>
+        {workflow.monthlySchedule.status === "unavailable" ? (
+          <Unavailable message={workflow.monthlySchedule.message} />
+        ) : workflow.monthlySchedule.data === null ? (
+          <p>
+            Not scheduled yet. Save school settings to enable monthly
+            preparation.
+          </p>
+        ) : (
+          <>
+            <p>Status: {workflow.monthlySchedule.data.status}</p>
+            <p>
+              {workflow.monthlySchedule.data.trigger.kind === "cron" &&
+              workflow.monthlySchedule.data.trigger.expression === "0 9 1 * *"
+                ? `First day of each month at 9:00 AM ${workflow.monthlySchedule.data.trigger.tz}`
+                : "Custom schedule. Review its timing in Automations."}
+            </p>
+            <p>
+              Last recorded start:{" "}
+              {date(workflow.monthlySchedule.data.lastFiredAt)}
+            </p>
+            <p>
+              Checks school dates and prepares an owner-review packet. Email
+              still requires your approval.
+            </p>
+          </>
+        )}
+        <a href="/automations">Review scheduled tasks</a>
+      </section>
       <p>
         <strong>Status:</strong> {workflow.state} · checked{" "}
         {date(workflow.lastCheckedAt)}

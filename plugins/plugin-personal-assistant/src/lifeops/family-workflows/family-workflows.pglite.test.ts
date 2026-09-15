@@ -162,6 +162,7 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     services.set("lifeops_scheduled_task_runner", {
       getRunner: () => harness.runner,
     });
+    expect((await service.schoolStatus()).monthlySchedule).toBeNull();
     const definition = familyCoordinationPack.records[0];
     if (!definition) throw new Error("missing definition");
     const old = await harness.runner.schedule({
@@ -174,10 +175,33 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     const tasks = await harness.runner.list({ ownerVisibleOnly: true });
     expect(tasks.map((task) => task.taskId)).toEqual([old.taskId]);
     expect(tasks[0].kind).toBe("recap");
+    expect((await service.schoolStatus()).monthlySchedule).toMatchObject({
+      taskId: old.taskId,
+      status: "scheduled",
+      trigger: tasks[0].trigger,
+      lastFiredAt: null,
+    });
+    await harness.runner.apply(old.taskId, "edit", {
+      trigger: { kind: "cron", expression: "0 10 2 * *", tz: "Europe/London" },
+    });
+    await service.ensureMonthlySchedule();
+    const changed = (await service.schoolStatus()).monthlySchedule;
+    expect(changed?.trigger).toEqual({
+      kind: "cron",
+      expression: "0 10 2 * *",
+      tz: "Europe/London",
+    });
     await harness.runner.fire(old.taskId);
     expect(harness.dispatches).toHaveLength(1);
     expect(harness.dispatches[0].metadata?.systemOperation).toBe(
       "family.monthlyCoordination",
+    );
+    await harness.runner.apply(old.taskId, "dismiss", {
+      reason: "Owner stopped the schedule",
+    });
+    await service.ensureMonthlySchedule();
+    expect((await service.schoolStatus()).monthlySchedule?.status).toBe(
+      "dismissed",
     );
   });
 

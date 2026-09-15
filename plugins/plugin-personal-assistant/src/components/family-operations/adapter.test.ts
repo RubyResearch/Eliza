@@ -269,7 +269,7 @@ describe("defaultFamilyOperationsAdapter", () => {
     const snapshot = await defaultFamilyOperationsAdapter.load();
     expect(snapshot.school).toMatchObject({
       status: "ready",
-      data: { state: "never_run" },
+      data: { state: "never_run", monthlySchedule: { status: "unavailable" } },
     });
     expect(snapshot.packets).toEqual({ status: "ready", data: [] });
 
