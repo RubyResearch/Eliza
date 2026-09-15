@@ -107,10 +107,18 @@ export async function prepareCrossChannelSend(args: {
             target,
             message: body,
           });
-          return {
+          const receipt = {
             provider: "telegram",
             messageId: sent.messageId,
+            receipt: sent.receipt,
           };
+          if (!sent.messageId) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "Telegram returned no provider message identifier; reconcile before sending again.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }

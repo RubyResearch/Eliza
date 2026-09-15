@@ -38,6 +38,8 @@ isolated port (41873 by default):
 bun run --cwd plugins/plugin-personal-assistant test:connections:e2e
 ```
 
+Telegram delivery retains the complete provider receipt, including all message identifiers for split messages. Approval dispatch without a provider identifier requires reconciliation and cannot be automatically replayed. Telegram and Discord runtime sends also preserve partial-delivery and failed-persistence receipts. Once a provider call begins, lost acknowledgements retain the attempted account and destination and cannot fall through to another transport.
+
 ## Private daily calendar cards
 
 `POST /api/lifeops/calendar/cards` accepts an explicit `channel` of `imessage`,

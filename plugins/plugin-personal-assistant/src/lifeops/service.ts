@@ -225,6 +225,7 @@ import {
   TelegramDomain,
   type TelegramMessageSearchResult,
   type TelegramReadReceiptResult,
+  type TelegramSendMessageResult,
 } from "./domains/telegram-service.js";
 import { TravelDomain } from "./domains/travel-service.js";
 import {
@@ -2259,7 +2260,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
     side?: LifeOpsConnectorSide;
     target: string;
     message: string;
-  }): Promise<{ ok: true; messageId: string | null }> {
+  }): Promise<TelegramSendMessageResult> {
     return this.telegramDomain.sendTelegramMessage(request);
   }
 
