@@ -656,6 +656,68 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
     },
   );
 
+  it.each([undefined, "", "   "])(
+    "keeps iMessage without a usable receipt (%s) in durable reconciliation",
+    async (messageId) => {
+      const actual = await vi.importActual<
+        typeof import("../src/actions/lib/messaging-helpers.js")
+      >("../src/actions/lib/messaging-helpers.js");
+      const send = vi.fn(async () => ({ ok: true, messageId }));
+      const prepared = await actual.prepareCrossChannelSend({
+        runtime,
+        service: {
+          getIMessageConnectorStatus: async () => ({ connected: true }),
+          sendIMessage: send,
+        } as unknown as LifeOpsService,
+        channel: "imessage",
+        target: "+15551234567",
+        body: "Synthetic calendar review",
+      });
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: "imessage",
+        payload: {
+          action: "send_message",
+          recipient: "+15551234567",
+          body: "Synthetic calendar review",
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "Approved synthetic test",
+      });
+      const attempt = () =>
+        runApprovalDispatch({
+          queue: realQueue,
+          request: approved,
+          subjectUserId: OWNER_A,
+          prepared: {
+            provider: "imessage",
+            dispatch: async (key) => ({
+              value: null,
+              receipt: await prepared.dispatch(key),
+            }),
+          },
+        });
+      expect((await attempt()).kind).toBe("reconciliation_required");
+      const reopened = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      expect(await reopened.byId(request.id, OWNER_A)).toMatchObject({
+        state: "reconciliation_required",
+        execution: {
+          providerReceipt: {
+            provider: "imessage",
+            messageId: messageId ?? null,
+          },
+        },
+      });
+      await expect(attempt()).rejects.toThrow();
+      expect(send).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("retains missing Telegram delivery evidence across queue reopen and refuses replay", async () => {
     const actual = await vi.importActual<
       typeof import("../src/actions/lib/messaging-helpers.js")
