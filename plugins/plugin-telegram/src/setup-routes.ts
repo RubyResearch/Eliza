@@ -17,7 +17,6 @@
  */
 
 import {
-  ElizaError,
   type IAgentRuntime,
   logger,
   type Route,
@@ -27,6 +26,7 @@ import {
 } from "@elizaos/core";
 
 import { DEFAULT_ACCOUNT_ID } from "./accounts";
+import { resolveTelegramBotCredential } from "./bot-credential";
 import { getTelegramPollerClaim } from "./poller-lock";
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -144,49 +144,6 @@ function readSavedToken(
     : null;
 }
 
-interface CredentialReader {
-  get(
-    reference: string,
-    options: { reveal: boolean; caller: string },
-  ): Promise<string>;
-}
-
-function isCredentialReader(value: unknown): value is CredentialReader {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      typeof (value as Partial<CredentialReader>).get === "function",
-  );
-}
-
-async function resolveSavedToken(
-  runtime: IAgentRuntime,
-  token: string | null,
-): Promise<string | null> {
-  if (!token?.startsWith("vault://")) return token;
-  const reference = token.slice("vault://".length);
-  const store = runtime.getService("connector_credential_store");
-  if (
-    !reference.startsWith(`connector.${runtime.agentId}.telegram.`) ||
-    !reference.endsWith(".bot-token") ||
-    !isCredentialReader(store)
-  ) {
-    throw new ElizaError("The configured Telegram credential is unavailable.", {
-      code: "TELEGRAM_SETUP_CREDENTIAL_UNAVAILABLE",
-    });
-  }
-  const resolved = await store.get(reference, {
-    reveal: true,
-    caller: "telegram-setup-status",
-  });
-  if (!resolved.trim() || resolved.startsWith("vault://")) {
-    throw new ElizaError("The configured Telegram credential is unavailable.", {
-      code: "TELEGRAM_SETUP_CREDENTIAL_UNAVAILABLE",
-    });
-  }
-  return resolved;
-}
-
 function isConfiguredPollerConnected(
   runtime: IAgentRuntime,
   token: string | null,
@@ -205,7 +162,11 @@ async function currentStatus(
   runtime: IAgentRuntime,
 ): Promise<SetupStatusResponse> {
   const savedToken = readSavedToken(setupService, runtime);
-  const token = await resolveSavedToken(runtime, savedToken);
+  const token = await resolveTelegramBotCredential(
+    runtime,
+    savedToken,
+    "telegram-setup-status",
+  );
   const hasToken = Boolean(token);
   const serviceConnected = isConfiguredPollerConnected(runtime, token);
   const state: SetupState = hasToken
