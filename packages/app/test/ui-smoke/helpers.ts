@@ -4,7 +4,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createZipArchive } from "@elizaos/agent/api/zip-utils";
+import { createZipArchive } from "../../../agent/src/api/zip-utils";
 import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 const ONE_PX_PNG = Buffer.from(
