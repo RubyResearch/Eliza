@@ -1,23 +1,10 @@
 /**
- * Route-level e2e for plugin-telegram (issue #8802).
- *
- * Boots the plugin's declared `Route[]` (`telegramSetupRoutes` +
- * `telegramAccountRoutes`) through the real production dispatcher
- * (`tryHandleRuntimePluginRoute`) over a loopback `http.createServer` —
- * exercising the real auth gate, JSON body parsing, query parsing, and handler
- * dispatch — with a faked `connector-setup` service standing in for the only
- * runtime dependency the deterministic branches touch.
- *
- * No mocked `json`/`error` helpers and no shape-only assertions: every check is
- * against a real HTTP response decoded from the wire. Telegram Bot-API / GramJS
- * network paths (valid bot token → `getMe`, phone → provisioning code) are
- * intentionally never reached, so the suite stays hermetic and offline.
- *
- * The package's global `__tests__/core-test-mock.ts` replaces `@elizaos/core`
- * with a partial stub that omits the HTTP utilities the dispatcher imports
- * (`readRequestBodyBuffer`, `isJsonObjectBody`, `writeJsonError`,
- * `setRuntimeRouteHostContext`). This file re-mocks `@elizaos/core` back to the
- * real module so the dispatcher and route handlers run against production code.
+ * Exercises Telegram setup through the production HTTP dispatcher with an
+ * in-memory setup service. Bot identity responses are controlled at the remote
+ * provider boundary; local requests use real HTTP. The suite checks validation,
+ * credential cleanup, and separation of bot setup from owner-recipient pairing.
+ * Core is restored below because the package fixture otherwise replaces the
+ * transport utilities used by the production dispatcher.
  */
 
 import { vi } from "vitest";
@@ -77,8 +64,9 @@ function makeSetupService(state: FakeSetupServiceState) {
       state.calls.push(`registerEscalationChannel:${channel}`);
       return true;
     },
-    setOwnerContact: (update: { source: string }) => {
+    setOwnerContact: (update: { source: string; channelId?: string }) => {
       state.calls.push(`setOwnerContact:${update.source}`);
+      state.config.ownerContact = update;
       return true;
     },
     removeConnectorCredentialReference: async (reference: string) => {
@@ -170,6 +158,53 @@ describe("plugin-telegram setup routes (real dispatch)", () => {
     expect(body.detail.hasToken).toBe(false);
     expect(body.detail.serviceConnected).toBe(false);
   });
+
+  it.each([
+    { source: "telegram", channelId: "555000111", entityId: "verified-owner" },
+    undefined,
+  ])(
+    "does not replace owner recipient %j with a configured bot",
+    async (owner) => {
+      const state: FakeSetupServiceState = {
+        config: { ownerContact: owner, connectors: { telegram: {} } },
+        calls: [],
+      };
+      const base = await startServer(makeRuntime({ state }));
+      const realFetch = globalThis.fetch;
+      const provider = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (url.startsWith("https://api.telegram.org/bot")) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                result: {
+                  id: 123456789,
+                  is_bot: true,
+                  first_name: "Synthetic bot",
+                  username: "synthetic_test_bot",
+                },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          return realFetch(input, init);
+        });
+      try {
+        const response = await postJson(base, "/api/setup/telegram/start", {
+          token: "123456789:abcdefghijklmnopqrstuvwxyz123456",
+        });
+        expect(response.status).toBe(200);
+        expect(state.config.ownerContact).toEqual(owner);
+        const status = await response.json();
+        expect(status.detail.bot.id).toBe(123456789);
+        expect(status.state).toBe("configuring");
+      } finally {
+        provider.mockRestore();
+      }
+    },
+  );
 
   it("rejects a start with no token (400 from the real validator)", async () => {
     const base = await startServer(makeRuntime());

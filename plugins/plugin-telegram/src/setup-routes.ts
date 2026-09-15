@@ -263,11 +263,8 @@ async function handleStart(
       connectors.telegram.botToken = storedToken;
     });
 
-    // Auto-populate owner contact so LifeOps can deliver reminders
-    setupService.setOwnerContact({
-      source: "telegram",
-      channelId: String(bot.id),
-    });
+    // getMe identifies the bot, not the human owner or an authorized chat.
+    // Owner pairing establishes reminder destinations independently of token setup.
     // Add Telegram to the escalation channel list
     setupService.registerEscalationChannel("telegram");
   } else {
