@@ -17,10 +17,12 @@ import { transcriptPlainText } from "@elizaos/shared/transcripts";
 import type { MeetingService } from "../service.js";
 import { readTranscriptRow } from "../transcripts/meeting-transcript-writer.js";
 import {
+  MEETING_URL_PARAMETER,
   messageText,
   reply,
   requireMeetingService,
   resolveTargetSession,
+  SESSION_ID_PARAMETER,
 } from "./shared.js";
 
 async function handler(
@@ -87,6 +89,7 @@ export const getMeetingTranscriptAction: Action = {
       messageText(message),
     );
   },
+  parameters: [SESSION_ID_PARAMETER, MEETING_URL_PARAMETER],
   handler,
   examples: [
     [

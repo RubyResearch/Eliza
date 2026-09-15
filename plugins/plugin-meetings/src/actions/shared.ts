@@ -1,12 +1,16 @@
 /**
  * Shared helpers for the meeting actions: message-text extraction, meeting URL
  * discovery from planner options or free text, service lookup, session
- * targeting, and callback replies. Validated planner params arrive nested under
+ * targeting, callback replies, and the parameter declarations the targeting
+ * helpers read. Validated planner params arrive nested under
  * `options.parameters` on the real planner path (see repo gotcha: top-level
  * reads only work in direct-handler tests), so option lookups check both levels.
+ * Core rejects any planner argument an action does not declare, so every key
+ * `optionString` reads must appear in that action's `parameters`.
  */
 
 import type {
+  ActionParameter,
   ActionResult,
   HandlerCallback,
   IAgentRuntime,
@@ -19,6 +23,30 @@ import {
   parseMeetingUrl,
 } from "@elizaos/shared";
 import type { MeetingService } from "../service.js";
+
+/**
+ * `meetingUrl` as read by `resolveMeetingUrl`. The `url` alias is remapped by
+ * core before validation, so the handler's `url` fallback stays for direct
+ * callers only.
+ */
+export const MEETING_URL_PARAMETER: ActionParameter = {
+  name: "meetingUrl",
+  description:
+    "Full Google Meet, Microsoft Teams, or Zoom meeting link (for example https://meet.google.com/abc-defg-hij). Omit when the link is already in the message text.",
+  required: false,
+  aliases: ["url", "meeting_url", "link"],
+  schema: { type: "string" },
+};
+
+/** `sessionId` as read by `resolveTargetSession`; names one attended meeting. */
+export const SESSION_ID_PARAMETER: ActionParameter = {
+  name: "sessionId",
+  description:
+    "Id of the meeting session to act on, as listed by the ACTIVE_MEETINGS provider. Use it to pick one meeting when several are active; omit to target by meeting link or the only active meeting.",
+  required: false,
+  aliases: ["session_id", "session"],
+  schema: { type: "string" },
+};
 
 export function messageText(message: Memory | null | undefined): string {
   const content = message?.content;

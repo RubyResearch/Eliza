@@ -15,10 +15,12 @@ import type {
 import { MEETING_PLATFORM_LABELS } from "@elizaos/shared";
 import type { MeetingService } from "../service.js";
 import {
+  MEETING_URL_PARAMETER,
   messageText,
   reply,
   requireMeetingService,
   resolveTargetSession,
+  SESSION_ID_PARAMETER,
 } from "./shared.js";
 
 async function handler(
@@ -78,6 +80,7 @@ export const leaveMeetingAction: Action = {
     if (service.listSessions({ active: true }).length === 0) return false;
     return /\b(leave|exit|stop|end|drop)\b/i.test(messageText(message));
   },
+  parameters: [SESSION_ID_PARAMETER, MEETING_URL_PARAMETER],
   handler,
   examples: [
     [

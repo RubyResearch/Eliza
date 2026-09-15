@@ -14,6 +14,7 @@ import {
 import { MEETING_PLATFORM_LABELS } from "@elizaos/shared";
 import { MeetingJoinError } from "../service.js";
 import {
+  MEETING_URL_PARAMETER,
   optionString,
   reply,
   requireMeetingService,
@@ -87,6 +88,25 @@ export const joinMeetingAction: Action = {
   ],
   description:
     "Send the agent's notetaker bot into a live Google Meet, Microsoft Teams, or Zoom meeting to attend and transcribe it in real time. Use this WHENEVER the message contains a Meet / Teams / Zoom meeting link (meet.google.com, teams.microsoft.com / teams.live.com, zoom.us / app.zoom.us) and the user wants the agent to join, attend, sit in on, cover, take notes on, record, or transcribe that meeting or call. Prefer this over calendar, reminder, scheduling, or plain reply actions when a joinable meeting URL is present — those only schedule or acknowledge, whereas this actually joins the call now. Requires a meeting URL in the message or a meetingUrl parameter.",
+  parameters: [
+    MEETING_URL_PARAMETER,
+    {
+      name: "botName",
+      description:
+        "Display name the notetaker bot joins with. Omit to use the configured default.",
+      required: false,
+      aliases: ["bot_name", "displayName"],
+      schema: { type: "string" },
+    },
+    {
+      name: "language",
+      description:
+        "Spoken language of the meeting as a BCP 47 tag (for example en, de, pt-BR) to steer transcription. Omit to auto-detect.",
+      required: false,
+      aliases: ["lang", "locale"],
+      schema: { type: "string" },
+    },
+  ],
   validate: async (_runtime, message, _state, options) =>
     resolveMeetingUrl(message, options) !== null,
   handler,
