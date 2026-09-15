@@ -656,6 +656,142 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
     },
   );
 
+  it.each(["delivered", "partial", "persistence", "unknown"] as const)(
+    "persists actual Telegram service outcomes (%s) without replay",
+    async (mode) => {
+      const { MessageManager } = await import(
+        "../../plugin-telegram/src/messageManager.js"
+      );
+      const { TelegramService } = await import(
+        "../../plugin-telegram/src/service.js"
+      );
+      let calls = 0;
+      const send = vi.fn(async (chatId: string, text: string) => {
+        calls++;
+        if ((mode === "partial" && calls === 2) || mode === "unknown")
+          throw new Error("Synthetic lost acknowledgement");
+        return {
+          message_id: calls,
+          date: 1700000000 + calls,
+          text,
+          chat: { id: Number(chatId), type: "private" },
+        };
+      });
+      const bot = {
+        botInfo: { id: 12345, username: "synthetic_bot" },
+        telegram: {
+          sendMessage: send,
+          sendChatAction: vi.fn(async () => undefined),
+        },
+      };
+      let connector: InstanceType<typeof TelegramService>;
+      const harness = {
+        ...runtime,
+        character: { name: "Synthetic test" },
+        setSetting: vi.fn(),
+        getSetting: () => undefined,
+        getRoom: async () => null,
+        emitEvent: vi.fn(),
+        createMemory: async (memory: Memory) => {
+          if (mode === "persistence")
+            throw new Error("Synthetic memory failure");
+          return memory.id;
+        },
+        getService: (name: string) =>
+          name === "telegram" ? connector : runtime.getService(name),
+      } as unknown as IAgentRuntime;
+      connector = Object.assign(
+        Object.create(TelegramService.prototype) as InstanceType<
+          typeof TelegramService
+        >,
+        { bot, messageManager: new MessageManager(bot as never, harness) },
+      );
+      const service = new LifeOpsService(harness);
+      const body = "x".repeat(5000);
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: "telegram",
+        payload: {
+          action: "send_message",
+          recipient: "123",
+          body,
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "Approved synthetic test",
+      });
+      const attempt = () =>
+        runApprovalDispatch({
+          queue: realQueue,
+          request: approved,
+          subjectUserId: OWNER_A,
+          prepared: {
+            provider: "telegram",
+            dispatch: async () => {
+              const sent = await service.sendTelegramMessage({
+                side: "agent",
+                target: "123",
+                message: body,
+              });
+              return {
+                value: null,
+                receipt: {
+                  provider: "telegram",
+                  messageId: sent.messageId,
+                  receipt: sent.receipt,
+                },
+              };
+            },
+          },
+        });
+      expect((await attempt()).kind).toBe(
+        mode === "delivered" ? "delivered" : "reconciliation_required",
+      );
+      const reopened = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      const saved = await reopened.byId(request.id, OWNER_A);
+      if (mode === "delivered")
+        expect(saved).toMatchObject({
+          execution: {
+            providerReceipt: {
+              receipt: {
+                providerMessageIds: ["1", "2"],
+                persistence: { status: "persisted" },
+              },
+            },
+          },
+        });
+      else if (mode === "unknown")
+        expect(saved).toMatchObject({
+          state: "reconciliation_required",
+          execution: { providerReceipt: { deliveryStatus: "unknown" } },
+        });
+      else
+        expect(saved).toMatchObject({
+          state: "reconciliation_required",
+          execution: {
+            providerReceipt: {
+              disposition: {
+                kind: mode === "partial" ? "partially_delivered" : "delivered",
+                receipt: {
+                  providerMessageIds: mode === "partial" ? ["1"] : ["1", "2"],
+                  persistence: {
+                    status: mode === "partial" ? "not_attempted" : "failed",
+                  },
+                },
+              },
+            },
+          },
+        });
+      const originalCalls = calls;
+      await expect(attempt()).rejects.toThrow();
+      expect(calls).toBe(originalCalls);
+    },
+  );
+
   it.each([true, false])(
     "retains iMessage chunk receipts through the real domain and queue (success=%s)",
     async (success) => {
