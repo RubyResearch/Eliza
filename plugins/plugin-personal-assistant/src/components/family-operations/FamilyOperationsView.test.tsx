@@ -769,7 +769,7 @@ describe("FamilyOperationsView", () => {
         updateMode: "automatic",
       }),
     );
-    expect(await screen.findByText("Status: scheduled")).toBeTruthy();
+    expect(await screen.findByText("Status: Scheduled")).toBeTruthy();
     expect(screen.queryByText(/Not scheduled yet/)).toBeNull();
     expect(
       screen.getByRole("link", { name: "Review scheduled tasks" }),

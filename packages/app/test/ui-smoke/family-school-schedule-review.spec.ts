@@ -110,7 +110,7 @@ for (const width of [1280, 390]) {
       });
       await captureFamilyAccent(page, info, save, "school-save", width);
       await save.click();
-      await expect(saved).toContainText("Status: scheduled");
+      await expect(saved).toContainText("Status: Scheduled");
       await expect(saved).toContainText(
         "First day of each month at 9:00 AM America/New_York",
       );
@@ -129,10 +129,10 @@ for (const width of [1280, 390]) {
       await page
         .getByRole("button", { name: "School calendar", exact: true })
         .click();
-      await expect(saved).toContainText("Status: dismissed");
+      await expect(saved).toContainText("Status: Stopped");
       await expect(saved).toContainText("Custom schedule");
       await save.click();
-      await expect(saved).toContainText("Status: dismissed");
+      await expect(saved).toContainText("Status: Stopped");
       await expect(saved).not.toContainText("First day of each month");
       await expect(
         saved.getByRole("link", { name: "Review scheduled tasks" }),

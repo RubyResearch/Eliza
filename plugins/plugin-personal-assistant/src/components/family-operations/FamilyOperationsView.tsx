@@ -36,6 +36,7 @@ import {
 } from "react";
 import type { FamilyPacketSection } from "../../lifeops/family-coordination/index.js";
 import { nextFamilyPacketPeriod } from "../../lifeops/family-workflows/period.js";
+import type { FamilyMonthlyScheduleView } from "../../lifeops/family-workflows/runtime.js";
 import { AgreementGuestAccessPanel } from "./AgreementGuestAccessPanel.js";
 import { AgreementObligationReview } from "./AgreementObligationReview.js";
 import { AgreementProposalEditor } from "./AgreementProposalEditor.js";
@@ -54,6 +55,7 @@ import type {
   FamilyOperationsAdapter,
   FamilyOperationsSnapshot,
   Loadable,
+  SchoolWorkflowView,
 } from "./types.js";
 
 const packetSectionLabels: Record<FamilyPacketSection, string> = {
@@ -744,6 +746,28 @@ function CalendarPanel({
   );
 }
 
+const schoolStatusLabels: Record<SchoolWorkflowView["state"], string> = {
+  never_run: "Not checked yet",
+  running: "Checking",
+  unchanged: "No changes",
+  awaiting_approval: "Ready for review",
+  applied: "Updated",
+  failed: "Check failed",
+};
+const monthlyScheduleStatusLabels: Record<
+  FamilyMonthlyScheduleView["status"],
+  string
+> = {
+  scheduled: "Scheduled",
+  fired: "In progress",
+  acknowledged: "Acknowledged",
+  completed: "Completed",
+  skipped: "Skipped",
+  expired: "Expired",
+  failed: "Failed",
+  dismissed: "Stopped",
+};
+
 function SchoolPanel({
   state,
   adapter,
@@ -800,7 +824,7 @@ function SchoolPanel({
               setSchoolLevel(value === "elementary" ? "elementary" : "all")
             }
           >
-            <SelectTrigger id="school-level">
+            <SelectTrigger id="school-level" className="min-h-12">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -820,7 +844,7 @@ function SchoolPanel({
               setUpdateMode(value === "automatic" ? "automatic" : "review")
             }
           >
-            <SelectTrigger id="school-update-mode">
+            <SelectTrigger id="school-update-mode" className="min-h-12">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -840,6 +864,7 @@ function SchoolPanel({
           managed by this school source.
         </p>
         <Button
+          className="min-h-12"
           onClick={() =>
             void run(() => adapter.configureSchool({ schoolLevel, updateMode }))
           }
@@ -847,8 +872,11 @@ function SchoolPanel({
           Save school settings
         </Button>
       </fieldset>
-      <section aria-label="Saved family schedule">
-        <h3>Saved family schedule</h3>
+      <section
+        aria-label="Saved family schedule"
+        style={{ display: "grid", gap: 8, marginTop: 20, marginBottom: 20 }}
+      >
+        <h3 style={{ fontWeight: 700 }}>Saved family schedule</h3>
         {workflow.monthlySchedule.status === "unavailable" ? (
           <Unavailable message={workflow.monthlySchedule.message} />
         ) : workflow.monthlySchedule.data === null ? (
@@ -858,7 +886,14 @@ function SchoolPanel({
           </p>
         ) : (
           <>
-            <p>Status: {workflow.monthlySchedule.data.status}</p>
+            <p>
+              Status:{" "}
+              {
+                monthlyScheduleStatusLabels[
+                  workflow.monthlySchedule.data.status
+                ]
+              }
+            </p>
             <p>
               {workflow.monthlySchedule.data.trigger.kind === "cron" &&
               workflow.monthlySchedule.data.trigger.expression === "0 9 1 * *"
@@ -878,7 +913,7 @@ function SchoolPanel({
         <a href="/automations">Review scheduled tasks</a>
       </section>
       <p>
-        <strong>Status:</strong> {workflow.state} · checked{" "}
+        <strong>Status:</strong> {schoolStatusLabels[workflow.state]} · checked{" "}
         {date(workflow.lastCheckedAt)}
       </p>
       {workflow.changes?.length ? (
@@ -894,6 +929,7 @@ function SchoolPanel({
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
         <Button
+          className="min-h-12"
           disabled={busy}
           onClick={() => void run(() => adapter.runSchoolWorkflow())}
         >
@@ -901,6 +937,7 @@ function SchoolPanel({
         </Button>
         {workflow.state === "awaiting_approval" && workflow.runId ? (
           <Button
+            className="min-h-12"
             disabled={busy}
             variant="outline"
             onClick={() =>
