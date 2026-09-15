@@ -49,9 +49,9 @@ describe("connectorSupportsChannelMode", () => {
     }
   });
 
-  it("classifies native iMessage as delegate-only", () => {
+  it("offers native and hosted iMessage in their respective lenses", () => {
     expect(connectorSupportsChannelMode("imessage", "delegate")).toBe(true);
-    expect(connectorSupportsChannelMode("imessage", "bot")).toBe(false);
+    expect(connectorSupportsChannelMode("imessage", "bot")).toBe(true);
   });
 
   it("classifies single-form connectors through the registered fallback", () => {

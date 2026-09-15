@@ -1,5 +1,5 @@
 /**
- * ElizaClient extension for the local macOS Messages connector. The client
+ * ElizaClient extension for native and hosted iMessage connectors. The client
  * consumes plugin-imessage's own setup and data routes so the connector UI does
  * not depend on the personal-assistant plugin or an external bridge.
  */
@@ -8,7 +8,9 @@ import { ElizaClient } from "./client-base";
 export interface IMessageApiStatus {
   available: boolean;
   connected: boolean;
-  bridgeType?: "native" | "none";
+  bridgeType?: "native" | "blooio" | "none";
+  webhookPath?: string | null;
+  channelId?: string | null;
   hostPlatform?: "darwin" | "linux" | "win32" | "unknown";
   diagnostics?: string[];
   error?: string | null;
@@ -64,10 +66,13 @@ export interface SendIMessageResponse {
   error?: string;
 }
 
-interface NativeIMessageSetupStatusResponse {
+interface IMessageSetupStatusResponse {
   connector: string;
   state: "idle" | "configuring" | "paired" | "error";
   detail?: {
+    transport?: "native" | "blooio";
+    webhookPath?: string | null;
+    channelId?: string | null;
     available: boolean;
     connected: boolean;
     chatDbAvailable?: boolean;
@@ -95,7 +100,7 @@ function buildQuery(params: URLSearchParams): string {
 }
 
 ElizaClient.prototype.getIMessageStatus = async function (this: ElizaClient) {
-  const result = await this.fetch<NativeIMessageSetupStatusResponse>(
+  const result = await this.fetch<IMessageSetupStatusResponse>(
     "/api/setup/imessage/status",
   );
   const detail = result.detail;
@@ -104,7 +109,9 @@ ElizaClient.prototype.getIMessageStatus = async function (this: ElizaClient) {
   return {
     available,
     connected,
-    bridgeType: available ? "native" : "none",
+    bridgeType: detail?.transport ?? (available ? "native" : "none"),
+    webhookPath: detail?.webhookPath,
+    channelId: detail?.channelId,
     error:
       result.state === "error"
         ? (detail?.reason ?? "iMessage setup failed")

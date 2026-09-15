@@ -1,7 +1,6 @@
 /**
- * Status panel for the native macOS iMessage connector. Surfaces the
- * chat-database availability, send-only vs. read/write capability, and the
- * full-disk-access permission prompt the connector needs to read messages.
+ * Presents the saved iMessage connection state and transport-specific setup
+ * guidance. Hosted connections never request native macOS permissions.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -16,13 +15,15 @@ export function IMessageStatusPanel() {
   const [status, setStatus] = useState<IMessageApiStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const isHosted = status?.bridgeType === "blooio";
+  const isNative = status?.bridgeType === "native";
   const permissionAction =
-    status?.permissionAction?.type === "full_disk_access"
+    isNative && status?.permissionAction?.type === "full_disk_access"
       ? status.permissionAction
       : null;
-  const isSendOnly = status?.sendOnly === true;
+  const isSendOnly = isNative && status?.sendOnly === true;
   const canReadMessages =
-    status?.connected === true && status?.chatDbAvailable === true;
+    isNative && status?.connected === true && status?.chatDbAvailable === true;
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -30,6 +31,8 @@ export function IMessageStatusPanel() {
     try {
       setStatus(await client.getIMessageStatus());
     } catch (nextError) {
+      // error-policy:J4 A failed refresh is visibly unavailable, never stale success.
+      setStatus(null);
       setError(
         nextError instanceof Error ? nextError.message : String(nextError),
       );
@@ -93,30 +96,48 @@ export function IMessageStatusPanel() {
     >
       <div className="space-y-2 text-xs">
         <div className="font-semibold text-txt">
-          {canReadMessages
-            ? t("pluginsview.IMessageConnected", {
-                defaultValue:
-                  "iMessage is connected. Messages are being read from the local database.",
-              })
-            : isSendOnly
-              ? t("pluginsview.IMessageSendOnly", {
-                  defaultValue:
-                    "iMessage can send, but Eliza cannot read local messages until Full Disk Access is granted.",
+          {loading
+            ? t("common.loading", { defaultValue: "Loading…" })
+            : error
+              ? t("pluginsview.IMessageStatusUnavailable", {
+                  defaultValue: "iMessage status unavailable.",
                 })
-              : t("pluginsview.IMessageNotConnected", {
-                  defaultValue:
-                    "iMessage is not connected. Eliza uses the native macOS Messages bridge on this machine.",
-                })}
+              : isHosted
+                ? status?.connected
+                  ? t("pluginsview.IMessageHostedConnected", {
+                      defaultValue:
+                        "iMessage is connected through Blooio. Incoming messages use the signed webhook.",
+                    })
+                  : t("pluginsview.IMessageHostedNotConnected", {
+                      defaultValue:
+                        "Hosted iMessage is not connected. Check the saved Blooio settings and refresh.",
+                    })
+                : canReadMessages
+                  ? t("pluginsview.IMessageConnected", {
+                      defaultValue:
+                        "iMessage is connected. Messages are being read from the local database.",
+                    })
+                  : isSendOnly
+                    ? t("pluginsview.IMessageSendOnly", {
+                        defaultValue:
+                          "iMessage can send, but Eliza cannot read local messages until Full Disk Access is granted.",
+                      })
+                    : t("pluginsview.IMessageSaveThenRefresh", {
+                        defaultValue:
+                          "iMessage is not connected. Save the connection settings, then refresh its status.",
+                      })}
         </div>
         {error ? <div className="text-danger">{error}</div> : null}
         {!error && status?.reason ? (
           <div className="text-muted">{status.reason}</div>
         ) : null}
-        {status?.chatDbPath ? (
+        {isNative && status?.chatDbPath ? (
           <div className="text-muted">Database: {status.chatDbPath}</div>
         ) : null}
-        {status?.bridgeType ? (
-          <div className="text-muted">Transport: macOS Messages</div>
+        {isNative || isHosted ? (
+          <div className="text-muted">
+            Saved transport: {isHosted ? "Blooio" : "macOS Messages"}
+          </div>
         ) : null}
         {permissionAction ? (
           <ol className="list-decimal space-y-1 pl-4 text-muted">
@@ -125,12 +146,17 @@ export function IMessageStatusPanel() {
             ))}
           </ol>
         ) : null}
-        <div className="text-muted">
-          {t("pluginsview.IMessagePermissionHint", {
-            defaultValue:
-              "iMessage reads ~/Library/Messages/chat.db directly. Full Disk Access must be granted to Eliza Desktop, or to Terminal/iTerm when running Eliza from a shell.",
-          })}
-        </div>
+        {isNative ? (
+          <div className="text-muted">
+            {t("pluginsview.IMessagePermissionHint", {
+              defaultValue:
+                "iMessage reads ~/Library/Messages/chat.db directly. Full Disk Access must be granted to Eliza Desktop, or to Terminal/iTerm when running Eliza from a shell.",
+            })}
+          </div>
+        ) : null}
+        {isHosted && status?.webhookPath ? (
+          <div className="text-muted">Signed webhook: {status.webhookPath}</div>
+        ) : null}
       </div>
     </PagePanel.Notice>
   );

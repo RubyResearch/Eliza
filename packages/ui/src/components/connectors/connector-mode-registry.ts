@@ -479,6 +479,24 @@ registerConnectorModes("whatsapp", [
 
 registerConnectorModes("imessage", [
   {
+    id: "blooio",
+    label: "Hosted iMessage",
+    description:
+      "Connect a Blooio sender and signed webhook on this agent's server.",
+    managementMode: "local-config",
+    setupPluginId: "imessage",
+    channelMode: "bot",
+    configFormHint:
+      "Choose blooio in Transport, enter the API key, webhook secret, sender number and channel ID, then save. Configure the provider's signed webhook for this agent before testing delivery.",
+    hiddenConfigKeys: [
+      "IMESSAGE_DB_PATH",
+      "IMESSAGE_POLL_INTERVAL_MS",
+      "IMESSAGE_HEARTBEAT_INTERVAL_MS",
+      "IMESSAGE_BACKFILL",
+    ],
+    defaultPriority: 1,
+  },
+  {
     id: "direct",
     label: "Messages on this Mac",
     labelKey: "connectormode.imessage.direct.label",

@@ -106,7 +106,7 @@ describe("connector mode registry seam", () => {
         elizaCloudConnected: true,
         cloudProvisioned: true,
       }).map((mode) => mode.id),
-    ).toEqual([]);
+    ).toEqual(["blooio"]);
 
     expect(
       getConnectorModes("telegram", {
@@ -175,17 +175,17 @@ describe("connector mode registry seam", () => {
     ).toEqual(["cloud", "always"]);
   });
 
-  it("offers only native direct iMessage outside managed cloud", () => {
+  it("offers hosted and native iMessage with native as the local default", () => {
     const offline = getConnectorModes("imessage", {
       elizaCloudConnected: false,
     });
-    expect(offline.map((mode) => mode.id)).toEqual(["direct"]);
+    expect(offline.map((mode) => mode.id)).toEqual(["blooio", "direct"]);
     expect(getDefaultConnectorModeId("imessage", offline)).toBe("direct");
 
     const online = getConnectorModes("imessage", {
       elizaCloudConnected: true,
     });
-    expect(online.map((mode) => mode.id)).toEqual(["direct"]);
+    expect(online.map((mode) => mode.id)).toEqual(["blooio", "direct"]);
     expect(getDefaultConnectorModeId("imessage", online)).toBe("direct");
   });
 
