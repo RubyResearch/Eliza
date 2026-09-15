@@ -6,7 +6,12 @@
  * model call, no reprocessing). The model response is a deterministic stub —
  * everything else (service, evaluators, stores, cache) is the production code.
  */
-import type { IAgentRuntime, JSONSchema, Memory } from "@elizaos/core";
+import type {
+  IAgentRuntime,
+  JSONSchema,
+  Memory,
+  TaskWorker,
+} from "@elizaos/core";
 import { describe, expect, it } from "vitest";
 import { EvaluatorService } from "../../../packages/core/src/services/evaluator.ts";
 import { anticipationFeedbackEvaluator } from "../src/lifeops/anticipation/evaluator.ts";
@@ -35,8 +40,13 @@ function createEvaluatorRuntime(modelOutput: Record<string, unknown>): {
 } {
   const calls: CapturedModelCall[] = [];
   const memories: Memory[] = [];
+  const workers = new Map<string, TaskWorker>();
   const runtime = createOwnerRuntimeStub({
     evaluators: [ftuGoalDiscoveryEvaluator, anticipationFeedbackEvaluator],
+    registerTaskWorker: (worker: TaskWorker) => {
+      workers.set(worker.name, worker);
+    },
+    getTaskWorker: (name: string) => workers.get(name),
     getMemories: async ({ roomId }: { roomId: string }) =>
       memories.filter((memory) => memory.roomId === roomId),
     useModel: (async (
