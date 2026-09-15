@@ -120,18 +120,35 @@ export async function handlePermissionsExtraRoutes(
       return true;
     }
 
+    const previousFeatures = state.config.features;
     if (!state.config.features) {
       state.config.features = {};
     }
-    (state.config.features as Record<string, unknown>).tradePermissionMode =
-      newMode;
+    const features = state.config.features as Record<string, unknown>;
+    const hadPreviousMode = Object.hasOwn(features, "tradePermissionMode");
+    const previousMode = features.tradePermissionMode;
+    features.tradePermissionMode = newMode;
 
     try {
       ctx.saveElizaConfig(state.config);
     } catch (err) {
-      logger.warn(
-        `[api] Trade-mode config save failed: ${err instanceof Error ? err.message : err}`,
+      // error-policy:J1 boundary translation — the in-memory mode is rolled
+      // back to the persisted value so a failed write cannot leave the process
+      // trading under a mode that disappears on restart; the client gets a
+      // structured 500 rather than `ok: true`.
+      if (previousFeatures === undefined) {
+        delete state.config.features;
+      } else if (!hadPreviousMode) {
+        delete features.tradePermissionMode;
+      } else {
+        features.tradePermissionMode = previousMode;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(
+        `[api] Trade-mode config save failed; mode left at the persisted value: ${message}`,
       );
+      error(res, `Failed to save trade permission mode: ${message}`, 500);
+      return true;
     }
 
     json(res, {

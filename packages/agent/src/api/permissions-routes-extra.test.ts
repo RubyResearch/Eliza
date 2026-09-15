@@ -281,12 +281,19 @@ describe("handlePermissionsExtraRoutes trade mode", () => {
     });
   });
 
-  it("returns the updated mode when persistence throws", async () => {
-    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
-    const { ctx, json, saveElizaConfig } = makeContext(
+  it("answers 500 and rolls the mode back when persistence throws", async () => {
+    const logError = vi
+      .spyOn(logger, "error")
+      .mockImplementation(() => undefined);
+    const { ctx, json, error, state, saveElizaConfig } = makeContext(
       "PUT",
       "/api/permissions/trade-mode",
-      { body: { mode: "agent-auto" } },
+      {
+        body: { mode: "agent-auto" },
+        config: {
+          features: { tradePermissionMode: "user-sign-only" },
+        } as unknown as ElizaConfig,
+      },
     );
     saveElizaConfig.mockImplementation(() => {
       throw new Error("disk full");
@@ -294,12 +301,17 @@ describe("handlePermissionsExtraRoutes trade mode", () => {
 
     await expect(handlePermissionsExtraRoutes(ctx)).resolves.toBe(true);
 
-    expect(warn).toHaveBeenCalledWith(
-      "[api] Trade-mode config save failed: disk full",
+    expect(logError).toHaveBeenCalledWith(
+      "[api] Trade-mode config save failed; mode left at the persisted value: disk full",
     );
-    expect(json).toHaveBeenCalledWith(
+    expect(error).toHaveBeenCalledWith(
       ctx.res,
-      expect.objectContaining({ ok: true, tradePermissionMode: "agent-auto" }),
+      "Failed to save trade permission mode: disk full",
+      500,
     );
+    expect(json).not.toHaveBeenCalled();
+    expect(state.config.features).toEqual({
+      tradePermissionMode: "user-sign-only",
+    });
   });
 });

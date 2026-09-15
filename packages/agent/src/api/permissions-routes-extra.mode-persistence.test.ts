@@ -323,6 +323,51 @@ describe("permissions-routes-extra — real automation parse and persistence", (
   });
 });
 
+describe("permissions-routes-extra — trade-mode persistence failure", () => {
+  it("rolls the trade mode back and answers 500 when the config write fails", async () => {
+    const saveElizaConfig = vi.fn((_config: ElizaConfig) => {
+      throw new Error("EACCES: permission denied, open 'config.json'");
+    });
+    const ctx = makeContext("/api/permissions/trade-mode", {
+      method: "PUT",
+      body: { mode: "user-sign-only" },
+      config: makeConfig({ tradePermissionMode: "agent-auto", other: true }),
+      saveElizaConfig,
+    });
+
+    await expect(handlePermissionsExtraRoutes(ctx)).resolves.toBe(true);
+
+    expect(saveElizaConfig).toHaveBeenCalledTimes(1);
+    expect(ctx.captured.status).toBe(500);
+    expect(ctx.captured.errorMessage).toContain("EACCES");
+    expect(ctx.json).not.toHaveBeenCalled();
+    expect(ctx.state.config.features).toEqual({
+      tradePermissionMode: "agent-auto",
+      other: true,
+    });
+    expect(resolveTradePermissionMode(ctx.state.config)).toBe("agent-auto");
+  });
+
+  it("removes a features object it created when the first-ever trade-mode write fails", async () => {
+    const saveElizaConfig = vi.fn((_config: ElizaConfig) => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    const ctx = makeContext("/api/permissions/trade-mode", {
+      method: "PUT",
+      body: { mode: "agent-auto" },
+      saveElizaConfig,
+    });
+
+    await expect(handlePermissionsExtraRoutes(ctx)).resolves.toBe(true);
+
+    expect(ctx.captured.status).toBe(500);
+    expect(ctx.captured.errorMessage).toContain("ENOSPC");
+    expect(ctx.json).not.toHaveBeenCalled();
+    expect(ctx.state.config.features).toBeUndefined();
+    expect(resolveTradePermissionMode(ctx.state.config)).toBe("user-sign-only");
+  });
+});
+
 describe("permissions-routes-extra — strict route matching", () => {
   it("does not claim a trailing-slash variant of either known path", async () => {
     const auto = makeContext("/api/permissions/automation-mode/");
