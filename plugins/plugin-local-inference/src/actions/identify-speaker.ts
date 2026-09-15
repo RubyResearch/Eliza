@@ -16,6 +16,10 @@
  * Target selection: an explicit `profileId` option wins; otherwise the
  * single most-recently-observed profile whose `entityId` is still `null`
  * (i.e. "the person who just spoke and isn't known yet").
+ *
+ * `name` and `profileId` are declared `parameters` so core's tool-argument
+ * validator lets the planner pass them; validated values arrive nested under
+ * `options.parameters`, while direct callers may still pass them top-level.
  */
 
 import {
@@ -86,12 +90,21 @@ function pickTarget(
 	return unbound[0] ?? null;
 }
 
-function optionString(options: unknown, key: string): string | null {
-	if (!options || typeof options !== "object") return null;
-	const value = (options as Record<string, unknown>)[key];
+function nonEmptyString(value: unknown): string | null {
 	return typeof value === "string" && value.trim().length > 0
 		? value.trim()
 		: null;
+}
+
+/** Read a string option from `options.<key>`, then `options.parameters.<key>`. */
+function optionString(options: unknown, key: string): string | null {
+	if (!options || typeof options !== "object") return null;
+	const record = options as Record<string, unknown>;
+	const direct = nonEmptyString(record[key]);
+	if (direct) return direct;
+	const parameters = record.parameters;
+	if (!parameters || typeof parameters !== "object") return null;
+	return nonEmptyString((parameters as Record<string, unknown>)[key]);
 }
 
 function metadataLabel(record: VoiceProfileRecord): string | null {
@@ -272,6 +285,23 @@ export const identifySpeakerAction: Action = {
 		'Attach a name to the most recently heard, still-unidentified voice so the agent recognizes that person across sessions. Use when the owner says who a recent speaker is ("that was Jill", "this is my friend Sam").',
 	routingHint:
 		"owner names a recent unknown speaker -> IDENTIFY_SPEAKER; not for naming the owner themselves or contacts unrelated to a heard voice",
+	parameters: [
+		{
+			name: "name",
+			description:
+				"Name to attach to the heard voice, exactly as the owner said it (for example Jill, Bob Smith). Omit to extract it from the message text.",
+			required: false,
+			schema: { type: "string" },
+		},
+		{
+			name: "profileId",
+			description:
+				"Id of the voice profile to bind. Omit to target the most recently heard voice that is still unidentified.",
+			required: false,
+			aliases: ["profile_id", "voiceProfileId"],
+			schema: { type: "string" },
+		},
+	],
 	validate,
 	handler,
 	examples: [],

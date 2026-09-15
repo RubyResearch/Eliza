@@ -6,6 +6,9 @@
  * round-trip is simulated by a fake runtime whose `emitEvent` mints an
  * entity id and invokes the real `handleVoiceEntityBound` consumer — so the
  * test exercises the full producer → bind path without loading lifeops.
+ * The planner-path cases run the real core `validateToolArgs` over the
+ * action's declared parameters and deliver the validated bag under
+ * `options.parameters`, as the runtime does.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,6 +21,7 @@ import type {
 } from "@elizaos/core";
 import { EventType } from "@elizaos/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { validateToolArgs } from "../../../packages/core/src/actions/validate-tool-args";
 import {
   extractSpeakerName,
   identifySpeakerAction,
@@ -277,5 +281,72 @@ describe("identifySpeakerAction", () => {
     ];
     expect(payload.imprintClusterId).toBe("cluster_a");
     expect((await store.get(a.profileId))?.entityId).toBe("ent_target");
+  });
+});
+
+describe("identifySpeakerAction planner parameters", () => {
+  it("declares name and profileId so the real validator accepts them", () => {
+    const validation = validateToolArgs(identifySpeakerAction, {
+      name: "Dana",
+      profileId: "vp_123",
+    });
+    expect(validation).toMatchObject({ valid: true, errors: [] });
+    expect(validation.args).toEqual({ name: "Dana", profileId: "vp_123" });
+  });
+
+  it("still rejects an undeclared argument", () => {
+    const validation = validateToolArgs(identifySpeakerAction, {
+      name: "Dana",
+      entityId: "ent_x",
+    });
+    expect(validation.valid).toBe(false);
+    expect(validation.errors).toEqual(["Unexpected argument 'entityId'"]);
+  });
+
+  it("reads name and an explicit profileId from the validated planner bag, and the explicit id wins", async () => {
+    const older = await store.createProfile({
+      centroid: unit([0, 1, 0, 0]),
+      embeddingModel: MODEL,
+      imprintClusterId: "cluster_older",
+      confidence: 0.5,
+      durationMs: 1500,
+    });
+    // A more recently observed unbound profile is what the fallback would
+    // pick; the explicit profileId must override it.
+    await store.createProfile({
+      centroid: unit([0, 0, 1, 0]),
+      embeddingModel: MODEL,
+      imprintClusterId: "cluster_newer",
+      confidence: 0.5,
+      durationMs: 1500,
+    });
+    const validation = validateToolArgs(identifySpeakerAction, {
+      name: "Dana",
+      profileId: older.profileId,
+    });
+    expect(validation.valid).toBe(true);
+
+    const { runtime, emitEvent } = makeRuntime("ent_dana");
+    // No name claim in the text: the name can only come from the planner bag.
+    const result = await identifySpeakerAction.handler!(
+      runtime,
+      makeMessage("attach a name to that voice"),
+      undefined,
+      { parameters: validation.args },
+      undefined,
+    );
+
+    expect(emitEvent).toHaveBeenCalledTimes(1);
+    const [, payload] = emitEvent.mock.calls[0] as [
+      string,
+      { imprintClusterId: string; text: string },
+    ];
+    expect(payload.imprintClusterId).toBe("cluster_older");
+    expect(payload.text).toBe("This is Dana.");
+    expect(result).toMatchObject({
+      success: true,
+      data: { profileId: older.profileId, entityId: "ent_dana", name: "Dana" },
+    });
+    expect((await store.get(older.profileId))?.entityId).toBe("ent_dana");
   });
 });
