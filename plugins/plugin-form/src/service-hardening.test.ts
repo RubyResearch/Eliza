@@ -6,13 +6,22 @@
 import type { Component, IAgentRuntime, UUID } from "@elizaos/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildFormExtractorPromptSection,
   coerceExtractionsAgainstControls,
+  detectCorrection,
+  extractSingleField,
   parseFormExtractorOutput,
 } from "./extraction";
 import { MAX_FORM_CONTROL_NODES } from "./form-control-graph";
 import { FormService } from "./service";
 import type { FormDefinition } from "./types";
-import { parseValue, validateField } from "./validation";
+import {
+  clearTypeHandlers,
+  formatValue,
+  parseValue,
+  registerTypeHandler,
+  validateField,
+} from "./validation";
 
 const entityId = "00000000-0000-4000-8000-000000000101" as UUID;
 const roomId = "00000000-0000-4000-8000-000000000102" as UUID;
@@ -144,6 +153,218 @@ describe("FormService form schema hardening", () => {
     await expect(service.submit(session.id, entityId)).rejects.toThrow(
       "Field age is invalid",
     );
+  });
+
+  it("uses registered top-level control behavior in the service and extractor", async () => {
+    const control = { key: "phone", label: "Phone", type: "phone" };
+    service.registerControlType({
+      id: "phone",
+      validate: (value) => ({
+        valid: value === "+15551234567",
+        error: "Phone must include country code",
+      }),
+      parse: (value) => value.replace(/[\s-]/g, ""),
+      format: (value) => `Contact ${value}`,
+      extractionPrompt: "a phone number including country code",
+    });
+    service.registerForm(validForm({ controls: [control] }));
+
+    const session = await service.startSession("signup", entityId, roomId, {
+      initialValues: { phone: "555-123-4567" },
+    });
+    expect(session.fields.phone.status).toBe("invalid");
+    expect(session.fields.phone.error).toBe("Phone must include country code");
+
+    const type = service.getControlType("phone");
+    expect(parseValue("+1 555-123-4567", control, type)).toBe("+15551234567");
+    expect(validateField("bad", control, type)).toEqual({
+      valid: false,
+      error: "Phone must include country code",
+    });
+    expect(formatValue("+15551234567", control, type)).toBe(
+      "Contact +15551234567",
+    );
+
+    const prompt = buildFormExtractorPromptSection({
+      text: "My number is +1 555-123-4567",
+      form: validForm({ controls: [control] }),
+      controls: [control],
+      resolveControlType: (id) => service.getControlType(id),
+    });
+    expect(prompt).toContain("a phone number including country code");
+
+    const coerced = coerceExtractionsAgainstControls(
+      [
+        { field: "phone", value: "+1 555-123-4567", confidence: 1 },
+        { field: "phone", value: "bad", confidence: 1 },
+      ],
+      [control],
+      undefined,
+      (id) => service.getControlType(id),
+    );
+    expect(coerced[0]?.value).toBe("+15551234567");
+    expect(coerced[0]?.confidence).toBe(1);
+    expect(coerced[1]?.confidence).toBe(0.3);
+  });
+
+  it("keeps an entered calendar day across host timezones and rejects yearless dates", async () => {
+    const control = { key: "dueDate", label: "Due date", type: "date" };
+    const priorTimezone = process.env.TZ;
+    try {
+      for (const timezone of [
+        "Asia/Tokyo",
+        "Europe/Berlin",
+        "America/Los_Angeles",
+        "UTC",
+      ]) {
+        process.env.TZ = timezone;
+        expect(parseValue("September 15, 2026", control)).toBe("2026-09-15");
+        expect(parseValue("9/15/2026", control)).toBe("2026-09-15");
+        expect(parseValue("Sept 15, 2026", control)).toBe("2026-09-15");
+        expect(parseValue("15 September 2026", control)).toBe("2026-09-15");
+        expect(validateField("2026-09-15", control).valid).toBe(true);
+        expect(validateField("2026-02-30", control).valid).toBe(false);
+        expect(
+          validateField(parseValue("Sept 15", control), control).valid,
+        ).toBe(false);
+      }
+
+      process.env.TZ = "America/Los_Angeles";
+      const dateType = service.getControlType("date");
+      expect(formatValue("2026-09-15", control, dateType)).toContain("15");
+      expect(formatValue("2026-09-15", control, dateType)).not.toContain("14");
+
+      service.registerForm(validForm({ controls: [control] }));
+      const session = await service.startSession("signup", entityId, roomId, {
+        initialValues: { dueDate: parseValue("September 15, 2026", control) },
+      });
+      expect(session.fields.dueDate).toMatchObject({
+        status: "filled",
+        value: "2026-09-15",
+      });
+      expect(
+        service.getSessionContext(session).filledFields[0]?.displayValue,
+      ).toContain("15");
+    } finally {
+      if (priorTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = priorTimezone;
+    }
+  });
+
+  it("keeps control-type behavior scoped to its FormService and sends the hint to single-field extraction", async () => {
+    const control = { key: "phone", label: "Phone", type: "phone" };
+    service.registerControlType({
+      id: "phone",
+      parse: (value) => `first:${value}`,
+      extractionPrompt: "first agent phone format",
+    });
+    const other = (await FormService.start(makeRuntime())) as FormService;
+    other.registerControlType({
+      id: "phone",
+      parse: (value) => `second:${value}`,
+      extractionPrompt: "second agent phone format",
+    });
+    expect(parseValue("123", control, service.getControlType("phone"))).toBe(
+      "first:123",
+    );
+    expect(parseValue("123", control, other.getControlType("phone"))).toBe(
+      "second:123",
+    );
+
+    const useModel = vi.fn(
+      async (_model: unknown, _params: { prompt: string }) =>
+        JSON.stringify({ found: true, value: "123", confidence: 1 }),
+    );
+    const runtime = {
+      ...makeRuntime(),
+      getService: (name: string) => (name === "FORM" ? service : null),
+      useModel,
+    } as unknown as IAgentRuntime;
+    const extracted = await extractSingleField(
+      runtime,
+      "Call me at 123",
+      control,
+    );
+    expect(extracted?.value).toBe("first:123");
+    expect(useModel).toHaveBeenCalledTimes(1);
+    const modelInput = useModel.mock.calls[0]?.[1];
+    expect(modelInput?.prompt).toContain("first agent phone format");
+    expect(modelInput?.prompt).not.toContain("second agent phone format");
+  });
+
+  it("parses a corrected top-level value with the owning runtime's registered type", async () => {
+    const control = { key: "phone", label: "Phone", type: "phone" };
+    service.registerControlType({
+      id: "phone",
+      parse: (value) => value.replace(/[\s-]/g, ""),
+    });
+    const useModel = vi.fn(async () =>
+      JSON.stringify({
+        has_correction: true,
+        corrections: [
+          {
+            field: "Phone",
+            old_value: "555-000-0000",
+            new_value: "+1 555-123-4567",
+            confidence: 0.9,
+          },
+        ],
+      }),
+    );
+    const runtime = {
+      ...makeRuntime(),
+      getService: (name: string) => (name === "FORM" ? service : null),
+      useModel,
+    } as unknown as IAgentRuntime;
+    const corrected = await detectCorrection(
+      runtime,
+      "Actually, use +1 555-123-4567",
+      { phone: "555-000-0000" },
+      [control],
+    );
+    expect(useModel).toHaveBeenCalledTimes(1);
+    expect(corrected[0]).toMatchObject({
+      field: "phone",
+      value: "+15551234567",
+      confidence: 0.9,
+      isCorrection: true,
+    });
+  });
+
+  it("preserves an explicit legacy handler override of a built-in without overriding a runtime custom type", () => {
+    const control = { key: "dueDate", label: "Due date", type: "date" };
+    registerTypeHandler("date", {
+      validate: () => ({ valid: false, error: "Legacy date override" }),
+      parse: () => "legacy-date",
+      format: () => "legacy-display",
+      extractionPrompt: "legacy date hint",
+    });
+    try {
+      const builtin = service.getControlType("date");
+      expect(parseValue("September 15, 2026", control, builtin)).toBe(
+        "legacy-date",
+      );
+      expect(validateField("2026-09-15", control, builtin).error).toBe(
+        "Legacy date override",
+      );
+      expect(formatValue("2026-09-15", control, builtin)).toBe(
+        "legacy-display",
+      );
+
+      service.registerControlType(
+        { id: "date", parse: () => "runtime-date" },
+        { allowOverride: true },
+      );
+      expect(
+        parseValue(
+          "September 15, 2026",
+          control,
+          service.getControlType("date"),
+        ),
+      ).toBe("runtime-date");
+    } finally {
+      clearTypeHandlers();
+    }
   });
 
   it("uses null-prototype value maps for retrieved session values", () => {

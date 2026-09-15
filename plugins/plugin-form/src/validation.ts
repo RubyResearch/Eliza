@@ -52,8 +52,9 @@ import {
   MAX_UNTRUSTED_REGEX_PATTERN_LENGTH,
   matchesSafeUntrustedRegexPattern,
 } from "@elizaos/shared/config/config-catalog";
+import { formatCalendarDate, parseCalendarDate } from "./calendar-date";
 import { strictEmailValid } from "./email";
-import type { FormControl, TypeHandler } from "./types";
+import type { ControlType, FormControl, TypeHandler } from "./types";
 
 /**
  * Validation result.
@@ -110,8 +111,19 @@ export function registerTypeHandler(type: string, handler: TypeHandler): void {
  *
  * @returns The handler or undefined if not registered
  */
-export function getTypeHandler(type: string): TypeHandler | undefined {
-  return typeHandlers.get(type);
+export function getTypeHandler(type: string): TypeHandler | undefined;
+export function getTypeHandler(
+  type: string,
+  controlType: ControlType | undefined,
+): TypeHandler | ControlType | undefined;
+export function getTypeHandler(
+  type: string,
+  controlType?: ControlType,
+): TypeHandler | ControlType | undefined {
+  // New per-runtime custom types own their field grammar. An explicit legacy
+  // handler still overrides a built-in, as it did before service lookups.
+  if (controlType && !controlType.builtin) return controlType;
+  return typeHandlers.get(type) ?? controlType;
 }
 
 /**
@@ -152,6 +164,7 @@ export function clearTypeHandlers(): void {
 export function validateField(
   value: JsonValue,
   control: FormControl,
+  controlType?: ControlType,
 ): ValidationResult {
   // Check required first - fastest check
   if (control.required) {
@@ -171,12 +184,25 @@ export function validateField(
 
   // Check custom type handler first
   // WHY: Allows overriding built-in types or adding new ones
-  const handler = typeHandlers.get(control.type);
+  const handler = getTypeHandler(control.type, controlType);
   if (handler?.validate) {
     const result = handler.validate(value, control);
     if (!result.valid) {
+      // Keep the existing field-specific number error wording while the
+      // registered built-in still participates in validation.
+      if (
+        handler === controlType &&
+        controlType?.builtin &&
+        control.type === "number"
+      ) {
+        return validateNumber(value, control);
+      }
       return result;
     }
+    // A registered custom type owns its value grammar. Field-level text
+    // constraints still apply, but a built-in switch must not override it.
+    if (controlType && !controlType.builtin)
+      return validateText(value, control);
   }
 
   // Type-specific validation
@@ -428,46 +454,32 @@ function validateBoolean(
 /**
  * Validate date field.
  *
- * WHY flexible parsing:
- * - Users say "tomorrow", "next Monday", "12/25/2024"
- * - LLM should normalize to parseable format
- * - We accept anything Date() can parse
+ * Date-only fields require an explicit year and a real calendar day. A host
+ * timezone must not turn local midnight into a different submitted date.
  */
 function validateDate(
   value: JsonValue,
   control: FormControl,
 ): ValidationResult {
-  let dateValue: Date;
-
-  if (value instanceof Date) {
-    dateValue = value;
-  } else if (typeof value === "string" || typeof value === "number") {
-    dateValue = new Date(value);
-  } else {
+  const iso = typeof value === "string" ? parseCalendarDate(value) : undefined;
+  if (!iso) {
     return {
       valid: false,
       error: `${control.label || control.key} must be a valid date`,
     };
   }
-
-  // Invalid Date check
-  if (Number.isNaN(dateValue.getTime())) {
-    return {
-      valid: false,
-      error: `${control.label || control.key} must be a valid date`,
-    };
-  }
+  const timestamp = new Date(`${iso}T00:00:00.000Z`).getTime();
 
   // Min/max as timestamps
   // WHY: Form definition can set date ranges (e.g., dates after today only)
-  if (control.min !== undefined && dateValue.getTime() < control.min) {
+  if (control.min !== undefined && timestamp < control.min) {
     return {
       valid: false,
       error: `${control.label || control.key} is too early`,
     };
   }
 
-  if (control.max !== undefined && dateValue.getTime() > control.max) {
+  if (control.max !== undefined && timestamp > control.max) {
     return {
       valid: false,
       error: `${control.label || control.key} is too late`,
@@ -620,9 +632,13 @@ function formatBytes(bytes: number): string {
  * @param control - Field definition to determine type
  * @returns Parsed value of appropriate type
  */
-export function parseValue(value: string, control: FormControl): JsonValue {
+export function parseValue(
+  value: string,
+  control: FormControl,
+  controlType?: ControlType,
+): JsonValue {
   // Check for custom type handler
-  const handler = typeHandlers.get(control.type);
+  const handler = getTypeHandler(control.type, controlType);
   if (handler?.parse) {
     return handler.parse(value);
   }
@@ -651,10 +667,7 @@ export function parseValue(value: string, control: FormControl): JsonValue {
     }
 
     case "date": {
-      const timestamp = Date.parse(value);
-      return Number.isFinite(timestamp)
-        ? new Date(timestamp).toISOString()
-        : value;
+      return parseCalendarDate(value) ?? value;
     }
     default:
       // Keep as string for text-like types
@@ -679,14 +692,12 @@ export function parseValue(value: string, control: FormControl): JsonValue {
  * @param control - Field definition with display hints
  * @returns Human-readable string representation
  */
-export function formatValue(value: JsonValue, control: FormControl): string {
+export function formatValue(
+  value: JsonValue,
+  control: FormControl,
+  controlType?: ControlType,
+): string {
   if (value === undefined || value === null) return "";
-
-  // Check for custom type handler
-  const handler = typeHandlers.get(control.type);
-  if (handler?.format) {
-    return handler.format(value);
-  }
 
   // Sensitive fields should be masked
   // WHY: Passwords, tokens shouldn't be echoed back to user
@@ -698,6 +709,9 @@ export function formatValue(value: JsonValue, control: FormControl): string {
     return "****";
   }
 
+  const handler = getTypeHandler(control.type, controlType);
+  if (handler?.format) return handler.format(value);
+
   switch (control.type) {
     case "number":
       // Use locale formatting for numbers
@@ -708,8 +722,7 @@ export function formatValue(value: JsonValue, control: FormControl): string {
       return value ? "Yes" : "No";
 
     case "date":
-      // Locale-appropriate date format
-      return value instanceof Date ? value.toLocaleDateString() : String(value);
+      return formatCalendarDate(String(value)) ?? String(value);
 
     case "select":
       // Show option label instead of value

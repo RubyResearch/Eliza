@@ -434,6 +434,7 @@ export class FormService extends Service {
         const validation = validateField(
           options.initialValues[control.key],
           control,
+          this.getControlType(control.type),
         );
         fields[control.key] = {
           status: validation.valid ? "filled" : "invalid",
@@ -443,7 +444,11 @@ export class FormService extends Service {
           error: validation.error,
         };
       } else if (control.defaultValue !== undefined) {
-        const validation = validateField(control.defaultValue, control);
+        const validation = validateField(
+          control.defaultValue,
+          control,
+          this.getControlType(control.type),
+        );
         fields[control.key] = {
           status: validation.valid ? "filled" : "invalid",
           value: control.defaultValue,
@@ -562,7 +567,11 @@ export class FormService extends Service {
     const oldValue = session.fields[field]?.value;
 
     // Validate the value
-    const validation = validateField(value, control);
+    const validation = validateField(
+      value,
+      control,
+      this.getControlType(control.type),
+    );
 
     // Determine status based on confidence and validation
     let status: FieldState["status"];
@@ -837,7 +846,11 @@ export class FormService extends Service {
       }
     } else {
       // Fallback to basic validation
-      const validation = validateField(value, subControl);
+      const validation = validateField(
+        value,
+        subControl,
+        this.getControlType(subControl.type),
+      );
       if (!validation.valid) {
         subFieldStatus = "invalid";
         error = validation.error;
@@ -1197,7 +1210,11 @@ export class FormService extends Service {
     for (const control of form.controls) {
       const fieldState = session.fields[control.key];
       if (fieldState?.value !== undefined) {
-        const validation = validateField(fieldState.value, control);
+        const validation = validateField(
+          fieldState.value,
+          control,
+          this.getControlType(control.type),
+        );
         if (!validation.valid) {
           const error = validation.error ?? "validation failed";
           throw new Error(`Field ${control.key} is invalid: ${error}`);
@@ -1472,7 +1489,11 @@ export class FormService extends Service {
         filledFields.push({
           key: control.key,
           label: control.label,
-          displayValue: formatValue(fieldState.value ?? null, control),
+          displayValue: formatValue(
+            fieldState.value ?? null,
+            control,
+            this.getControlType(control.type),
+          ),
         });
       } else if (fieldState?.status === "pending") {
         // External field waiting for confirmation

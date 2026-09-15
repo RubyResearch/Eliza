@@ -323,6 +323,7 @@ describe("form_extractor evaluator", () => {
       getActiveSession: vi.fn(async () => session),
       getStashedSessions: vi.fn(async () => []),
       getForm: vi.fn(() => signupForm),
+      getControlType: vi.fn(() => undefined),
     };
     const runtime = makeRuntime(formService);
     const message = makeMessage("my email is jane@example.com");
@@ -352,6 +353,7 @@ describe("form_extractor evaluator", () => {
       getActiveSession: vi.fn(async () => refreshed),
       getStashedSessions: vi.fn(async () => []),
       getForm: vi.fn(() => signupForm),
+      getControlType: vi.fn(() => undefined),
       updateField: vi.fn(async () => undefined),
       saveSession: vi.fn(async () => undefined),
       isExternalType: vi.fn(() => false),

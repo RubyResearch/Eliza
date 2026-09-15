@@ -195,6 +195,7 @@ const formExtractionsProcessor: EvaluatorProcessor<
       output.formExtractions,
       form.controls,
       prepared.templateValues,
+      (typeId) => formService.getControlType(typeId),
     );
 
     for (const extraction of coerced) {
@@ -331,6 +332,8 @@ export const formEvaluator: Evaluator<
       form: prepared.form,
       controls: prepared.form.controls,
       templateValues: prepared.templateValues,
+      resolveControlType: (typeId) =>
+        prepared.formService.getControlType(typeId),
     });
   },
 

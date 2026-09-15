@@ -63,6 +63,7 @@
  */
 
 import type { JsonValue } from "@elizaos/core";
+import { formatCalendarDate, parseCalendarDate } from "./calendar-date";
 import { basicEmailValid } from "./email";
 import type { ControlType, FormControl, ValidationResult } from "./types";
 import { testControlPattern } from "./validation";
@@ -70,15 +71,6 @@ import { testControlPattern } from "./validation";
 // ============================================================================
 // VALIDATION HELPERS
 // ============================================================================
-
-/**
- * ISO date regex pattern
- * WHY this pattern:
- * - Matches YYYY-MM-DD format
- * - Common standard for data exchange
- * - LLM can normalize other formats to this
- */
-const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 // ============================================================================
 // BUILT-IN CONTROL TYPES
@@ -396,36 +388,21 @@ const dateType: ControlType = {
       return { valid: true }; // Empty is valid; required check is separate
     }
 
-    const str = String(value);
-
-    // Check ISO format
-    if (!ISO_DATE_REGEX.test(str)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
       return { valid: false, error: "Must be in YYYY-MM-DD format" };
     }
-
-    // Check if it's a valid date
-    const date = new Date(str);
-    if (Number.isNaN(date.getTime())) {
+    if (!parseCalendarDate(String(value))) {
       return { valid: false, error: "Invalid date" };
     }
 
     return { valid: true };
   },
 
-  parse: (value: string): string => {
-    // Try to parse and normalize to ISO
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) {
-      return date.toISOString().split("T")[0];
-    }
-    return value.trim();
-  },
+  parse: (value: string): string => parseCalendarDate(value) ?? value.trim(),
 
   format: (value: JsonValue): string => {
     if (!value) return "";
-    const date = new Date(String(value));
-    if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleDateString();
+    return formatCalendarDate(String(value)) ?? String(value);
   },
 
   extractionPrompt: "a date (preferably in YYYY-MM-DD format)",

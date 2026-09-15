@@ -9,9 +9,11 @@
 
 import type { IAgentRuntime, JSONSchema, JsonValue } from "@elizaos/core";
 import { ModelType } from "@elizaos/core";
+import { FormService } from "./service";
 import type { TemplateValues } from "./template";
 import { resolveControlTemplates } from "./template";
 import type {
+  ControlType,
   ExtractionResult,
   FormControl,
   FormDefinition,
@@ -161,8 +163,9 @@ export function buildFormExtractorPromptSection(params: {
   form: FormDefinition;
   controls: FormControl[];
   templateValues?: TemplateValues;
+  resolveControlType?: (typeId: string) => ControlType | undefined;
 }): string {
-  const { text, form, controls, templateValues } = params;
+  const { text, form, controls, templateValues, resolveControlType } = params;
 
   const resolvedControls = templateValues
     ? controls.map((control) =>
@@ -172,7 +175,7 @@ export function buildFormExtractorPromptSection(params: {
 
   const visibleControls = resolvedControls.filter((c) => !c.hidden);
   const fieldsDescription = visibleControls.map((c) => {
-    const handler = getTypeHandler(c.type);
+    const handler = getTypeHandler(c.type, resolveControlType?.(c.type));
     const typeHint = handler?.extractionPrompt || c.type;
     return {
       key: c.key,
@@ -280,6 +283,7 @@ export function coerceExtractionsAgainstControls(
   extractions: ExtractionResult[],
   controls: FormControl[],
   templateValues?: TemplateValues,
+  resolveControlType?: (typeId: string) => ControlType | undefined,
 ): ExtractionResult[] {
   const resolvedControls = templateValues
     ? controls.map((control) =>
@@ -301,13 +305,14 @@ export function coerceExtractionsAgainstControls(
 
     const control = controlsByKey.get(extraction.field);
     if (!control) return [];
+    const controlType = resolveControlType?.(control.type);
 
     let value = extraction.value;
     if (typeof value === "string") {
-      value = parseValue(value, control);
+      value = parseValue(value, control, controlType);
     }
 
-    const validation = validateField(value, control);
+    const validation = validateField(value, control, controlType);
     if (!validation.valid) {
       const reasoning =
         `${extraction.reasoning ?? ""} (Validation failed: ${validation.error})`.trim();
@@ -345,7 +350,12 @@ export async function extractSingleField(
   const resolvedControl = templateValues
     ? resolveControlTemplates(control, templateValues)
     : control;
-  const handler = getTypeHandler(resolvedControl.type);
+  const formService = runtime.getService("FORM");
+  const controlType =
+    formService instanceof FormService
+      ? formService.getControlType(resolvedControl.type)
+      : undefined;
+  const handler = getTypeHandler(resolvedControl.type, controlType);
   const typeHint = handler?.extractionPrompt || resolvedControl.type;
 
   const prompt = `Extract a single form field value from the user message.
@@ -388,7 +398,7 @@ Return only a valid JSON object with this schema:
 
   let value = parsed.value;
   if (typeof value === "string") {
-    value = parseValue(value, resolvedControl);
+    value = parseValue(value, resolvedControl, controlType);
   }
 
   const confidence =
@@ -485,6 +495,7 @@ Rules:
     parsed?.has_correction === true || parsed?.has_correction === "true";
   if (!parsed || !hasCorrection || !parsed.corrections) return [];
 
+  const formService = runtime.getService("FORM");
   const corrections: ExtractionResult[] = [];
   const correctionList = Array.isArray(parsed.corrections)
     ? parsed.corrections
@@ -506,7 +517,11 @@ Rules:
 
     let value = correction.new_value;
     if (typeof value === "string") {
-      value = parseValue(value, control);
+      const controlType =
+        formService instanceof FormService
+          ? formService.getControlType(control.type)
+          : undefined;
+      value = parseValue(value, control, controlType);
     }
 
     const confidence =
