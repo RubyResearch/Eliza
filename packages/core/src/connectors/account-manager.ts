@@ -184,6 +184,12 @@ export interface ConnectorOAuthCallbackResult {
 
 export interface ConnectorAccountProvider {
 	provider: string;
+	/**
+	 * Opt in when listAccounts reports current transport readiness. Stored
+	 * disabled/revoked decisions still win; missing live accounts stay pending.
+	 * Other providers retain stored status as their authority.
+	 */
+	statusAuthority?: "provider";
 	label?: string;
 	messageConnector?: MessageConnectorRegistration;
 	postConnector?: PostConnectorRegistration;
@@ -485,6 +491,7 @@ function cloneAccount(account: ConnectorAccount): ConnectorAccount {
 function mergeStoredAndProviderAccount(
 	stored: ConnectorAccount,
 	providerAccount: ConnectorAccount,
+	providerOwnsStatus = false,
 ): ConnectorAccount {
 	return {
 		...providerAccount,
@@ -495,7 +502,12 @@ function mergeStoredAndProviderAccount(
 		role: stored.role,
 		purpose: [...stored.purpose],
 		accessGate: stored.accessGate,
-		status: stored.status,
+		status:
+			providerOwnsStatus &&
+			stored.status !== "disabled" &&
+			stored.status !== "revoked"
+				? providerAccount.status
+				: stored.status,
 		externalId: stored.externalId ?? providerAccount.externalId,
 		displayHandle: stored.displayHandle ?? providerAccount.displayHandle,
 		ownerBindingId: stored.ownerBindingId ?? providerAccount.ownerBindingId,
@@ -1540,6 +1552,42 @@ export class ConnectorAccountManager extends Service {
 			const providerAccounts = (await registered.listAccounts(this)).map(
 				cloneAccount,
 			);
+			if (registered.statusAuthority === "provider") {
+				const consumed = new Set<ConnectorAccount>();
+				const reconciled = storedAccounts.map((stored) => {
+					const matches = providerAccounts.filter(
+						(account) =>
+							account.id === stored.id ||
+							(stored.accountKey !== undefined &&
+								(account.id === stored.accountKey ||
+									account.accountKey === stored.accountKey)),
+					);
+					if (matches.length > 1 || (matches[0] && consumed.has(matches[0]))) {
+						throw new ElizaError(
+							"Connector inventory contains ambiguous account identities",
+							{
+								code: "CONNECTOR_ACCOUNT_AMBIGUOUS",
+								context: { provider: providerId, accountId: stored.id },
+							},
+						);
+					}
+					const current = matches[0];
+					if (!current)
+						return {
+							...stored,
+							status:
+								stored.status === "disabled" || stored.status === "revoked"
+									? stored.status
+									: ("pending" as const),
+						};
+					consumed.add(current);
+					return mergeStoredAndProviderAccount(stored, current, true);
+				});
+				return [
+					...reconciled,
+					...providerAccounts.filter((account) => !consumed.has(account)),
+				];
+			}
 			const merged = new Map<string, ConnectorAccount>();
 			for (const account of storedAccounts) {
 				merged.set(account.id, account);
@@ -1562,8 +1610,12 @@ export class ConnectorAccountManager extends Service {
 	): Promise<ConnectorAccount | null> {
 		const providerId = normalizeProvider(provider);
 		const stored = await this.storage.getAccount(providerId, accountId);
-		if (stored) return stored;
 		const registered = this.providers.get(providerId);
+		if (stored) {
+			if (registered?.statusAuthority !== "provider") return stored;
+			const accounts = await this.listAccounts(providerId);
+			return accounts.find((account) => account.id === stored.id) ?? null;
+		}
 		if (!registered?.listAccounts) return null;
 		const providerAccounts = (await registered.listAccounts(this)).map(
 			cloneAccount,
