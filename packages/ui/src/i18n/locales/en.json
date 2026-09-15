@@ -1,4 +1,5 @@
 {
+  "eventEditor.googleUpdatePending": "Saved in Eliza. Google calendar update pending.",
   "accounts.add.apiDescription": "Paste your API key. The key is stored locally with mode 0600.",
   "accounts.add.apiKey": "API key",
   "accounts.add.apikey.failed": "Failed to add account.",

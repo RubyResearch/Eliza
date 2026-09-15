@@ -880,6 +880,21 @@ export function EventEditorDrawer({
     ? t("eventEditor.creating", { defaultValue: "Creating event" })
     : t("common.saving", { defaultValue: "Saving event" });
 
+  const deduplication = event?.metadata.deduplication;
+  const pendingUpdate =
+    event?.provider === "eliza" &&
+    typeof deduplication === "object" &&
+    deduplication !== null &&
+    "pendingUpdate" in deduplication
+      ? deduplication.pendingUpdate
+      : null;
+  const hasPendingGoogleUpdate =
+    typeof pendingUpdate === "object" &&
+    pendingUpdate !== null &&
+    "linkId" in pendingUpdate &&
+    typeof pendingUpdate.linkId === "string" &&
+    pendingUpdate.linkId.length > 0;
+
   const selectedCalendarOption = findSelectedCalendarOption(
     calendarOptions,
     form,
@@ -933,6 +948,15 @@ export function EventEditorDrawer({
           <div className="min-w-0 space-y-4 p-5">
             {error ? (
               <div className="p-1 text-xs text-danger">{error}</div>
+            ) : null}
+
+            {hasPendingGoogleUpdate ? (
+              <p role="status" className="p-1 text-xs leading-5 text-muted">
+                {t("eventEditor.googleUpdatePending", {
+                  defaultValue:
+                    "Saved in Eliza. Google calendar update pending.",
+                })}
+              </p>
             ) : null}
 
             {readOnlyReason ? (
