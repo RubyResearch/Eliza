@@ -2258,6 +2258,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendTelegramMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     target: string;
     message: string;
   }): Promise<TelegramSendMessageResult> {
@@ -2329,6 +2330,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendDiscordMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     channelId?: string;
     /** Discord user id target (DM via createDM); exclusive with channelId. */
     userId?: string;

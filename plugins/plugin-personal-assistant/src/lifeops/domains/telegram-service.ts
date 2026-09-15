@@ -14,7 +14,10 @@ import {
   type VerifyLifeOpsTelegramConnectorResponse,
 } from "@elizaos/shared";
 import type { LifeOpsContext } from "../lifeops-context.js";
-import { ConnectorDeliveryEvidenceError } from "../messaging/connector-delivery-evidence.js";
+import {
+  ConnectorDeliveryEvidenceError,
+  ConnectorSenderChangedError,
+} from "../messaging/connector-delivery-evidence.js";
 import {
   searchTelegramMessagesWithRuntimeService,
   sendTelegramMessageWithRuntimeService,
@@ -288,6 +291,7 @@ export class TelegramDomain {
 
   async sendTelegramMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     target: string;
     message: string;
   }): Promise<TelegramSendMessageResult> {
@@ -305,6 +309,7 @@ export class TelegramDomain {
 
     const delegated = await sendTelegramMessageWithRuntimeService({
       runtime: this.ctx.runtime,
+      expectedIdentityId: request.expectedIdentityId,
       grant: status.grant,
       target,
       message,
@@ -316,7 +321,10 @@ export class TelegramDomain {
         receipt: delegated.value.delivery.receipt ?? null,
       };
     }
-    if (delegated.error instanceof ConnectorDeliveryEvidenceError)
+    if (
+      delegated.error instanceof ConnectorDeliveryEvidenceError ||
+      delegated.error instanceof ConnectorSenderChangedError
+    )
       throw delegated.error;
     if (delegated.error) {
       this.ctx.logLifeOpsWarn(

@@ -3,19 +3,24 @@
  * store, and PGlite approval queue. Retargeted reviews stop before execution;
  * no connector is substituted or contacted by this boundary test.
  */
+
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { resolveKnowledgeGraphService } from "@elizaos/agent";
 import { AuthStore } from "@elizaos/app-core/services/auth-store";
 import type { Plugin } from "@elizaos/core";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { tryHandleRuntimePluginRoute } from "../../../../packages/agent/src/api/runtime-plugin-routes.ts";
 import { LocalFileStorageService } from "../../../../packages/agent/src/services/file-storage.js";
+import { installCalendarCardConnectorStatusFixtures } from "../../test/helpers/calendar-card-connector-status.js";
 import { createLifeOpsTestRuntime } from "../../test/helpers/runtime.js";
 import { executeApprovedRequest } from "../actions/resolve-request.js";
 import { createApprovalQueue } from "../lifeops/approval-queue.js";
 import { verifyCalendarCardApproval } from "../lifeops/calendar-card.js";
+import { LifeOpsService } from "../lifeops/service.js";
 import { bindMachineAuthIdentityToEntity } from "./authenticated-entity-principal.js";
+
+afterEach(() => vi.restoreAllMocks());
 
 const storage: Plugin = {
   name: "calendar-channel-private-storage",
@@ -26,6 +31,7 @@ const storage: Plugin = {
 it("queues the selected channel and rejects transport or recipient changes before dispatch", async () => {
   const host = await createLifeOpsTestRuntime({ plugins: [storage] });
   const runtime = host.runtime;
+  installCalendarCardConnectorStatusFixtures();
   const publicOrigin = "https://calendar.example.org:8443";
   runtime.setSetting("ELIZA_EXTERNAL_BASE_URL", publicOrigin);
   const server = createServer(async (req, res) => {
@@ -118,7 +124,7 @@ it("queues the selected channel and rejects transport or recipient changes befor
       expect(request.channel).toBe(channel);
       expect(request.subjectUserId).not.toBe(guest.entityId);
       expect(request.payload.calendarCard).toMatchObject({
-        version: 3,
+        version: 4,
         ownerEntityId: request.subjectUserId,
         recipientEntityId: guest.entityId,
       });
@@ -175,6 +181,34 @@ it("queues the selected channel and rejects transport or recipient changes befor
       state: null,
       action: null,
     });
+    const senderStatus = await new LifeOpsService(
+      runtime,
+    ).getTelegramConnectorStatus("agent");
+    vi.mocked(
+      LifeOpsService.prototype.getTelegramConnectorStatus,
+    ).mockResolvedValueOnce({ ...senderStatus, identity: null });
+    const unidentified = await fetch(
+      `http://127.0.0.1:${address.port}/api/lifeops/calendar/cards`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          channel: "telegram",
+          date: "2026-09-15",
+          timeZone: "UTC",
+          privacyMode: "full",
+          recipient: "self",
+          events: [],
+        }),
+      },
+    );
+    expect(unidentified.status).toBe(503);
+    expect(await unidentified.json()).toMatchObject({
+      code: "CALENDAR_CARD_SENDER_UNAVAILABLE",
+    });
+    expect(
+      await queue.list({ subjectUserId: null, state: null, action: null }),
+    ).toEqual(before);
     for (const configured of [
       "",
       "http://calendar.example.org",

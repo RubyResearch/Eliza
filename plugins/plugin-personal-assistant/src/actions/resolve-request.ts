@@ -1139,7 +1139,8 @@ export async function executeApprovedRequest(args: {
           ? calendarCard.correlation.channel
           : "imessage") ||
       args.request.subjectUserId !==
-        (calendarCard.correlation.version === 3
+        (calendarCard.correlation.version === 3 ||
+        calendarCard.correlation.version === 4
           ? calendarCard.correlation.ownerEntityId
           : calendarCard.correlation.recipientEntityId)
     ) {
@@ -1675,6 +1676,9 @@ export async function executeApprovedRequest(args: {
         channel,
         target: payload.recipient,
         body: payload.body,
+        ...(calendarCard?.correlation.version === 4
+          ? { sender: calendarCard.correlation.sender }
+          : {}),
       });
     } catch (error) {
       return preflightFailureResult(args.request, error);

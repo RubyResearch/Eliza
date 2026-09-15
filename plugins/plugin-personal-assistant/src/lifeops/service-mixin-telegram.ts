@@ -22,6 +22,7 @@ export interface LifeOpsTelegramService {
   ): Promise<LifeOpsTelegramConnectorStatus>;
   sendTelegramMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     target: string;
     message: string;
   }): Promise<TelegramSendMessageResult>;

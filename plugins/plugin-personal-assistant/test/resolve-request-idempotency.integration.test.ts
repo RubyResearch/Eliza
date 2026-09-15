@@ -849,6 +849,74 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
     },
   );
 
+  it.each(["telegram", "discord"] as const)(
+    "records a changed %s sender as known nondelivery without a provider call",
+    async (provider) => {
+      const send = vi.fn();
+      const connector = {
+        handleSendMessage: send,
+        messageManager: {},
+        isReady: () => true,
+        bot: { botInfo: { id: "replacement-bot", username: "Replacement" } },
+        client: { user: { id: "replacement-bot", username: "Replacement" } },
+      };
+      const service = new LifeOpsService({
+        ...runtime,
+        character: { name: "Synthetic test" },
+        setSetting: vi.fn(),
+        getService: (name: string) =>
+          name === provider ? connector : runtime.getService(name),
+      } as unknown as IAgentRuntime);
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: provider,
+        payload: {
+          action: "send_message",
+          recipient: "synthetic-channel",
+          body: "Synthetic review",
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "Reviewed original-bot",
+      });
+      const result = await runApprovalDispatch({
+        queue: realQueue,
+        request: approved,
+        subjectUserId: OWNER_A,
+        prepared: {
+          provider,
+          dispatch: async () => {
+            const value =
+              provider === "telegram"
+                ? await service.sendTelegramMessage({
+                    side: "agent",
+                    expectedIdentityId: "original-bot",
+                    target: "synthetic-channel",
+                    message: "Synthetic review",
+                  })
+                : await service.sendDiscordMessage({
+                    side: "agent",
+                    expectedIdentityId: "original-bot",
+                    channelId: "synthetic-channel",
+                    text: "Synthetic review",
+                  });
+            return { value, receipt: { provider } };
+          },
+        },
+      });
+      expect(result.kind).toBe("known_failure");
+      const reopened = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      expect(await reopened.byId(request.id, OWNER_A)).toMatchObject({
+        state: "retryable",
+      });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
   it("serializes a forced double-approve race to one dispatch", async () => {
     const request = await realQueue.enqueue(sendMessageInput());
     activeQueue = withDecisionBarrier(realQueue);

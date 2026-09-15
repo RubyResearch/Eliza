@@ -23,6 +23,7 @@ import type {
   ApprovalPayload,
   CalendarCardApprovalCorrelation,
 } from "./approval-queue.types.js";
+import type { CalendarCardSenderBinding } from "./calendar-card-sender.js";
 import { executeRawSql, sqlQuote, toText } from "./sql.js";
 
 export type CalendarCardPrivacyMode = "full" | "times_only" | "busy_only";
@@ -445,6 +446,7 @@ export function composeDailyCalendarCard(args: {
 export function calendarCardApprovalPayload(args: {
   channel?: CalendarCardChannel;
   ownerEntityId?: string;
+  sender?: CalendarCardSenderBinding;
   recipient: string;
   recipientEntityId: string;
   cardId: string;
@@ -459,11 +461,14 @@ export function calendarCardApprovalPayload(args: {
     replyToMessageId: null,
     calendarCard: {
       kind: "calendar_card",
-      version: 3,
+      ...(args.sender
+        ? { version: 4 as const, sender: args.sender }
+        : { version: 3 as const }),
       ownerEntityId,
       channel,
       recipient: args.recipient,
       deliverySha256: calendarCardOwnerDeliverySha256({
+        ...(args.sender ? { sender: args.sender } : {}),
         ownerEntityId,
         channel,
         recipient: args.recipient,
@@ -494,6 +499,7 @@ function calendarCardDeliverySha256(input: {
 }
 
 function calendarCardOwnerDeliverySha256(input: {
+  sender?: CalendarCardSenderBinding;
   ownerEntityId: string;
   channel: CalendarCardChannel;
   recipient: string;
@@ -501,7 +507,7 @@ function calendarCardOwnerDeliverySha256(input: {
   cardId: string;
   envelopeSha256: string;
 }): string {
-  return sha256(stableStringify({ version: 3, ...input }));
+  return sha256(stableStringify({ version: input.sender ? 4 : 3, ...input }));
 }
 
 export function verifyCalendarCardApproval(payload: ApprovalPayload): {
@@ -532,11 +538,17 @@ export function verifyCalendarCardApproval(payload: ApprovalPayload): {
           envelopeSha256: actualEnvelopeSha256,
         }),
       )) ||
-    (payload.calendarCard.version === 3 &&
+    ((payload.calendarCard.version === 3 ||
+      payload.calendarCard.version === 4) &&
+      (payload.calendarCard.version !== 4 ||
+        payload.calendarCard.sender.channel === payload.calendarCard.channel) &&
       payload.recipient === payload.calendarCard.recipient &&
       equalDigest(
         payload.calendarCard.deliverySha256,
         calendarCardOwnerDeliverySha256({
+          ...(payload.calendarCard.version === 4
+            ? { sender: payload.calendarCard.sender }
+            : {}),
           ownerEntityId: payload.calendarCard.ownerEntityId,
           channel: payload.calendarCard.channel,
           recipient: payload.recipient,

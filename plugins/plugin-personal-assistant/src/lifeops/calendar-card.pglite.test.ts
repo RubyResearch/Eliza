@@ -134,6 +134,14 @@ describe("daily calendar card composition", () => {
       });
       const payload = calendarCardApprovalPayload({
         channel,
+        sender: {
+          channel,
+          side: channel === "imessage" ? "owner" : "agent",
+          transport: "test-transport",
+          accountId: "test-account",
+          identityId: "test-identity",
+          displayName: "Test sender",
+        },
         recipient: "approved-destination",
         recipientEntityId: "owner-1",
         cardId: "card-1",
@@ -147,8 +155,18 @@ describe("daily calendar card composition", () => {
         })?.matches,
       ).toBe(false);
       const correlation = payload.calendarCard;
-      if (correlation?.version !== 3)
+      if (correlation?.version !== 4)
         throw new Error("Missing bound card review");
+      expect(
+        verifyCalendarCardApproval({
+          ...payload,
+          calendarCard: {
+            ...correlation,
+            sender: { ...correlation.sender, identityId: "unreviewed-account" },
+          },
+        })?.matches,
+      ).toBe(false);
+
       expect(
         verifyCalendarCardApproval({
           ...payload,

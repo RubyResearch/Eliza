@@ -33,6 +33,7 @@ export interface LifeOpsDiscordService {
   ): Promise<DiscordMessageSearchResult[]>;
   sendDiscordMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     channelId?: string;
     /** Discord user id target (DM via createDM); exclusive with channelId. */
     userId?: string;

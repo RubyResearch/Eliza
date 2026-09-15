@@ -20,6 +20,27 @@ export class ConnectorDeliveryEvidenceError extends ElizaError {
   }
 }
 
+export class ConnectorSenderChangedError extends ElizaError {
+  constructor(provider: string, expected: string, actual: string | null) {
+    super(
+      "The reviewed sending account changed or is unavailable. Create a fresh review.",
+      {
+        code: "CONNECTOR_SENDER_CHANGED",
+        context: { provider, expected, actual },
+      },
+    );
+  }
+}
+
+export function assertConnectorSenderIdentity(
+  provider: string,
+  expected: string | undefined,
+  actual: string | null,
+): void {
+  if (expected !== undefined && (!expected || expected !== actual))
+    throw new ConnectorSenderChangedError(provider, expected, actual);
+}
+
 export async function dispatchWithDeliveryEvidence(args: {
   provider: "telegram" | "discord";
   accountId: string;

@@ -47,8 +47,7 @@ Telegram delivery retains the complete provider receipt, including all message i
 Telegram targets are chat identifiers and Discord targets are channel
 identifiers. Creation queues an owner review and does not send. The approval
 binds its exact recipient, channel, calendar content, and private card identity;
-changing any of them requires a new review. Version-three reviews bind the approving owner separately from the intended
-reader. Legacy version-one approvals remain iMessage-only; version-two reviews
+changing any of them requires a new review. Version-four reviews bind the approving owner, intended reader and sending account separately. Telegram and Discord use the configured agent bot; iMessage requires a known sending account. The review shows the sending identity and transport, which are rechecked before dispatch. An account change requires a new review. Captured provider handlers are checked immediately before invocation. Hosted iMessage binds the configured Blooio channel. Native iMessage card creation remains unavailable until the connector can expose a verified sending identity; ordinary connector availability is insufficient. Legacy version-one approvals remain iMessage-only; version-two reviews
 retain their original same-owner/recipient contract.
 
 Set `ELIZA_EXTERNAL_BASE_URL` to the agent's public HTTPS origin before issuing

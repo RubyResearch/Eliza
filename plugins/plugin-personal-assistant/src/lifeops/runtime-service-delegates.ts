@@ -13,7 +13,10 @@ import {
   type TargetInfo,
 } from "@elizaos/core";
 import type { LifeOpsConnectorGrant } from "../contracts/index.js";
-import { dispatchWithDeliveryEvidence } from "./messaging/connector-delivery-evidence.js";
+import {
+  assertConnectorSenderIdentity,
+  dispatchWithDeliveryEvidence,
+} from "./messaging/connector-delivery-evidence.js";
 
 type WhatsAppSendRequest = {
   to: string;
@@ -768,6 +771,7 @@ export function searchDiscordMessagesWithRuntimeService(args: {
 
 export async function sendDiscordMessageWithRuntimeService(args: {
   runtime: IAgentRuntime;
+  expectedIdentityId?: string;
   grant?: ConnectorGrantAccountRef | null;
   accountId?: string | null;
   channelId: string;
@@ -778,16 +782,22 @@ export async function sendDiscordMessageWithRuntimeService(args: {
     delivery: ReturnType<typeof requireConfirmedSendHandlerDelivery>;
   }>
 > {
-  const service = getRuntimeService<ConnectorMessageRuntimeServiceLike>(
-    args.runtime,
-    ["discord"],
-  );
+  const service = getRuntimeService<
+    ConnectorMessageRuntimeServiceLike & {
+      client?: { user?: { id?: string } | null } | null;
+    }
+  >(args.runtime, ["discord"]);
   if (typeof service?.handleSendMessage !== "function") {
     return unavailable(
       "Discord runtime service handleSendMessage is not registered.",
     );
   }
   const handleSendMessage = service.handleSendMessage;
+  assertConnectorSenderIdentity(
+    "discord",
+    args.expectedIdentityId,
+    service.client?.user?.id ?? null,
+  );
   const accountId = resolveRuntimeConnectorAccountId(args);
   const target = connectorTarget({
     source: "discord",
@@ -835,6 +845,7 @@ export function searchTelegramMessagesWithRuntimeService(args: {
 
 export async function sendTelegramMessageWithRuntimeService(args: {
   runtime: IAgentRuntime;
+  expectedIdentityId?: string;
   grant?: ConnectorGrantAccountRef | null;
   accountId?: string | null;
   target: string;
@@ -845,16 +856,24 @@ export async function sendTelegramMessageWithRuntimeService(args: {
     delivery: ReturnType<typeof requireConfirmedSendHandlerDelivery>;
   }>
 > {
-  const service = getRuntimeService<ConnectorMessageRuntimeServiceLike>(
-    args.runtime,
-    ["telegram"],
-  );
+  const service = getRuntimeService<
+    ConnectorMessageRuntimeServiceLike & {
+      bot?: { botInfo?: { id?: string | number } | null } | null;
+    }
+  >(args.runtime, ["telegram"]);
   if (typeof service?.handleSendMessage !== "function") {
     return unavailable(
       "Telegram runtime service handleSendMessage is not registered.",
     );
   }
   const handleSendMessage = service.handleSendMessage;
+  assertConnectorSenderIdentity(
+    "telegram",
+    args.expectedIdentityId,
+    service.bot?.botInfo?.id !== undefined
+      ? String(service.bot.botInfo.id)
+      : null,
+  );
   const accountId = resolveRuntimeConnectorAccountId(args);
   const target = connectorTarget({
     source: "telegram",

@@ -1,4 +1,5 @@
 /** Types for the owner-approval queue: request states, action kinds, and payload shapes. */
+
 import {
   APPROVAL_EXECUTION_CAPABILITY,
   APPROVAL_EXECUTION_PROTOCOL_VERSION,
@@ -6,6 +7,7 @@ import {
   ApprovalNotFoundError as RuntimeApprovalNotFoundError,
   ApprovalStateTransitionError as RuntimeApprovalStateTransitionError,
 } from "@elizaos/agent";
+import type { CalendarCardSenderBinding } from "./calendar-card-sender.js";
 import type { TransactionalDb } from "./sql.js";
 import type { TravelBookingPayloadFields } from "./travel-booking.types.js";
 
@@ -76,6 +78,14 @@ export type CalendarCardApprovalCorrelation = CalendarCardApprovalContent &
         readonly recipient: string;
         readonly ownerEntityId: string;
         readonly deliverySha256: string;
+      }
+    | {
+        readonly version: 4;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly ownerEntityId: string;
+        readonly deliverySha256: string;
+        readonly sender: CalendarCardSenderBinding;
       }
   );
 

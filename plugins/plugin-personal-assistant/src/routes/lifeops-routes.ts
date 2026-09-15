@@ -121,6 +121,10 @@ import {
   parseCalendarCardRequest,
   resolveCalendarCardOrigin,
 } from "../lifeops/calendar-card.js";
+import {
+  CalendarCardSenderError,
+  resolveCalendarCardSender,
+} from "../lifeops/calendar-card-sender.js";
 import { probeFullDiskAccess } from "../lifeops/fda-probe.js";
 import { LifeOpsRepository } from "../lifeops/repository.js";
 import { LifeOpsService, LifeOpsServiceError } from "../lifeops/service.js";
@@ -1285,6 +1289,20 @@ export async function handleLifeOpsRoutes(
       json(res, { error: "Invalid calendar card request" }, 400);
       return true;
     }
+    const cardService = getService(ctx);
+    if (!cardService) return true;
+    let sender: Awaited<ReturnType<typeof resolveCalendarCardSender>>;
+    try {
+      sender = await resolveCalendarCardSender(
+        cardService,
+        cardRequest.channel,
+      );
+    } catch (error) {
+      // error-policy:J1 expose missing sending identity before storing a card or approval.
+      if (!(error instanceof CalendarCardSenderError)) throw error;
+      json(res, { error: error.message, code: error.code }, 503);
+      return true;
+    }
     const ttlMs = cardRequest.ttlMs ?? 24 * 60 * 60_000;
     const placeholder = composeDailyCalendarCard({
       date: cardRequest.date,
@@ -1315,6 +1333,7 @@ export async function handleLifeOpsRoutes(
     }
     const payload = calendarCardApprovalPayload({
       ownerEntityId: authenticatedEntityId,
+      sender,
       channel: cardRequest.channel,
       recipient: cardRequest.recipient,
       recipientEntityId,
@@ -1330,8 +1349,8 @@ export async function handleLifeOpsRoutes(
         action: "send_message",
         payload,
         channel: cardRequest.channel,
-        reason: `Send the private ${cardRequest.privacyMode} calendar card for ${cardRequest.date}.`,
-        idempotencyKey: `calendar-card:v3:${authenticatedEntityId}:${cardRequest.channel}:${composition.envelopeSha256}`,
+        reason: `Send the private ${cardRequest.privacyMode} calendar card for ${cardRequest.date} from ${sender.displayName} (${sender.identityId}) using ${sender.transport}.`,
+        idempotencyKey: `calendar-card:v4:${authenticatedEntityId}:${cardRequest.channel}:${composition.envelopeSha256}`,
         expiresAt: new Date(Date.now() + ttlMs),
       });
       await queue.surfaceEnqueuedApproval(approval);

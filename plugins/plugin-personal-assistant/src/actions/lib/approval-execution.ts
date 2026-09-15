@@ -9,7 +9,10 @@ import type {
   ApprovalQueue,
   ApprovalRequest,
 } from "../../lifeops/approval-queue.types.js";
-import { ConnectorDeliveryEvidenceError } from "../../lifeops/messaging/connector-delivery-evidence.js";
+import {
+  ConnectorDeliveryEvidenceError,
+  ConnectorSenderChangedError,
+} from "../../lifeops/messaging/connector-delivery-evidence.js";
 import { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
 
 export { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
@@ -85,7 +88,10 @@ export async function runApprovalDispatch<T>(args: {
     delivered = await args.prepared.dispatch(providerIdempotencyKey);
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
-    if (error instanceof ApprovalKnownNonDeliveryError) {
+    if (
+      error instanceof ApprovalKnownNonDeliveryError ||
+      error instanceof ConnectorSenderChangedError
+    ) {
       const request = await args.queue.markRetryableFailure({
         ...mutation,
         error: error.message,

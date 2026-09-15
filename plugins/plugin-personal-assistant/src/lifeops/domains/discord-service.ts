@@ -50,7 +50,10 @@ import type {
 import { asRecord, LIFEOPS_DISCORD_CAPABILITIES } from "@elizaos/shared";
 import type { CreateLifeOpsBrowserSessionRequest } from "../../contracts/index.js";
 import type { LifeOpsContext } from "../lifeops-context.js";
-import { ConnectorDeliveryEvidenceError } from "../messaging/connector-delivery-evidence.js";
+import {
+  ConnectorDeliveryEvidenceError,
+  ConnectorSenderChangedError,
+} from "../messaging/connector-delivery-evidence.js";
 import { createLifeOpsConnectorGrant } from "../repository.js";
 import {
   searchDiscordMessagesWithRuntimeService,
@@ -1598,6 +1601,7 @@ export class DiscordDomain {
 
   async sendDiscordMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     channelId?: string;
     /**
      * Discord user id target. Mutually exclusive with `channelId`; the
@@ -1610,6 +1614,16 @@ export class DiscordDomain {
   }): Promise<DiscordSendMessageResult> {
     const normalizedSide =
       normalizeOptionalConnectorSide(request.side, "side") ?? "owner";
+    if (
+      request.expectedIdentityId !== undefined &&
+      (normalizedSide !== "agent" || request.userId)
+    ) {
+      throw new ConnectorSenderChangedError(
+        "discord",
+        request.expectedIdentityId,
+        null,
+      );
+    }
     const text = request.text.trim();
     if (!text) {
       fail(400, "text is required");
@@ -1698,12 +1712,16 @@ export class DiscordDomain {
     } else {
       const delegated = await sendDiscordMessageWithRuntimeService({
         runtime: this.ctx.runtime,
+        expectedIdentityId: request.expectedIdentityId,
         grant: status.grant,
         channelId,
         text,
       });
       if (delegated.status !== "handled") {
-        if (delegated.error instanceof ConnectorDeliveryEvidenceError)
+        if (
+          delegated.error instanceof ConnectorDeliveryEvidenceError ||
+          delegated.error instanceof ConnectorSenderChangedError
+        )
           throw delegated.error;
         if (delegated.error) {
           this.ctx.logLifeOpsWarn(
