@@ -1329,6 +1329,50 @@
       "registryKind": "plugin",
       "directory": null
     },
+    "eliza-plugin-tnt-risk-api": {
+      "git": {
+        "repo": "menantonio83-hue/eliza-plugin-tnt-risk-api",
+        "v0": {
+          "branch": null
+        },
+        "v1": {
+          "branch": null
+        },
+        "v2": {
+          "branch": "main"
+        }
+      },
+      "npm": {
+        "repo": "eliza-plugin-tnt-risk-api",
+        "v0": null,
+        "v1": null,
+        "v2": "1.0.1"
+      },
+      "supports": {
+        "v0": false,
+        "v1": false,
+        "v2": true
+      },
+      "description": "Solana token risk scoring for elizaOS agents — 0-100 safety score, mint/freeze authority, honeypot and LP lock, plus on-chain insider wallet cluster detection that traces each top holder's first funder through intermediate wallets.",
+      "homepage": "https://www.tnt-audit.com/risk-api",
+      "topics": [
+        "solana",
+        "risk-scoring",
+        "security",
+        "trading"
+      ],
+      "stargazers_count": 0,
+      "language": "TypeScript",
+      "origin": "third-party",
+      "source": "community",
+      "support": "community",
+      "builtIn": false,
+      "firstParty": false,
+      "thirdParty": true,
+      "kind": "plugin",
+      "registryKind": "plugin",
+      "directory": null
+    },
     "elizaos-plugin-adanos": {
       "git": {
         "repo": "adanos-software/elizaos-plugin-adanos",

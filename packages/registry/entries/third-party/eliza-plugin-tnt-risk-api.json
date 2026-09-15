@@ -1,0 +1,14 @@
+{
+  "package": "eliza-plugin-tnt-risk-api",
+  "repository": "github:menantonio83-hue/eliza-plugin-tnt-risk-api",
+  "kind": "plugin",
+  "description": "Solana token risk scoring for elizaOS agents — 0-100 safety score, mint/freeze authority, honeypot and LP lock, plus on-chain insider wallet cluster detection that traces each top holder's first funder through intermediate wallets.",
+  "homepage": "https://www.tnt-audit.com/risk-api",
+  "version": "1.0.1",
+  "tags": [
+    "solana",
+    "risk-scoring",
+    "security",
+    "trading"
+  ]
+}
