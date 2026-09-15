@@ -28,9 +28,10 @@ describe("Calendar Google import boundary", () => {
           'process.stdout.write("calendar-loaded");',
         ].join("\n"),
       ],
-      { cwd: repoRoot, encoding: "utf8", timeout: 30_000 },
+      // Cold source transforms can exceed 30 seconds on a shared build host.
+      { cwd: repoRoot, encoding: "utf8", timeout: 90_000 },
     );
 
     expect(output).toBe("calendar-loaded");
-  }, 35_000);
+  }, 95_000);
 });
