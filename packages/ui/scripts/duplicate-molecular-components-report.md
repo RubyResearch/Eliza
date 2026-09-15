@@ -48,7 +48,7 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 
 - `EditSkillModal` in `packages/ui/src/components/pages/skill-detail-panel.tsx:35`
 - `ConfirmDialog` in `packages/ui/src/components/ui/confirm-dialog.tsx:35`
-- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:519`
+- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:527`
 - Fingerprint: `sha256:20da2a24641576e0c73aca23d9042d1a865c4885e106f53a792be2624a8fe4d7`
 - Decision: **distinct-domain-compositions**. The skill editor owns source loading and saving; the confirmation dialog emits a caller-owned decision; the calendar editor owns provider mutations and timed or all-day date validation. Its timing fieldset does not introduce a shared dialog lifecycle.
 

@@ -251,7 +251,7 @@
             "dialog"
           ],
           "file": "plugins/plugin-calendar/src/components/EventEditorDrawer.tsx",
-          "line": 519,
+          "line": 527,
           "name": "EventEditorDrawer",
           "renderedTags": [
             "Button",
