@@ -15,6 +15,7 @@
  * Run: bunx vitest run eliza/plugins/plugin-personal-assistant/test/life-smoke.integration.test.ts
  */
 
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +25,7 @@ import {
   NoModelProviderConfiguredError,
 } from "@elizaos/core";
 import { schedulingPlugin } from "@elizaos/plugin-scheduling";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRealTestRuntime } from "../../../packages/app-core/test/helpers/real-runtime.ts";
 import { runLifeOperationHandler } from "../src/actions/life.js";
 import { personalAssistantPlugin } from "../src/plugin.js";
@@ -34,6 +35,12 @@ let cleanup: () => Promise<void> = async () => {};
 let isolatedStateDir: string;
 let isolatedConfigPath: string;
 let groundedReplyModelInvocations = 0;
+let conversationId: string;
+
+beforeEach(() => {
+  // Drafts persist by conversation; only turns within one scenario may reuse them.
+  conversationId = randomUUID();
+});
 
 const canonicalFallbackPrefix = "Canonical fallback: ";
 
@@ -102,9 +109,6 @@ function setIsolatedLifeSmokeEnv(): void {
   process.env.ELIZA_STATE_DIR = isolatedStateDir;
   process.env.ELIZA_CONFIG_PATH = isolatedConfigPath;
   process.env.ELIZA_PERSIST_CONFIG_PATH = isolatedConfigPath;
-  delete process.env.ELIZA_STATE_DIR;
-  delete process.env.ELIZA_CONFIG_PATH;
-  delete process.env.ELIZA_PERSIST_CONFIG_PATH;
   delete process.env.ELIZAOS_CLOUD_API_KEY;
   delete process.env.ELIZAOS_CLOUD_BASE_URL;
 }
@@ -124,6 +128,8 @@ function send(params: Record<string, unknown>, messageText?: string) {
   return runLifeOperationHandler(
     runtime,
     {
+      id: randomUUID(),
+      roomId: conversationId,
       entityId: runtime.agentId,
       content: {
         source: "autonomy",
@@ -146,7 +152,7 @@ function sendFromOwnerChat(
     runtime,
     {
       id: messageId,
-      roomId: "00000000-0000-0000-0000-000000000010",
+      roomId: conversationId,
       entityId: runtime.agentId,
       content: {
         source: "discord",
