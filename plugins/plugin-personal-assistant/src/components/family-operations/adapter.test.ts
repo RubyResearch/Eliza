@@ -33,6 +33,67 @@ afterEach(() => {
 });
 
 describe("defaultFamilyOperationsAdapter", () => {
+  it("updates only the selected task timing through authenticated transport and surfaces rejection", async () => {
+    let rejected = false;
+    let saved: unknown;
+    vi.stubGlobal(
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const req = new Request(input, init);
+        if (
+          req.headers.get("authorization") !==
+          "Bearer family-adapter-test-session"
+        )
+          return Response.json({ error: "Unauthorized" }, { status: 401 });
+        if (
+          requestPath(input) !==
+            "/api/lifeops/scheduled-tasks/family%2Fmonthly/edit" ||
+          req.method !== "POST"
+        )
+          return Response.json(
+            { error: "Wrong scheduled task" },
+            { status: 404 },
+          );
+        if (rejected)
+          return Response.json(
+            { error: "Task no longer available" },
+            { status: 409 },
+          );
+        saved = await req.json();
+        return Response.json({ task: saved });
+      },
+    );
+    const input = {
+      taskId: "family/monthly",
+      day: 15,
+      time: "14:35",
+      timezone: "America/New_York",
+    };
+    await defaultFamilyOperationsAdapter.updateMonthlySchedule(input);
+    expect(saved).toEqual({
+      trigger: {
+        kind: "cron",
+        expression: "35 14 15 * *",
+        tz: "America/New_York",
+      },
+    });
+    rejected = true;
+    await expect(
+      defaultFamilyOperationsAdapter.updateMonthlySchedule(input),
+    ).rejects.toThrow("Task no longer available");
+    await expect(
+      defaultFamilyOperationsAdapter.updateMonthlySchedule({
+        ...input,
+        day: 32,
+      }),
+    ).rejects.toThrow("Choose a day");
+    await expect(
+      defaultFamilyOperationsAdapter.updateMonthlySchedule({
+        ...input,
+        time: "25:00",
+      }),
+    ).rejects.toThrow("Choose a day");
+  });
   it("recovers a prepared agreement review through the authenticated selected API and preserves validation failures", async () => {
     const review = {
       artifactId: "artifact/one",

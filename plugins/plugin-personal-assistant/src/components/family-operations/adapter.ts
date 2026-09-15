@@ -592,6 +592,30 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
       body: JSON.stringify(input),
     });
   },
+  async updateMonthlySchedule({ taskId, day, time, timezone }) {
+    if (
+      !Number.isInteger(day) ||
+      day < 1 ||
+      day > 31 ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)
+    ) {
+      throw new Error("Choose a day from 1 to 31 and a valid time.");
+    }
+    const [hour, minute] = time.split(":").map(Number);
+    await request(
+      `/api/lifeops/scheduled-tasks/${encodeURIComponent(taskId)}/edit`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          trigger: {
+            kind: "cron",
+            expression: `${minute} ${hour} ${day} * *`,
+            tz: timezone,
+          },
+        }),
+      },
+    );
+  },
   async approveSchoolDiff(runId) {
     await request("/api/lifeops/family-workflows/school/apply", {
       method: "POST",

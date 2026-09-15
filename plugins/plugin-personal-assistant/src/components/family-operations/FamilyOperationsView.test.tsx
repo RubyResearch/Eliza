@@ -185,6 +185,7 @@ function adapter(data = snapshot()): FamilyOperationsAdapter {
     disconnectCalendar: vi.fn(async () => undefined),
     runSchoolWorkflow: vi.fn(async () => undefined),
     configureSchool: vi.fn(async () => undefined),
+    updateMonthlySchedule: vi.fn(async () => undefined),
     approveSchoolDiff: vi.fn(async () => undefined),
     generatePacket: vi.fn(async () => undefined),
     uploadAgreement: vi.fn(async () => undefined),
@@ -779,6 +780,76 @@ describe("FamilyOperationsView", () => {
     expect(screen.queryByText(/Not scheduled yet/)).toBeNull();
     expect(
       screen.getByRole("link", { name: "Review scheduled tasks" }),
+    ).toBeTruthy();
+    expect(local.runSchoolWorkflow).not.toHaveBeenCalled();
+  });
+  it("edits monthly timing, refreshes persisted state, and keeps failed saves visible", async () => {
+    const data = snapshot();
+    data.school = {
+      status: "ready",
+      data: {
+        monthlySchedule: { status: "ready", data: null },
+        sourceId: "concord",
+        label: "Concord calendar",
+        state: "never_run",
+        lastCheckedAt: null,
+        sourceUrl:
+          "https://www.concordps.org/district-resources/school-year-calendars",
+        schoolLevel: "elementary",
+        updateMode: "automatic",
+      },
+    };
+    const schedule = {
+      taskId: "monthly-task",
+      status: "dismissed" as const,
+      lastFiredAt: null,
+      trigger: {
+        kind: "cron" as const,
+        expression: "0 9 1 * *",
+        tz: "America/New_York",
+      },
+    };
+    data.school.data.monthlySchedule = { status: "ready", data: schedule };
+    const local = adapter(data);
+    let fail = false;
+    local.updateMonthlySchedule = async (input) => {
+      if (fail) throw new Error("Schedule service unavailable");
+      const [hour, minute] = input.time.split(":").map(Number);
+      schedule.trigger = {
+        kind: "cron",
+        expression: `${minute} ${hour} ${input.day} * *`,
+        tz: input.timezone,
+      };
+    };
+    render(<FamilyOperationsView adapter={local} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "School calendar" }),
+    );
+    fireEvent.change(screen.getByLabelText("Day of month"), {
+      target: { value: "15" },
+    });
+    fireEvent.change(screen.getByLabelText("Time (America/New_York)"), {
+      target: { value: "14:35" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save monthly schedule" }),
+    );
+    expect(
+      await screen.findByText("Monthly on day 15 at 14:35 America/New_York"),
+    ).toBeTruthy();
+    expect(screen.getByText("Status: Stopped")).toBeTruthy();
+    fail = true;
+    fireEvent.change(screen.getByLabelText("Day of month"), {
+      target: { value: "20" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save monthly schedule" }),
+    );
+    expect(
+      await screen.findByText("Schedule service unavailable"),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Monthly on day 15 at 14:35 America/New_York"),
     ).toBeTruthy();
     expect(local.runSchoolWorkflow).not.toHaveBeenCalled();
   });

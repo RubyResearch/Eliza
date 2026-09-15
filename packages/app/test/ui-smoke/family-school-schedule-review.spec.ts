@@ -88,6 +88,30 @@ for (const width of [1280, 390]) {
           });
         },
       );
+      let rejectTiming = false;
+      await page.route(
+        "**/api/lifeops/scheduled-tasks/synthetic-monthly/edit",
+        async (route) => {
+          if (rejectTiming)
+            return route.fulfill({
+              status: 409,
+              json: {
+                error: "Schedule changed elsewhere. Reload and try again.",
+              },
+            });
+          if (!schedule) throw new Error("No saved schedule to edit");
+          const body = route.request().postDataJSON();
+          expect(body).toEqual({
+            trigger: {
+              kind: "cron",
+              expression: "35 14 15 * *",
+              tz: "Europe/London",
+            },
+          });
+          schedule = { ...schedule, trigger: body.trigger };
+          return route.fulfill({ json: { task: schedule } });
+        },
+      );
       await openAppPath(page, "/lifeops/family");
       await page
         .getByRole("button", { name: "School calendar", exact: true })
@@ -112,8 +136,9 @@ for (const width of [1280, 390]) {
       await save.click();
       await expect(saved).toContainText("Status: Scheduled");
       await expect(saved).toContainText(
-        "First day of each month at 9:00 AM America/New_York",
+        "Monthly on day 1 at 09:00 America/New_York",
       );
+      await saved.scrollIntoViewIfNeeded();
       await captureFamilyState(page, info, `school-saved-${width}`);
       schedule = {
         taskId: "synthetic-monthly",
@@ -130,14 +155,63 @@ for (const width of [1280, 390]) {
         .getByRole("button", { name: "School calendar", exact: true })
         .click();
       await expect(saved).toContainText("Status: Stopped");
-      await expect(saved).toContainText("Custom schedule");
+      await expect(saved).toContainText(
+        "Monthly on day 2 at 10:00 Europe/London",
+      );
       await save.click();
       await expect(saved).toContainText("Status: Stopped");
       await expect(saved).not.toContainText("First day of each month");
       await expect(
         saved.getByRole("link", { name: "Review scheduled tasks" }),
       ).toHaveAttribute("href", "/automations");
+      await saved.scrollIntoViewIfNeeded();
       await captureFamilyState(page, info, `school-retained-${width}`);
+      await page.getByLabel("Day of month", { exact: true }).fill("15");
+      await page
+        .getByLabel("Time (Europe/London)", { exact: true })
+        .fill("14:35");
+      const timingSave = page.getByRole("button", {
+        name: "Save monthly schedule",
+        exact: true,
+      });
+      await captureFamilyAccent(
+        page,
+        info,
+        timingSave,
+        "monthly-timing-save",
+        width,
+      );
+      await timingSave.click();
+      await expect(saved).toContainText(
+        "Monthly on day 15 at 14:35 Europe/London",
+      );
+      await expect(saved).toContainText("Status: Stopped");
+      await page.reload();
+      await page
+        .getByRole("button", { name: "School calendar", exact: true })
+        .click();
+      await expect(saved).toContainText(
+        "Monthly on day 15 at 14:35 Europe/London",
+      );
+      await saved.scrollIntoViewIfNeeded();
+      await captureFamilyState(page, info, `school-timing-reloaded-${width}`);
+      rejectTiming = true;
+      await page.getByLabel("Day of month", { exact: true }).fill("20");
+      await timingSave.click();
+      await expect(
+        page.getByText("Schedule changed elsewhere. Reload and try again.", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("Schedule changed elsewhere. Reload and try again.", {
+          exact: true,
+        }),
+      ).toBeInViewport({ ratio: 1 });
+      await expect(saved).toContainText(
+        "Monthly on day 15 at 14:35 Europe/London",
+      );
+      await captureFamilyState(page, info, `school-timing-error-${width}`);
       expect(saves).toBe(2);
       expect(effects).toBe(0);
       expect(errors).toEqual([]);

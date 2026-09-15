@@ -621,6 +621,9 @@ prefix. Scheduling and cleanup errors remain visible for recovery.
 School settings create the canonical monthly family task when absent. The task
 checks school dates and prepares an owner-review packet; it never sends email.
 The Family Operations view reports the persisted schedule and status, including
-customized or dismissed tasks, and links to Automations for review. Saving
+customized or dismissed tasks, and links to Automations for review. Its monthly
+timing editor updates the same canonical task through the scheduled-task edit
+API, preserves the saved timezone and lifecycle status, and refreshes the saved
+schedule after acceptance. Days 29–31 warn about skipped shorter months. Saving
 school settings preserves an existing schedule and its status. Older runtimes
 that do not return schedule status display an explicit unavailable state.

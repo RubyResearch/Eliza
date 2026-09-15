@@ -49,6 +49,7 @@ import {
   defaultFamilyIntakeAdapter,
   type FamilyIntakeAdapter,
 } from "./intake-adapter.js";
+import { MonthlyScheduleEditor } from "./MonthlyScheduleEditor.js";
 import { PacketDraftEditor } from "./PacketDraftEditor.js";
 import { RecipientSetup } from "./RecipientSetup.js";
 import type {
@@ -796,6 +797,9 @@ function SchoolPanel({
   refresh: () => Promise<void>;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [errorTarget, setErrorTarget] = useState<"school" | "schedule">(
+    "school",
+  );
   const [busy, setBusy] = useState(false);
   const [schoolLevel, setSchoolLevel] = useState<"all" | "elementary">(
     "elementary",
@@ -812,10 +816,14 @@ function SchoolPanel({
   if (state.status === "unavailable")
     return <Unavailable message={state.message} />;
   const workflow = state.data;
-  const run = async (op: () => Promise<void>) => {
+  const run = async (
+    op: () => Promise<void>,
+    target: "school" | "schedule" = "school",
+  ) => {
     try {
       setBusy(true);
       setError(null);
+      setErrorTarget(target);
       await op();
       await refresh();
     } catch (cause) {
@@ -912,12 +920,19 @@ function SchoolPanel({
                 ]
               }
             </p>
-            <p>
-              {workflow.monthlySchedule.data.trigger.kind === "cron" &&
-              workflow.monthlySchedule.data.trigger.expression === "0 9 1 * *"
-                ? `First day of each month at 9:00 AM ${workflow.monthlySchedule.data.trigger.tz}`
-                : "Custom schedule. Review its timing in Automations."}
-            </p>
+            <MonthlyScheduleEditor
+              key={workflow.monthlySchedule.data.taskId}
+              schedule={workflow.monthlySchedule.data}
+              busy={busy}
+              save={(input) =>
+                run(() => adapter.updateMonthlySchedule(input), "schedule")
+              }
+              error={
+                errorTarget === "schedule" && error ? (
+                  <Unavailable message={error} />
+                ) : null
+              }
+            />
             <p>
               Last recorded start:{" "}
               {date(workflow.monthlySchedule.data.lastFiredAt)}
@@ -968,7 +983,9 @@ function SchoolPanel({
           </Button>
         ) : null}
       </div>
-      {error ? <Unavailable message={error} /> : null}
+      {errorTarget === "school" && error ? (
+        <Unavailable message={error} />
+      ) : null}
     </Card>
   );
 }

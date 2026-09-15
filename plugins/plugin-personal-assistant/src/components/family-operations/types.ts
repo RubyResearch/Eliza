@@ -192,6 +192,12 @@ export interface FamilyOperationsAdapter {
     schoolLevel: "all" | "elementary";
     updateMode: "review" | "automatic";
   }): Promise<void>;
+  updateMonthlySchedule(input: {
+    taskId: string;
+    day: number;
+    time: string;
+    timezone: string;
+  }): Promise<void>;
   approveSchoolDiff(runId: string): Promise<void>;
   generatePacket(periodKey: string): Promise<void>;
   createPacketDraft(input: PacketDraftInput): Promise<void>;
