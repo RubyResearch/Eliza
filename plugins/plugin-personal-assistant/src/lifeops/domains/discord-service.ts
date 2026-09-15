@@ -50,6 +50,7 @@ import type {
 import { asRecord, LIFEOPS_DISCORD_CAPABILITIES } from "@elizaos/shared";
 import type { CreateLifeOpsBrowserSessionRequest } from "../../contracts/index.js";
 import type { LifeOpsContext } from "../lifeops-context.js";
+import { ConnectorDeliveryEvidenceError } from "../messaging/connector-delivery-evidence.js";
 import { createLifeOpsConnectorGrant } from "../repository.js";
 import {
   searchDiscordMessagesWithRuntimeService,
@@ -1702,6 +1703,8 @@ export class DiscordDomain {
         text,
       });
       if (delegated.status !== "handled") {
+        if (delegated.error instanceof ConnectorDeliveryEvidenceError)
+          throw delegated.error;
         if (delegated.error) {
           this.ctx.logLifeOpsWarn(
             "runtime_service_delegation_unavailable",

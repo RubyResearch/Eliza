@@ -61,6 +61,44 @@ describe("approval messaging boundary", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it.each(["telegram-message-1", null])(
+    "preserves Telegram evidence and refuses missing identifiers (%s)",
+    async (messageId) => {
+      const receipt = {
+        providerMessageIds: messageId ? [messageId] : [],
+        acceptedAt: 1_780_000_000_000,
+        persistence: { status: "persisted", memoryIds: [] },
+      };
+      const prepared = await prepareCrossChannelSend({
+        runtime: {} as IAgentRuntime,
+        service: {
+          getTelegramConnectorStatus: async () => ({
+            connected: true,
+            grantedCapabilities: ["telegram.send"],
+          }),
+          sendTelegramMessage: async () => ({ ok: true, messageId, receipt }),
+        } as unknown as LifeOpsService,
+        channel: "telegram",
+        target: "chat-1",
+        body: "Synthetic calendar review",
+      });
+      if (messageId) {
+        expect(await prepared.dispatch("telegram-approval")).toEqual({
+          provider: "telegram",
+          messageId,
+          receipt,
+        });
+      } else {
+        await expect(
+          prepared.dispatch("telegram-approval"),
+        ).rejects.toMatchObject({
+          code: "APPROVAL_DELIVERY_UNCERTAIN",
+          providerReceipt: { provider: "telegram", messageId: null, receipt },
+        });
+      }
+    },
+  );
+
   it("fails closed before claim when iMessage is unavailable", async () => {
     const sendIMessage = vi.fn();
     const service = {

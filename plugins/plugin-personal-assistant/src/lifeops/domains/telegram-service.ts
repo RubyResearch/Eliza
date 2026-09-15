@@ -3,6 +3,7 @@
  * through the runtime-service delegates and projects connector status into
  * assistant DTOs. Transport is owned by the Telegram connector plugin.
  */
+import type { SendHandlerReceipt } from "@elizaos/core";
 import {
   LIFEOPS_TELEGRAM_CAPABILITIES,
   type LifeOpsConnectorDegradation,
@@ -13,6 +14,7 @@ import {
   type VerifyLifeOpsTelegramConnectorResponse,
 } from "@elizaos/shared";
 import type { LifeOpsContext } from "../lifeops-context.js";
+import { ConnectorDeliveryEvidenceError } from "../messaging/connector-delivery-evidence.js";
 import {
   searchTelegramMessagesWithRuntimeService,
   sendTelegramMessageWithRuntimeService,
@@ -20,6 +22,13 @@ import {
 import type { Constructor, LifeOpsServiceBase } from "../service-mixin-core.js";
 import { fail, requireNonEmptyString } from "../service-normalize.js";
 import { normalizeOptionalConnectorSide } from "../service-normalize-connector.js";
+
+/** Provider evidence retained for approvals and scheduled deliveries. */
+export type TelegramSendMessageResult = {
+  ok: true;
+  messageId: string | null;
+  receipt: SendHandlerReceipt | null;
+};
 
 export type TelegramMessageSearchResult = {
   id: string | null;
@@ -281,7 +290,7 @@ export class TelegramDomain {
     side?: LifeOpsConnectorSide;
     target: string;
     message: string;
-  }): Promise<{ ok: true; messageId: string | null }> {
+  }): Promise<TelegramSendMessageResult> {
     const side =
       normalizeOptionalConnectorSide(request.side, "side") ?? "owner";
     const target = requireNonEmptyString(request.target, "target");
@@ -301,8 +310,14 @@ export class TelegramDomain {
       message,
     });
     if (delegated.status === "handled") {
-      return { ok: true, messageId: null };
+      return {
+        ok: true,
+        messageId: delegated.value.delivery.providerMessageId ?? null,
+        receipt: delegated.value.delivery.receipt ?? null,
+      };
     }
+    if (delegated.error instanceof ConnectorDeliveryEvidenceError)
+      throw delegated.error;
     if (delegated.error) {
       this.ctx.logLifeOpsWarn(
         "runtime_service_delegation_failed",

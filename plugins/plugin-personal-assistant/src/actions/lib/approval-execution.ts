@@ -9,6 +9,7 @@ import type {
   ApprovalQueue,
   ApprovalRequest,
 } from "../../lifeops/approval-queue.types.js";
+import { ConnectorDeliveryEvidenceError } from "../../lifeops/messaging/connector-delivery-evidence.js";
 import { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
 
 export { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
@@ -94,7 +95,8 @@ export async function runApprovalDispatch<T>(args: {
     const request = await args.queue.markReconciliationRequired({
       ...mutation,
       error: error.message,
-      ...(error instanceof ApprovalAmbiguousDeliveryError
+      ...(error instanceof ApprovalAmbiguousDeliveryError ||
+      error instanceof ConnectorDeliveryEvidenceError
         ? { providerReceipt: error.providerReceipt }
         : {}),
     });

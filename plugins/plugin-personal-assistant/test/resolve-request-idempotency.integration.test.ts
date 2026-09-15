@@ -5,7 +5,12 @@
  */
 
 import { PGlite } from "@electric-sql/pglite";
-import type { IAgentRuntime, Memory, UUID } from "@elizaos/core";
+import type {
+  IAgentRuntime,
+  Memory,
+  SendHandlerOutcome,
+  UUID,
+} from "@elizaos/core";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import {
@@ -30,6 +35,8 @@ import type {
   ApprovalEnqueueInput,
   ApprovalQueue,
 } from "../src/lifeops/approval-queue.types.js";
+
+import { LifeOpsService } from "../src/lifeops/service.js";
 
 const dispatchState = vi.hoisted(() => ({
   sends: 0,
@@ -646,6 +653,199 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
       });
       await expect(attempt()).rejects.toThrow();
       expect(send).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("retains missing Telegram delivery evidence across queue reopen and refuses replay", async () => {
+    const actual = await vi.importActual<
+      typeof import("../src/actions/lib/messaging-helpers.js")
+    >("../src/actions/lib/messaging-helpers.js");
+    const observed = {
+      providerMessageIds: [],
+      acceptedAt: 1_780_000_000_000,
+      persistence: { status: "persisted", memoryIds: [] },
+    };
+    const send = vi.fn(async () => ({
+      ok: true,
+      messageId: null,
+      receipt: observed,
+    }));
+    const prepared = await actual.prepareCrossChannelSend({
+      runtime,
+      service: {
+        getTelegramConnectorStatus: async () => ({
+          connected: true,
+          grantedCapabilities: ["telegram.send"],
+        }),
+        sendTelegramMessage: send,
+      } as unknown as Parameters<
+        typeof actual.prepareCrossChannelSend
+      >[0]["service"],
+      channel: "telegram",
+      target: "telegram-test-chat",
+      body: "Synthetic calendar review",
+    });
+    const request = await realQueue.enqueue({
+      ...sendMessageInput(),
+      channel: "telegram",
+      payload: {
+        action: "send_message",
+        recipient: "telegram-test-chat",
+        body: "Synthetic calendar review",
+        replyToMessageId: null,
+      },
+    });
+    const approved = await realQueue.approve(request.id, OWNER_A, {
+      resolvedBy: OWNER_A,
+      resolutionReason: "approved synthetic test",
+    });
+    const attempt = () =>
+      runApprovalDispatch({
+        queue: realQueue,
+        request: approved,
+        subjectUserId: OWNER_A,
+        prepared: {
+          provider: "telegram",
+          dispatch: async (key) => ({
+            value: null,
+            receipt: await prepared.dispatch(key),
+          }),
+        },
+      });
+    expect((await attempt()).kind).toBe("reconciliation_required");
+    const reopened = createAgentApprovalQueue(runtime, {
+      agentId: AGENT_ID,
+    }) as unknown as ApprovalQueue;
+    expect(await reopened.byId(request.id, OWNER_A)).toMatchObject({
+      state: "reconciliation_required",
+      execution: {
+        providerReceipt: {
+          provider: "telegram",
+          messageId: null,
+          receipt: observed,
+        },
+      },
+    });
+    await expect(attempt()).rejects.toThrow();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["telegram", "partial"],
+    ["discord", "partial"],
+    ["telegram", "persistence-failed"],
+    ["discord", "persistence-failed"],
+    ["telegram", "ack-lost"],
+    ["discord", "ack-lost"],
+  ] as const)(
+    "retains %s %s evidence through the real domain and durable queue",
+    async (provider, mode) => {
+      const receipt = {
+        providerMessageIds: ["accepted-first-part"] as const,
+        acceptedAt: 1_780_000_000_000,
+        persistence:
+          mode === "persistence-failed"
+            ? {
+                status: "failed" as const,
+                failures: [
+                  {
+                    providerMessageId: "accepted-first-part",
+                    stage: "memory" as const,
+                    code: "DATABASE_UNAVAILABLE",
+                    message: "database unavailable",
+                  },
+                ],
+              }
+            : { status: "persisted" as const, memoryIds: [] },
+      };
+      const send = vi.fn(async (): Promise<SendHandlerOutcome> => {
+        if (mode === "ack-lost")
+          throw new Error("Provider acknowledgement timed out");
+        if (mode === "partial")
+          return {
+            kind: "partially_delivered",
+            receipt,
+            memories: [],
+            code: "SECOND_PART_FAILED",
+            message: "Second part was not acknowledged",
+          };
+        return { kind: "delivered", receipt, memories: [] };
+      });
+      const fallback = vi.fn();
+      const connector = {
+        handleSendMessage: send,
+        messageManager: {},
+        isReady: () => true,
+        bot: { botInfo: { id: 100, username: "synthetic_bot" } },
+        client: { user: { id: "100", username: "synthetic_bot" } },
+      };
+      const service = new LifeOpsService({
+        ...runtime,
+        character: { name: "Synthetic test" },
+        setSetting: vi.fn(),
+        sendMessageToTarget: fallback,
+        getService: (name: string) =>
+          name === provider ? connector : runtime.getService(name),
+      } as unknown as IAgentRuntime);
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: provider,
+        payload: {
+          action: "send_message",
+          recipient: "synthetic-channel",
+          body: "Synthetic review",
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "approved synthetic test",
+      });
+      const attempt = () =>
+        runApprovalDispatch({
+          queue: realQueue,
+          request: approved,
+          subjectUserId: OWNER_A,
+          prepared: {
+            provider,
+            dispatch: async () => {
+              const value =
+                provider === "telegram"
+                  ? await service.sendTelegramMessage({
+                      side: "agent",
+                      target: "synthetic-channel",
+                      message: "Synthetic review",
+                    })
+                  : await service.sendDiscordMessage({
+                      side: "agent",
+                      channelId: "synthetic-channel",
+                      text: "Synthetic review",
+                    });
+              return { value, receipt: { provider } };
+            },
+          },
+        });
+      expect((await attempt()).kind).toBe("reconciliation_required");
+      const reopened = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      const stored = await reopened.byId(request.id, OWNER_A);
+      expect(stored).toMatchObject({
+        state: "reconciliation_required",
+        execution: {
+          providerReceipt: {
+            provider,
+            accountId: "default",
+            channelId: "synthetic-channel",
+            ...(mode === "ack-lost"
+              ? { deliveryStatus: "unknown" }
+              : { disposition: { receipt } }),
+          },
+        },
+      });
+      await expect(attempt()).rejects.toThrow();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(fallback).not.toHaveBeenCalled();
     },
   );
 
