@@ -1,7 +1,7 @@
 /** Builds the complete authorized planner action surface and caches rendered catalogs by runtime registration state. */
 
 import { evaluateConnectorAccountPolicies } from "../../connectors/account-manager";
-import { recordInferenceSpan } from "../../inference-timing";
+import { getInferenceTimer, recordInferenceSpan } from "../../inference-timing";
 import {
 	buildActionCatalog,
 	type LocalizedActionExampleResolver,
@@ -124,6 +124,38 @@ export async function collectV5PlannerCandidateActions(args: {
 	);
 	const selectedActions: Action[] = [];
 	const seen = new Set<string>();
+	const checks = getInferenceTimer()
+		? ([] as Array<{
+				action: string;
+				gate: "connector-policy" | "validate";
+				durationMs: number;
+				outcome: "returned" | "threw";
+			}>)
+		: undefined;
+	const discoveryStartedAt = checks ? performance.now() : 0;
+	// One summary preserves every check without consuming the per-turn span
+	// budget before the actual model and delivery spans can be recorded.
+	const observeCheck = async <T>(
+		gate: "connector-policy" | "validate",
+		action: Action,
+		run: () => Promise<T>,
+	): Promise<T> => {
+		if (!checks) return run();
+		const startedAt = performance.now();
+		let returned = false;
+		try {
+			const result = await run();
+			returned = true;
+			return result;
+		} finally {
+			checks.push({
+				action: action.name,
+				gate,
+				durationMs: performance.now() - startedAt,
+				outcome: returned ? "returned" : "threw",
+			});
+		}
+	};
 
 	const appendIfAllowed = async (
 		action: Action,
@@ -174,12 +206,10 @@ export async function collectV5PlannerCandidateActions(args: {
 			return false;
 		}
 		try {
-			const accountPolicy = await evaluateConnectorAccountPolicies(
-				args.runtime,
-				action,
-				{
+			const accountPolicy = await observeCheck("connector-policy", action, () =>
+				evaluateConnectorAccountPolicies(args.runtime, action, {
 					message: args.message,
-				},
+				}),
 			);
 			if (!accountPolicy.allowed) {
 				if (explicitCandidateName) {
@@ -203,10 +233,9 @@ export async function collectV5PlannerCandidateActions(args: {
 				return false;
 			}
 			if (action.validate) {
-				const valid = await action.validate(
-					args.runtime,
-					args.message,
-					args.state,
+				const validate = action.validate;
+				const valid = await observeCheck("validate", action, () =>
+					validate.call(action, args.runtime, args.message, args.state),
 				);
 				if (!valid) {
 					if (explicitCandidateName) {
@@ -384,6 +413,15 @@ export async function collectV5PlannerCandidateActions(args: {
 		}
 	}
 
+	if (checks)
+		recordInferenceSpan(
+			"actions:discovery",
+			performance.now() - discoveryStartedAt,
+			{
+				phase: args.discoverActions ? "discovery" : "planner",
+				checks: JSON.stringify(checks),
+			},
+		);
 	return selectedActions;
 }
 

@@ -438,6 +438,163 @@ describe("conversation-route chat idempotency wiring", () => {
     vi.clearAllMocks();
   });
 
+  it("delivers durable JSON before room work finishes and fences the next turn", async () => {
+    const { trackPostDeliveryTask } = await import("@elizaos/core");
+    const { state, handleMessage, storedMemories } = createHarness();
+    const runtime = state.runtime;
+    if (!runtime) throw new Error("runtime fixture missing");
+    const gate = Promise.withResolvers<void>();
+    let reflected = false;
+    handleMessage.mockImplementationOnce(async () => {
+      void trackPostDeliveryTask(
+        runtime,
+        "deferred-room-reflection",
+        async () => {
+          await gate.promise;
+          expect(
+            runtime.roomHandlerQueue.ownsLease(
+              ROOM_ID,
+              runtime.roomHandlerQueue.currentLease(ROOM_ID),
+            ),
+          ).toBe(true);
+          reflected = true;
+        },
+      );
+      return {
+        didRespond: true,
+        responseContent: { text: "First reply." },
+        responseMessages: [],
+      };
+    });
+    handleMessage.mockImplementationOnce(async () => {
+      expect(reflected).toBe(true);
+      return {
+        didRespond: true,
+        responseContent: { text: "Second reply." },
+        responseMessages: [],
+      };
+    });
+    const body = { text: "first turn", clientMessageId: "json-early-first" };
+    const { res, record } = createMockRes();
+    const json = vi.fn((response: http.ServerResponse, _payload: unknown) =>
+      response.end(),
+    );
+    const ctx = {
+      req: createReq("POST", SEND_PATH),
+      res,
+      method: "POST",
+      pathname: SEND_PATH,
+      state,
+      readJsonBody: async () => body,
+      json,
+      error: vi.fn(),
+    } as unknown as ConversationRouteContext;
+    let settled = false;
+    const first = handleConversationRoutes(ctx).then(() => {
+      settled = true;
+    });
+    let second: ReturnType<typeof runRoute> | undefined;
+    try {
+      await vi.waitFor(() => expect(record.ended).toBe(true));
+      expect(settled).toBe(false);
+      expect(reflected).toBe(false);
+      expect(state.activeChatTurnCount).toBe(1);
+      expect(runtime.roomHandlerQueue.pendingFor(ROOM_ID)).toBe(1);
+      expect(json).toHaveBeenCalledTimes(1);
+      const outcome = json.mock.calls[0][1];
+      expect(outcome).toMatchObject({
+        text: "First reply.",
+        messageId: expect.any(String),
+      });
+      expect(storedMemories).toContainEqual(
+        expect.objectContaining({
+          content: expect.objectContaining({ text: "First reply." }),
+        }),
+      );
+      const replay = await runRoute("POST", SEND_PATH, state, body);
+      expect(replay.captured.payload).toEqual(outcome);
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+
+      second = runRoute("POST", SEND_PATH, state, {
+        text: "second turn",
+        clientMessageId: "json-early-second",
+      });
+      await vi.waitFor(() =>
+        expect(runtime.roomHandlerQueue.pendingFor(ROOM_ID)).toBe(2),
+      );
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+      gate.resolve();
+      const [, secondResult] = await Promise.all([first, second]);
+      expect(secondResult.captured.payload).toMatchObject({
+        text: "Second reply.",
+      });
+      expect(handleMessage).toHaveBeenCalledTimes(2);
+      expect(json).toHaveBeenCalledTimes(1);
+      expect(state.activeChatTurnCount).toBe(0);
+      expect(runtime.roomHandlerQueue.pendingFor(ROOM_ID)).toBe(0);
+      expect(runtime.reportError).not.toHaveBeenCalled();
+      // After a cache loss, the settled durable marker still suppresses replay.
+      resetChatDedupe();
+      const durableReplay = await runRoute("POST", SEND_PATH, state, body);
+      expect(durableReplay.captured.payload).toEqual(outcome);
+      expect(handleMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      gate.resolve();
+      await Promise.all([first, second]);
+    }
+  });
+
+  it("preserves delivered JSON and durable retries after a room drain failure", async () => {
+    const { quarantinePostDeliveryTasks } = await import("@elizaos/core");
+    const { state, handleMessage, storedMemories } = createHarness();
+    const runtime = state.runtime;
+    if (!runtime) throw new Error("runtime fixture missing");
+    handleMessage.mockImplementationOnce(async () => {
+      quarantinePostDeliveryTasks(runtime, new Error("reflection cancelled"));
+      return {
+        didRespond: true,
+        responseContent: { text: "Completed action." },
+        responseMessages: [],
+      };
+    });
+    const body = {
+      text: "perform action",
+      clientMessageId: "json-drain-failure",
+    };
+    const { res } = createMockRes();
+    const json = vi.fn((response: http.ServerResponse, _payload: unknown) =>
+      response.end(),
+    );
+    const error = vi.fn();
+    await handleConversationRoutes({
+      req: createReq("POST", SEND_PATH),
+      res,
+      method: "POST",
+      pathname: SEND_PATH,
+      state,
+      readJsonBody: async () => body,
+      json,
+      error,
+    } as unknown as ConversationRouteContext);
+    expect(json).toHaveBeenCalledTimes(1);
+    const outcome = json.mock.calls[0][1];
+    expect(outcome).toMatchObject({ text: "Completed action." });
+    expect(error).not.toHaveBeenCalled();
+    expect(runtime.reportError).toHaveBeenCalledWith(
+      "ConversationJson.postDelivery",
+      expect.objectContaining({ code: "POST_DELIVERY_DRAIN_CANCELLED" }),
+      expect.objectContaining({ conversationId: "conv-1" }),
+    );
+    expect(state.activeChatTurnCount).toBe(0);
+    expect(runtime.roomHandlerQueue.pendingFor(ROOM_ID)).toBe(0);
+    const persistedCount = storedMemories.length;
+    resetChatDedupe();
+    const replay = await runRoute("POST", SEND_PATH, state, body);
+    expect(replay.captured.payload).toEqual(outcome);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(storedMemories).toHaveLength(persistedCount);
+  });
+
   it("cordons and drains the old runtime before a same-room replacement turn starts", async () => {
     const old = createHarness();
     const replacement = createHarness();

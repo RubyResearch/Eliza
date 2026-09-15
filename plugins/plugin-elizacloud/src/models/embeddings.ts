@@ -1,5 +1,6 @@
 /**
- * Registers Cloud embedding handlers and validates dimension configuration before dispatch.
+ * Serves Cloud embeddings with dimension validation and shared ownership of
+ * identical in-flight requests. Completed vectors are not cached here.
  */
 import type { IAgentRuntime, TextEmbeddingParams } from "@elizaos/core";
 import {
@@ -9,16 +10,103 @@ import {
   timeInferenceSpan,
   VECTOR_DIMS,
 } from "@elizaos/core";
-import { getSetting } from "../utils/config";
+import {
+  getAppId,
+  getSetting,
+  resolveCloudSdkAuthorityTuple,
+} from "../utils/config";
 import { emitModelUsageEvent } from "../utils/events";
 import { createCloudApiClient } from "../utils/sdk-client";
 import { nextWarmingRetryDelayMs } from "./text";
 
 const MAX_BATCH_SIZE = 100;
 
+interface PendingEmbeddingBatch {
+  controller: AbortController;
+  promise: Promise<number[][]>;
+  consumers: number;
+  settled: boolean;
+}
+
+const pendingEmbeddingBatches = new WeakMap<
+  IAgentRuntime,
+  Map<string, PendingEmbeddingBatch>
+>();
+
+/** Share only pending identical work; each caller retains its cancellation owner. */
+function sharePendingEmbeddingBatch(
+  runtime: IAgentRuntime,
+  key: string,
+  signal: AbortSignal | undefined,
+  execute: (signal: AbortSignal) => Promise<number[][]>,
+): Promise<number[][]> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  let batches = pendingEmbeddingBatches.get(runtime);
+  if (!batches) {
+    batches = new Map();
+    pendingEmbeddingBatches.set(runtime, batches);
+  }
+  let pending = batches.get(key);
+  if (!pending) {
+    const controller = new AbortController();
+    const entry: PendingEmbeddingBatch = {
+      controller,
+      consumers: 0,
+      settled: false,
+      // Publish ownership before execution, so synchronous failures and
+      // cancellation follow the same cleanup path as network failures.
+      promise: Promise.resolve().then(() => execute(controller.signal)),
+    };
+    entry.promise = entry.promise.finally(() => {
+      entry.settled = true;
+      if (batches.get(key) === entry) batches.delete(key);
+    });
+    batches.set(key, entry);
+    pending = entry;
+  }
+  const entry = pending;
+  entry.consumers += 1;
+  return new Promise((resolve, reject) => {
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      signal?.removeEventListener("abort", abort);
+      entry.consumers -= 1;
+      if (entry.consumers === 0 && !entry.settled) {
+        // An abandoned operation must not accept a new caller while its
+        // canceled transport is still unwinding.
+        if (batches.get(key) === entry) batches.delete(key);
+        entry.controller.abort(signal?.reason);
+      }
+    };
+    const abort = (): void => {
+      release();
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    void entry.promise.then(
+      (vectors) => {
+        if (released) return;
+        release();
+        // Consumers may normalize or store vectors independently.
+        resolve(vectors.map((vector) => [...vector]));
+      },
+      (error) => {
+        // error-policy:J5 every interested caller observes this rejection;
+        // canceled callers already observed their own abort reason.
+        if (released) return;
+        release();
+        reject(error);
+      },
+    );
+  });
+}
+
 // ── Bounded retry/backoff for the /embeddings round-trip ──────────────────
-// Embeddings are off the turn's critical path (queueEmbeddingGeneration is
-// fire-and-forget), so a stall here delays the embedding QUEUE, not a reply.
+// Background indexing and foreground recall both use this transport. Identical
+// overlapping batches share one request without canceling another caller's work.
 // The old behaviour — one blind 30s (or full retry-after) sleep then a single
 // retry — could park the queue for 30s+ on a transient 429. Replaced with
 // bounded exponential backoff + jitter, a CAP on any single wait (so a large
@@ -205,7 +293,49 @@ export async function handleBatchTextEmbedding(
     validTexts.push({ text, originalIndex: i });
   }
 
-  const results: number[][] = new Array(texts.length);
+  // Credential/endpoint and app attribution changes create a different flight.
+  // The key is process-local, never logged, and removed when work settles.
+  const authority = resolveCloudSdkAuthorityTuple(runtime, true);
+  // Cookie-backed browser sessions can change without changing this tuple.
+  // Without an explicit credential, retain an independent authenticated call.
+  if (!authority.apiKey) {
+    return executeEmbeddingBatch(
+      runtime,
+      client,
+      validTexts,
+      embeddingModelName,
+      embeddingDimension,
+      signal,
+    );
+  }
+  const key = JSON.stringify([
+    authority,
+    getAppId(runtime),
+    embeddingModelName,
+    embeddingDimension,
+    validTexts.map(({ text }) => text),
+  ]);
+  return sharePendingEmbeddingBatch(runtime, key, signal, (sharedSignal) =>
+    executeEmbeddingBatch(
+      runtime,
+      client,
+      validTexts,
+      embeddingModelName,
+      embeddingDimension,
+      sharedSignal,
+    ),
+  );
+}
+
+async function executeEmbeddingBatch(
+  runtime: IAgentRuntime,
+  client: ReturnType<typeof createCloudApiClient>,
+  validTexts: { text: string; originalIndex: number }[],
+  embeddingModelName: string | undefined,
+  embeddingDimension: number,
+  signal: AbortSignal | undefined,
+): Promise<number[][]> {
+  const results: number[][] = new Array(validTexts.length);
 
   for (let batchStart = 0; batchStart < validTexts.length; batchStart += MAX_BATCH_SIZE) {
     const batchEnd = Math.min(batchStart + MAX_BATCH_SIZE, validTexts.length);

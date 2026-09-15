@@ -56,6 +56,7 @@ function runtimeStub(agentId: string): AgentRuntime {
     adapter: {
       close: async () => undefined,
     },
+    stop: async () => undefined,
     getSetting: () => null,
   } as unknown as AgentRuntime;
 }

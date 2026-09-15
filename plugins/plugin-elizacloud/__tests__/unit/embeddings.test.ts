@@ -132,7 +132,7 @@ describe("handleTextEmbedding init + validation", () => {
     expect(requestRaw).toHaveBeenCalledWith(
       "POST",
       "/embeddings",
-      expect.objectContaining({ signal: controller.signal })
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
   });
 });

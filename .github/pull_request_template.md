@@ -178,28 +178,20 @@ List any command failure, missing artifact, unavailable device, unavailable live
 service, or evidence row marked N/A. Include the exact reason and why it is not a
 blocker for this PR.
 
-## Maintainer CI exception record
+## CI availability record
 
-Write `N/A - no exception requested` unless a maintainer is invoking the narrow
-[Maintainer CI exception](../CONTRIBUTING.md#maintainer-ci-exception). When it
-applies, preserve every field below and link the exact evidence.
+Write `N/A - applicable checks passed` when all applicable checks passed.
+Otherwise, follow [CI availability](../CONTRIBUTING.md#ci-availability) and
+record the evidence below. Explicit repository-owner instructions do not
+require a second authorization or separate bypass actor; GitHub-enforced
+permissions still apply.
 
-- PR head SHA: `N/A - no exception requested`
-- Validated `origin/develop` SHA: `N/A - no exception requested`
-- Live ruleset readback and named bypass eligibility:
-  `N/A - no exception requested`
-- Queued or failing checks and run URLs: `N/A - no exception requested`
-- Infrastructure-only or unrelated-failure proof: `N/A - no exception requested`
-- Exact-head commands, exit status, and artifacts: `N/A - no exception requested`
-- Exact-head security, secret-scan, and provenance results:
-  `N/A - no exception requested`
-- Conflict-free and affected-path failure attestation:
-  `N/A - no exception requested`
-- Independent approving reviewer: `N/A - no exception requested`
-- Bypass authorizer: `N/A - no exception requested`
-- Merge method: `N/A - no exception requested`
-- Rollback owner: `N/A - no exception requested`
-- Post-merge `develop` validation: `N/A - no exception requested`
+- PR head and validated `origin/develop` SHAs:
+- Unavailable or failing checks and run URLs:
+- Evidence that failures are outside the changed surface:
+- Exact-head commands, exit statuses, and artifacts:
+- Merge revision and method (record after merge):
+- Remaining validation:
 
 <!-- If there is anything about the deployment, please make a note. -->
 <!--
