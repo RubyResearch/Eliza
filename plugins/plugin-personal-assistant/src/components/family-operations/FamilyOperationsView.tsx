@@ -715,6 +715,7 @@ function CalendarPanel({
               </p>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Button
+                  className="min-h-11"
                   onClick={() =>
                     void run(() =>
                       adapter.resolveCalendarConflict(
@@ -728,6 +729,7 @@ function CalendarPanel({
                   Keep Eliza
                 </Button>
                 <Button
+                  className="min-h-11"
                   variant="outline"
                   onClick={() =>
                     void run(() =>
@@ -745,6 +747,7 @@ function CalendarPanel({
             </div>
           ) : null}
           <Button
+            className="min-h-11"
             variant="outline"
             onClick={() =>
               void run(() =>
