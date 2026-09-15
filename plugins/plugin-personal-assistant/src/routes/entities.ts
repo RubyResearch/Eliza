@@ -34,11 +34,9 @@ function makeStore(ctx: LifeOpsRouteContext): EntityStore | null {
     ctx.error(ctx.res, "Knowledge graph service is not available", 503);
     return null;
   }
-  return knowledgeGraph.getEntityStore(
-    ctx.state.adminEntityId
-      ? String(ctx.state.adminEntityId)
-      : defaultAgentId(ctx.state.runtime),
-  );
+  // The authenticated actor authorizes this request; graph records belong to
+  // the agent partition shared by chat, principal binding, and family workflows.
+  return knowledgeGraph.getEntityStore(defaultAgentId(ctx.state.runtime));
 }
 
 function parseEntityLimit(

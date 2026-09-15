@@ -23,14 +23,19 @@ import type {
   LifeOpsCalendarSummary,
   LifeOpsIcsCalendarSourceMutationResponse,
   LifeOpsIcsCalendarSyncResponse,
+  LifeOpsLinkedCalendarControl,
+  LifeOpsLinkedCalendarControlMutationResult,
   LifeOpsNextCalendarEventContext,
   ListLifeOpsCalendarsRequest,
   ListLifeOpsIcsCalendarSourcesResponse,
   PurgeLifeOpsCalendarImportedDataRequest,
+  RebindLifeOpsLinkedCalendarRequest,
+  RebindLifeOpsLinkedCalendarResponse,
   SeedLifeOpsCalendarRequest,
   SetLifeOpsCalendarIncludedRequest,
   SetLifeOpsCalendarIncludedResponse,
   UpdateLifeOpsIcsCalendarSourceRequest,
+  UpdateLifeOpsLinkedCalendarControlRequest,
 } from "@elizaos/shared";
 import { ElizaClient } from "@elizaos/ui/api";
 import type {
@@ -62,6 +67,14 @@ type CalendarEditorDeleteRequest = Partial<
 };
 
 export interface CalendarClientMethods {
+  rebindLinkedCalendar(
+    linkId: string,
+    request: RebindLifeOpsLinkedCalendarRequest,
+  ): Promise<RebindLifeOpsLinkedCalendarResponse>;
+  getLinkedCalendarControl(): Promise<LifeOpsLinkedCalendarControl>;
+  updateLinkedCalendarControl(
+    request: UpdateLifeOpsLinkedCalendarControlRequest,
+  ): Promise<LifeOpsLinkedCalendarControlMutationResult>;
   getLifeOpsCalendarFeed(
     options?: GetLifeOpsCalendarFeedRequest,
     request?: Pick<RequestInit, "signal">,
@@ -123,6 +136,38 @@ declare module "@elizaos/ui/api/client-base" {
 
 const calendarClientPrototype = ElizaClient.prototype as ElizaClient &
   CalendarClientMethods;
+
+calendarClientPrototype.rebindLinkedCalendar = async function (
+  this: ElizaClient,
+  linkId: string,
+  request: RebindLifeOpsLinkedCalendarRequest,
+) {
+  return this.fetch<RebindLifeOpsLinkedCalendarResponse>(
+    `/api/lifeops/calendar/links/${encodeURIComponent(linkId)}/rebind`,
+    { method: "POST", body: JSON.stringify(request) },
+  );
+};
+
+calendarClientPrototype.getLinkedCalendarControl = async function (
+  this: ElizaClient,
+) {
+  return this.fetch<LifeOpsLinkedCalendarControl>(
+    "/api/lifeops/calendar/sync-control",
+  );
+};
+
+calendarClientPrototype.updateLinkedCalendarControl = async function (
+  this: ElizaClient,
+  request: UpdateLifeOpsLinkedCalendarControlRequest,
+) {
+  return this.fetch<LifeOpsLinkedCalendarControlMutationResult>(
+    "/api/lifeops/calendar/sync-control",
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    },
+  );
+};
 
 calendarClientPrototype.getLifeOpsCalendarFeed = async function (
   this: ElizaClient,

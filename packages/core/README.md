@@ -8,11 +8,20 @@ Document authorization treats a document's `roomId` as its single room
 entitlement and evaluates it against current requester membership inside the
 adapter before rows, counts, fragments, or ranking are produced. Explicit
 `directGrantEntityIds` are independent of room membership for reads; they
-cannot expose `agent-private` documents or confer mutation authority. They can
+can name a resolved guest without promoting their role, but cannot expose
+`agent-private` documents or confer mutation authority. Unresolved identities
+remain denied even when named in a grant. They can
 only be replaced through the dedicated storage-enforced CAS operation by OWNER,
 or by a current room ADMIN for global and user-private documents. Every grantee
 must be an entity in the current agent tenant. Invalid or duplicate grant arrays
 fail closed.
+
+The `DOCUMENT` chat action exposes `inspect_pins` / `set_pins` and
+`inspect_readers` / `set_readers` for the verified owner. Inspection returns the
+current revision; saves require that revision and explicit complete targets.
+An empty chat-pin or named-reader array removes that selection. Pins never
+grant read access, and removing named readers does not revoke room access.
+These controls do not publish documents to the internet.
 
 ## Key concepts
 
@@ -562,6 +571,22 @@ bun run --cwd packages/core typecheck     # tsgo --noEmit
 For agent-facing notes on layout, the public surface, and how to extend the runtime, see [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md).
 
 ---
+
+
+### Document input encoding
+
+`DocumentService.addDocument` accepts literal text for text formats and Base64
+for binary formats. Text that happens to resemble Base64 stays literal. A caller
+sending Base64-encoded text must set `contentEncoding: "base64"`; decoding rejects
+malformed Base64 or invalid UTF-8 before storage. `contentEncoding: "utf8"` is
+invalid for a binary format. Normal chat, selected correspondence, file and URL
+text imports need no encoding conversion.
+
+Text content identities preserve exact whitespace and literal encoding-like
+content. Equal retries deduplicate; different text does not reuse a document
+merely because trimming or guessed decoding would produce the same value.
+Existing source records are not rewritten. Previously normalized or misdecoded
+records require source-backed review before any recovery or migration.
 
 Experience retrieval orders candidates by semantic similarity, then quality for equal scores; confidence cannot promote a weaker match above a stronger one. The complete candidate set and embedding-failure fallback remain available. Incremental background extractors share provenance instructions once while retaining independent source sets and edited/deleted evidence contracts.
 

@@ -12,6 +12,7 @@ import {
   getAgreementKnowledgeService,
   type ParentingAgreementArtifact,
 } from "../lifeops/household/agreement-knowledge.js";
+import { isAgreementReviewError } from "../lifeops/household/agreement-review.js";
 import {
   AGREEMENT_UPLOAD_CHUNK_BYTES,
   AGREEMENT_UPLOAD_METADATA_BYTES,
@@ -72,7 +73,7 @@ function pathMatch(pathname: string, expression: RegExp): string[] | null {
   return match.slice(1).map((part) => decodeURIComponent(part ?? ""));
 }
 
-function statusFor(error: ElizaError): number {
+function statusFor(error: { code: string }): number {
   switch (error.code) {
     case "AGREEMENT_ACCESS_DENIED":
       return 403;
@@ -83,10 +84,15 @@ function statusFor(error: ElizaError): number {
     case "AGREEMENT_OBLIGATION_CONFLICT":
     case "AGREEMENT_DUPLICATE_CONTENT":
       return 409;
+    case "AGREEMENT_EXTRACTION_UNAVAILABLE":
     case "AGREEMENT_INGESTION_RECONCILIATION_REQUIRED":
     case "AGREEMENT_INGESTION_CLEANUP_FAILED":
     case "AGREEMENT_STORAGE_UNAVAILABLE":
+    case "AGREEMENT_REVIEW_UNAVAILABLE":
       return 503;
+    case "AGREEMENT_REVIEW_INVALID":
+    case "AGREEMENT_REVIEW_CITATION_INVALID":
+      return 422;
     default:
       return 400;
   }
@@ -118,6 +124,13 @@ export async function handleAgreementKnowledgeRoutes(
   }
 
   try {
+    if (
+      ctx.method === "GET" &&
+      ctx.pathname === "/api/lifeops/agreements/pin-targets"
+    ) {
+      ctx.json(ctx.res, await service.listPinTargets(SELF_ENTITY_ID));
+      return true;
+    }
     if (ctx.method === "GET" && ctx.pathname === "/api/lifeops/agreements") {
       const agreements = await service.listOwnerAgreements({
         ownerEntityId: SELF_ENTITY_ID,
@@ -236,6 +249,24 @@ export async function handleAgreementKnowledgeRoutes(
       return true;
     }
 
+    const ownerReview = pathMatch(
+      ctx.pathname,
+      /^\/api\/lifeops\/agreements\/([^/]+)\/review$/,
+    );
+    if (ownerReview && (ctx.method === "GET" || ctx.method === "POST")) {
+      const input = {
+        artifactId: ownerReview[0] ?? "",
+        ownerEntityId: SELF_ENTITY_ID,
+      };
+      const review =
+        ctx.method === "POST"
+          ? await service.prepareOwnerReview(input)
+          : await service.readOwnerReview(input);
+      ctx.res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      ctx.json(ctx.res, { review });
+      return true;
+    }
+
     const artifactExport = pathMatch(
       ctx.pathname,
       /^\/api\/lifeops\/agreements\/([^/]+)\/export$/,
@@ -303,6 +334,23 @@ export async function handleAgreementKnowledgeRoutes(
       return true;
     }
 
+    const guestOptions = pathMatch(
+      ctx.pathname,
+      /^\/api\/lifeops\/agreements\/([^/]+)\/guest-options$/,
+    );
+    if (ctx.method === "GET" && guestOptions) {
+      ctx.res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      ctx.res.setHeader("Referrer-Policy", "no-referrer");
+      ctx.json(
+        ctx.res,
+        await service.listGuestAccessOptions({
+          artifactId: guestOptions[0] ?? "",
+          ownerEntityId: SELF_ENTITY_ID,
+        }),
+      );
+      return true;
+    }
+
     const artifactRead = pathMatch(
       ctx.pathname,
       /^\/api\/lifeops\/agreements\/([^/]+)$/,
@@ -343,19 +391,22 @@ export async function handleAgreementKnowledgeRoutes(
     );
     if (ctx.method === "POST" && obligationCreate) {
       const body = record(await ctx.readJsonBody(ctx.req, ctx.res));
-      const obligation = await service.proposeObligation({
+      const pageStart = numberField(body, "pageStart");
+      const result = await service.addOwnerReviewProposal({
         artifactId: obligationCreate[0] ?? "",
-        title: stringField(body, "title"),
-        obligationText: stringField(body, "obligationText"),
-        pageStart: numberField(body, "pageStart"),
-        pageEnd:
-          typeof body.pageEnd === "number"
-            ? numberField(body, "pageEnd")
-            : undefined,
-        citationText: stringField(body, "citationText"),
-        proposedByEntityId: SELF_ENTITY_ID,
+        ownerEntityId: SELF_ENTITY_ID,
+        proposal: {
+          title: stringField(body, "title"),
+          obligationText: stringField(body, "obligationText"),
+          pageStart,
+          pageEnd:
+            body.pageEnd === undefined
+              ? pageStart
+              : numberField(body, "pageEnd"),
+          citationText: stringField(body, "citationText"),
+        },
       });
-      ctx.json(ctx.res, { obligation }, 201);
+      ctx.json(ctx.res, result, result.created ? 201 : 200);
       return true;
     }
 
@@ -487,6 +538,7 @@ export async function handleAgreementKnowledgeRoutes(
   } catch (error) {
     if (
       error instanceof AgreementKnowledgeError ||
+      isAgreementReviewError(error) ||
       (error instanceof ElizaError &&
         (error.code === "FAMILY_WORKSPACE_FENCED" ||
           error.code === "FAMILY_OPERATION_UNSETTLED"))

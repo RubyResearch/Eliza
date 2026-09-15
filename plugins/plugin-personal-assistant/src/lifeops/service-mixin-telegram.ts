@@ -9,7 +9,10 @@ import type {
   VerifyLifeOpsTelegramConnectorRequest,
   VerifyLifeOpsTelegramConnectorResponse,
 } from "@elizaos/shared";
-import type { TelegramMessageSearchResult } from "./domains/telegram-service.js";
+import type {
+  TelegramMessageSearchResult,
+  TelegramSendMessageResult,
+} from "./domains/telegram-service.js";
 
 /** Public surface added by {@link withTelegram}; listed on the LifeOpsService
  * declaration-merge (mixin composition exceeds TS inference depth). Type-only. */
@@ -19,9 +22,10 @@ export interface LifeOpsTelegramService {
   ): Promise<LifeOpsTelegramConnectorStatus>;
   sendTelegramMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     target: string;
     message: string;
-  }): Promise<{ ok: true; messageId: string | null }>;
+  }): Promise<TelegramSendMessageResult>;
   verifyTelegramConnector(
     request: VerifyLifeOpsTelegramConnectorRequest,
   ): Promise<VerifyLifeOpsTelegramConnectorResponse>;

@@ -2,7 +2,7 @@
  * Implements the DOCUMENT umbrella action for the documents capability. One
  * planner-routed action whose structured `action`/`subaction` enum dispatches to
  * a per-subaction handler (list / search / read / write / edit / delete /
- * import_file / import_url), each backed by {@link DocumentService}. Routing
+ * import_file / import_url / knowledge pins / named readers), each backed by {@link DocumentService}. Routing
  * goes through {@link resolveActionArgs} on the structured params, never
  * natural-language keyword matching. Enforces the four visibility scopes
  * (global / owner-private / user-private / agent-private) and role-gated
@@ -69,9 +69,16 @@ type DocumentSubAction =
 	| "edit"
 	| "delete"
 	| "import_file"
-	| "import_url";
+	| "import_url"
+	| "inspect_pins"
+	| "set_pins"
+	| "inspect_readers"
+	| "set_readers";
 
 type DocumentActionParameters = {
+	pinAgent?: boolean;
+	pinRoomIds?: string[];
+	readerEntityIds?: string[];
 	action?: string;
 	subaction?: string;
 	query?: string;
@@ -109,6 +116,36 @@ type DocumentActionParameters = {
  * handler reads so the resolver forwards them through.
  */
 const DOCUMENT_SUBACTIONS: SubactionsMap<DocumentSubAction> = {
+	inspect_pins: {
+		descriptionCompressed: "inspect pins through owner knowledge controls",
+		description:
+			"Inspect document pins and obtain the current revision before changing them.",
+		required: ["documentId"],
+		optional: [],
+	},
+	set_pins: {
+		descriptionCompressed: "set pins through owner knowledge controls",
+		description:
+			"Replace the reviewed document pin destinations. Pins never grant access. Preserve existing destinations unless removal was requested.",
+		required: ["documentId", "pinAgent", "pinRoomIds", "expectedRevision"],
+		allowEmptyArrays: ["pinRoomIds"],
+		optional: [],
+	},
+	inspect_readers: {
+		descriptionCompressed: "inspect readers through owner knowledge controls",
+		description:
+			"Inspect named document readers and obtain the current access revision. Room access remains separate.",
+		required: ["documentId"],
+		optional: [],
+	},
+	set_readers: {
+		descriptionCompressed: "set readers through owner knowledge controls",
+		description:
+			"Replace named document readers with resolved entity IDs using the inspected revision. Empty readers removes direct grants but does not remove room access or publish to the internet.",
+		required: ["documentId", "readerEntityIds", "expectedRevision"],
+		allowEmptyArrays: ["readerEntityIds"],
+		optional: [],
+	},
 	list: {
 		description: "List available stored documents, optionally filtered.",
 		descriptionCompressed: "list stored documents w/ filters",
@@ -201,6 +238,8 @@ const READ_ONLY_DOCUMENT_SUBACTIONS: ReadonlySet<DocumentSubAction> = new Set([
 	"list",
 	"search",
 	"read",
+	"inspect_pins",
+	"inspect_readers",
 ]);
 
 /**
@@ -435,12 +474,15 @@ async function ensureWriteAccess(
 	message: Memory,
 	scope: DocumentVisibilityScope,
 	scopedToEntityId?: UUID,
+	chatAudience = false,
 ): Promise<string | null> {
 	const requesterRole = (await resolveDocumentRequesterRole(runtime, message))
 		.role;
-	if (requesterRole === "UNRESOLVED" || requesterRole === "GUEST") {
+	if (requesterRole === "UNRESOLVED") {
 		return "A verified user identity is required to write documents.";
 	}
+	if (requesterRole === "GUEST") return "Guest document access is read-only.";
+	if (chatAudience) return null;
 	if (scope === "global" || scope === "owner-private") {
 		return (await hasRoleAccess(runtime, message, "OWNER"))
 			? null
@@ -666,6 +708,130 @@ function result(
 			...(extra.data ?? {}),
 		},
 	};
+}
+
+/** Uses the verified sender and canonical service CAS for owner knowledge controls. */
+async function handleKnowledgeControls(
+	runtime: IAgentRuntime,
+	service: DocumentService,
+	message: Memory,
+	params: DocumentActionParameters,
+	subaction: "inspect_pins" | "set_pins" | "inspect_readers" | "set_readers",
+): Promise<ActionResult> {
+	const requester = await resolveDocumentRequesterRole(runtime, message);
+	if (requester.role !== "OWNER") {
+		throw new ElizaError(
+			"Only the verified owner can manage document knowledge controls",
+			{
+				code: "DOCUMENT_KNOWLEDGE_FORBIDDEN",
+			},
+		);
+	}
+	const documentId = getDocumentId(params, message);
+	if (!documentId)
+		throw new ElizaError("Select a document before managing knowledge", {
+			code: "DOCUMENT_KNOWLEDGE_ID_REQUIRED",
+		});
+	const accessContext = {
+		requesterEntityId: requester.entityId,
+		role: "OWNER" as const,
+		isOwner: true,
+	};
+	if (subaction === "inspect_pins") {
+		const pins = await service.getDocumentPinsWithAccessContext(
+			documentId,
+			accessContext,
+		);
+		return result(
+			true,
+			"Current pins loaded. Pins do not grant access.",
+			subaction,
+			{
+				data: { documentId, ...pins },
+			},
+		);
+	}
+	if (subaction === "inspect_readers") {
+		const readers = await service.getDocumentDirectGrantStateWithAccessContext(
+			documentId,
+			accessContext,
+		);
+		return result(
+			true,
+			"Named readers loaded. Room access remains separate.",
+			subaction,
+			{
+				data: { documentId, ...readers },
+			},
+		);
+	}
+	if (typeof params.expectedRevision !== "string" || !params.expectedRevision) {
+		throw new ElizaError(
+			"Inspect the current knowledge settings before saving",
+			{
+				code: "DOCUMENT_KNOWLEDGE_REVISION_REQUIRED",
+			},
+		);
+	}
+	if (subaction === "set_pins") {
+		if (
+			typeof params.pinAgent !== "boolean" ||
+			!Array.isArray(params.pinRoomIds) ||
+			!params.pinRoomIds.every(
+				(id): id is UUID => typeof id === "string" && isUuid(id),
+			)
+		) {
+			throw new ElizaError("Choose the agent pin and explicit valid chat IDs", {
+				code: "DOCUMENT_PIN_TARGETS_INVALID",
+			});
+		}
+		await service.setDocumentPinsWithAccessContext(
+			documentId,
+			{ agent: params.pinAgent, roomIds: params.pinRoomIds },
+			accessContext,
+			params.expectedRevision,
+		);
+		const pins = await service.getDocumentPinsWithAccessContext(
+			documentId,
+			accessContext,
+		);
+		return result(
+			true,
+			"Pin change saved. Current pin destinations loaded; document access was not changed.",
+			subaction,
+			{
+				data: { documentId, ...pins },
+			},
+		);
+	}
+	if (
+		!Array.isArray(params.readerEntityIds) ||
+		!params.readerEntityIds.every(
+			(id): id is UUID => typeof id === "string" && isUuid(id),
+		)
+	) {
+		throw new ElizaError("Choose explicit valid reader entity IDs", {
+			code: "DOCUMENT_READERS_INVALID",
+		});
+	}
+	await service.setDocumentDirectGrantsWithAccessContext(
+		documentId,
+		params.readerEntityIds,
+		accessContext,
+		params.expectedRevision,
+	);
+	const readers = await service.getDocumentDirectGrantStateWithAccessContext(
+		documentId,
+		accessContext,
+	);
+	return result(
+		true,
+		"Named reader change saved. Current readers loaded; room access and pins remain separate.",
+		subaction,
+		{
+			data: { documentId, ...readers },
+		},
+	);
 }
 
 async function handleSearch(
@@ -989,13 +1155,18 @@ async function handleWrite(
 		});
 	}
 
-	const scope = getScope(runtime, message, params);
+	const chatAudience =
+		(!params.scope || params.scope === "all-visible") &&
+		!params.scopedToEntityId &&
+		message.entityId !== runtime.agentId;
+	const scope = chatAudience ? "global" : getScope(runtime, message, params);
 	const scopedToEntityId = getScopedToEntityId(runtime, message, scope, params);
 	const accessError = await ensureWriteAccess(
 		runtime,
 		message,
 		scope,
 		scopedToEntityId,
+		chatAudience,
 	);
 	if (accessError) {
 		return result(false, accessError, "write", {
@@ -1018,6 +1189,7 @@ async function handleWrite(
 	const tags = Array.isArray(params.tags) ? params.tags : [];
 	const stored = await service.addDocument({
 		...addOptions,
+		...(chatAudience ? { audience: "chat" as const } : {}),
 		clientDocumentId: "" as UUID,
 		contentType: "text/plain",
 		originalFilename: filename,
@@ -1037,7 +1209,9 @@ async function handleWrite(
 	});
 
 	// Return persistence evidence to the planner; the model owns the reply.
-	const response = `Saved "${title}" to your documents.`;
+	const response = chatAudience
+		? `Saved "${title}" for participants in this chat.`
+		: `Saved "${title}" to your documents.`;
 
 	return result(true, response, "write", {
 		values: {
@@ -1046,7 +1220,12 @@ async function handleWrite(
 			title,
 			scope,
 		},
-		data: { documentId: stored.clientDocumentId, filename, scope },
+		data: {
+			documentId: stored.clientDocumentId,
+			filename,
+			scope,
+			...(chatAudience ? { audience: "chat" } : {}),
+		},
 	});
 }
 
@@ -1463,15 +1642,36 @@ export const documentAction: Action = {
 	contextGate: { anyOf: ["documents", "knowledge"] },
 	roleGate: { minRole: "USER" },
 	description:
-		"List, search, read, write, edit, delete, and import stored documents. Select one action and provide the fields needed for that operation.",
+		"List, search, read, write, edit, delete, import stored documents, and manage owner knowledge pins and named readers. Select one action and provide the fields needed for that operation.",
 	descriptionCompressed:
-		"documents action=list|search|read|write|edit|delete|import_file|import_url",
+		"documents action=list|search|read|write|edit|delete|import_file|import_url|inspect_pins|set_pins|inspect_readers|set_readers",
 	suppressPostActionContinuation: true,
 	parameters: [
 		{
+			name: "pinAgent",
+			description:
+				"Whether the document is pinned to this agent. Required for set_pins, including false.",
+			required: false,
+			schema: { type: "boolean" },
+		},
+		{
+			name: "pinRoomIds",
+			description:
+				"Complete selected chat UUIDs for set_pins. Use the current chat ID for a requested current-chat pin; preserve other pins unless removal is requested. Empty array removes chat pins.",
+			required: false,
+			schema: { type: "array", items: { type: "string" } },
+		},
+		{
+			name: "readerEntityIds",
+			description:
+				"Complete selected resolved entity UUIDs for set_readers. Empty array removes direct readers, not room access.",
+			required: false,
+			schema: { type: "array", items: { type: "string" } },
+		},
+		{
 			name: "action",
 			description:
-				"Document operation to perform: list, search, read, write, edit, delete, import_file, or import_url.",
+				"Document operation to perform: list, search, read, write, edit, delete, import_file, import_url, inspect_pins, set_pins, inspect_readers, or set_readers.",
 			required: true,
 			schema: {
 				type: "string",
@@ -1548,7 +1748,7 @@ export const documentAction: Action = {
 		{
 			name: "scope",
 			description:
-				"Visibility scope. For list/search, use all-visible unless the user explicitly names global, owner-private, user-private, or agent-private; phrases such as 'my documents' mean all documents visible to the requester. For newly-created documents, select the requested visibility scope.",
+				"Visibility scope. For list/search, use all-visible unless the user explicitly names global, owner-private, user-private, or agent-private; phrases such as 'my documents' mean all documents visible to the requester. New text documents default to the current chat participants. Select a private scope only when requested. The global storage scope means room membership, never public internet publication.",
 			required: false,
 			schema: {
 				type: "string",
@@ -1600,7 +1800,7 @@ export const documentAction: Action = {
 		{
 			name: "expectedRevision",
 			description:
-				"Revision returned by the preceding read page. A changed document fails explicitly instead of shifting offsets.",
+				"For read, the revision of the preceding read page. For set_pins, pinRevision from inspect_pins; for set_readers, accessRevision from inspect_readers. Stale revisions reject without saving.",
 			required: false,
 			schema: { type: "string" },
 		},
@@ -1717,6 +1917,17 @@ export const documentAction: Action = {
 
 		try {
 			switch (subaction) {
+				case "inspect_pins":
+				case "set_pins":
+				case "inspect_readers":
+				case "set_readers":
+					return await handleKnowledgeControls(
+						runtime,
+						service,
+						message,
+						params,
+						subaction,
+					);
 				case "search":
 					return await handleSearch(service, message, params, callback);
 				case "read":

@@ -22,21 +22,43 @@ import { agentTable } from "./agent";
 import { entityTable } from "./entity";
 import { roomTable } from "./room";
 
-export function documentSearchTokensExpression(content: SQLWrapper, metadata: SQLWrapper): SQL {
-  return sql`regexp_split_to_array(
-    translate(
-      trim(
-        COALESCE(${content}->>'text', '') || E'\n' ||
-        COALESCE(${metadata}->>'title', '') || E'\n' ||
-        COALESCE(${metadata}->>'filename', '') || E'\n' ||
-        COALESCE(${metadata}->>'originalFilename', '') || E'\n' ||
-        COALESCE(${metadata}->>'source', '')
-      ),
-      'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-      'abcdefghijklmnopqrstuvwxyz'
-    ),
-    E'[ \\t\\r\\n\\f]+'
+/**
+ * Produces exact search tokens or bounded GIN candidates. Candidate pieces can
+ * match part of a longer word, so callers must also apply the exact predicate.
+ * Only the index representation is split; stored and returned text stays whole.
+ */
+export function documentSearchQueryTokensExpression(
+  input: SQLWrapper,
+  indexCandidates = false
+): SQL {
+  const normalized = sql`translate(
+    trim(${input}),
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'abcdefghijklmnopqrstuvwxyz'
   )`;
+  // PostgreSQL GIN entries must fit an index page. 128 Unicode characters
+  // occupy at most 512 UTF-8 bytes; the complete token remains in the source.
+  const indexed = indexCandidates
+    ? sql`regexp_replace(${normalized}, E'([^ \\t\\r\\n\\f]{128})', E'\\1 ', 'g')`
+    : normalized;
+  return sql`regexp_split_to_array(trim(${indexed}), E'[ \\t\\r\\n\\f]+')`;
+}
+
+export function documentSearchTokensExpression(
+  content: SQLWrapper,
+  metadata: SQLWrapper,
+  indexCandidates = false
+): SQL {
+  return documentSearchQueryTokensExpression(
+    sql`
+    COALESCE(${content}->>'text', '') || E'\n' ||
+    COALESCE(${metadata}->>'title', '') || E'\n' ||
+    COALESCE(${metadata}->>'filename', '') || E'\n' ||
+    COALESCE(${metadata}->>'originalFilename', '') || E'\n' ||
+    COALESCE(${metadata}->>'source', '')
+  `,
+    indexCandidates
+  );
 }
 
 export const memoryTable = pgTable(
@@ -82,7 +104,7 @@ export const memoryTable = pgTable(
     index("idx_memories_metadata_type").on(sql`((metadata->>'type'))`),
     index("idx_memories_document_id").on(sql`((metadata->>'documentId'))`),
     index("idx_memories_document_search")
-      .using("gin", documentSearchTokensExpression(table.content, table.metadata))
+      .using("gin", documentSearchTokensExpression(table.content, table.metadata, true))
       .where(sql`${table.type} = 'documents' AND ${table.metadata}->>'type' = 'document'`),
     index("idx_fragments_order").on(
       sql`((metadata->>'documentId'))`,

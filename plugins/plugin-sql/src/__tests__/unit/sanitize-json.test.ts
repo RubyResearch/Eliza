@@ -23,6 +23,7 @@ import {
   MAX_SQL_JSON_SANITIZE_STRING_BYTES,
   SQL_JSON_SANITIZE_UNBOUNDED,
   sanitizeJsonObject,
+  serializeDocumentJsonb,
   serializeJsonb,
 } from "../../sanitize-json";
 
@@ -403,6 +404,27 @@ describe("legacy jsonb lexical preservation", () => {
   it("rejects sanitized key collisions instead of silently overwriting durable data", () => {
     const input = JSON.stringify({ key: "first", "k\u0000ey": "second" });
     expect(() => serializeJsonb(input)).toThrowError(
+      expect.objectContaining({ code: "SQL_JSON_UNSUPPORTED_NUL" })
+    );
+  });
+});
+
+describe("document content serialization", () => {
+  it("preserves a complete large Unicode source without widening ordinary JSON writes", () => {
+    const text = "😀\\\n".repeat(350_000) + "END-OF-DOCUMENT";
+    expect(JSON.parse(serializeDocumentJsonb({ text }) as string)).toEqual({ text });
+    expect(() => serializeJsonb({ text })).toThrowError(
+      expect.objectContaining({ code: SQL_JSON_SANITIZE_UNBOUNDED })
+    );
+    const legacy = JSON.stringify({ text });
+    expect(serializeDocumentJsonb(legacy)).toBe(legacy);
+  });
+
+  it("rejects unsupported document bytes and NUL without a partial result", () => {
+    expect(() => serializeDocumentJsonb({ text: "x".repeat(32 * 1024 * 1024) })).toThrowError(
+      expect.objectContaining({ code: SQL_JSON_SANITIZE_UNBOUNDED })
+    );
+    expect(() => serializeDocumentJsonb({ text: "private\u0000tail" })).toThrowError(
       expect.objectContaining({ code: "SQL_JSON_UNSUPPORTED_NUL" })
     );
   });

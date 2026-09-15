@@ -469,6 +469,9 @@ for (const width of [1280, 390]) {
         },
       });
     });
+    await page.route("**/api/lifeops/account-handoffs/active", (route) =>
+      route.fulfill({ json: { handoff: null } }),
+    );
     await openAppPath(page, "/lifeops/connections");
     const refresh = page.getByRole("button", {
       name: "Retry all connection checks and synchronization",

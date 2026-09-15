@@ -6,10 +6,11 @@
 
 import { createHash } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
-import type { IAgentRuntime } from "@elizaos/core";
+import type { IAgentRuntime, Memory } from "@elizaos/core";
 import { CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE } from "@elizaos/plugin-calendar";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLifeOpsScheduledTaskSimulationHarness } from "../../../test/helpers/lifeops-scheduled-task-simulation.js";
+import { familyWorkflowsAction } from "../../actions/family-workflows.js";
 import { familyCoordinationPack } from "../../default-packs/family-coordination.js";
 import { handleFamilyWorkflowRoutes } from "../../routes/family-workflows.js";
 import type { LifeOpsRouteContext } from "../../routes/lifeops-routes.js";
@@ -161,6 +162,7 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     services.set("lifeops_scheduled_task_runner", {
       getRunner: () => harness.runner,
     });
+    expect((await service.schoolStatus()).monthlySchedule).toBeNull();
     const definition = familyCoordinationPack.records[0];
     if (!definition) throw new Error("missing definition");
     const old = await harness.runner.schedule({
@@ -173,11 +175,111 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     const tasks = await harness.runner.list({ ownerVisibleOnly: true });
     expect(tasks.map((task) => task.taskId)).toEqual([old.taskId]);
     expect(tasks[0].kind).toBe("recap");
+    expect((await service.schoolStatus()).monthlySchedule).toMatchObject({
+      taskId: old.taskId,
+      status: "scheduled",
+      trigger: tasks[0].trigger,
+      lastFiredAt: null,
+    });
+    await harness.runner.apply(old.taskId, "edit", {
+      trigger: { kind: "cron", expression: "0 10 2 * *", tz: "Europe/London" },
+    });
+    await service.ensureMonthlySchedule();
+    const changed = (await service.schoolStatus()).monthlySchedule;
+    expect(changed?.trigger).toEqual({
+      kind: "cron",
+      expression: "0 10 2 * *",
+      tz: "Europe/London",
+    });
     await harness.runner.fire(old.taskId);
     expect(harness.dispatches).toHaveLength(1);
     expect(harness.dispatches[0].metadata?.systemOperation).toBe(
       "family.monthlyCoordination",
     );
+    await harness.runner.apply(old.taskId, "dismiss", {
+      reason: "Owner stopped the schedule",
+    });
+    await service.ensureMonthlySchedule();
+    expect((await service.schoolStatus()).monthlySchedule?.status).toBe(
+      "dismissed",
+    );
+  });
+
+  it("creates the monthly workflow through chat and reuses its canonical schedule", async () => {
+    const harness = createLifeOpsScheduledTaskSimulationHarness();
+    const { school } = makeService();
+    services.set("lifeops_scheduled_task_runner", {
+      getRunner: () => harness.runner,
+    });
+    const turn = {
+      entityId: "owner",
+      roomId: "private-room",
+      content: {
+        text: "Check the elementary school calendar monthly and apply validated changes automatically.",
+      },
+    } as Memory;
+    const options = {
+      parameters: {
+        operation: "configure_school",
+        schoolLevel: "elementary",
+        updateMode: "automatic",
+      },
+    };
+    expect(await harness.runner.list()).toEqual([]);
+    const configured = await familyWorkflowsAction.handler(
+      runtime,
+      turn,
+      undefined,
+      options,
+    );
+    expect(configured?.success).toBe(true);
+    const first = await harness.runner.list();
+    expect(first).toHaveLength(1);
+    await familyWorkflowsAction.handler(runtime, turn, undefined, options);
+    expect((await harness.runner.list()).map((task) => task.taskId)).toEqual(
+      first.map((task) => task.taskId),
+    );
+    expect(school.run).not.toHaveBeenCalled();
+    await harness.runner.fire(first[0].taskId);
+    expect(harness.dispatches).toHaveLength(1);
+    expect(harness.dispatches[0].metadata?.systemOperation).toBe(
+      "family.monthlyCoordination",
+    );
+  });
+
+  it("rejects unsupported chat operations without falling through to packet generation", async () => {
+    makeService();
+    const result = await familyWorkflowsAction.handler(
+      runtime,
+      { content: { text: "Unsupported operation" } } as Memory,
+      undefined,
+      { parameters: { operation: "typo_operation" } },
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.data).toMatchObject({
+      error: "FAMILY_WORKFLOW_INVALID_OPERATION",
+    });
+    const tables = await db.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema='app_lifeops' AND table_name='life_family_workflow_runs'",
+    );
+    expect(tables.rows).toEqual([]);
+  });
+
+  it("reports an already-running school workflow without claiming completion", async () => {
+    makeService({
+      run: async () => ({ state: "already_running", runId: null }),
+    });
+    const result = await familyWorkflowsAction.handler(
+      runtime,
+      { content: { text: "Check school dates" } } as Memory,
+      undefined,
+      { parameters: { operation: "run_school" } },
+    );
+    expect(result?.success).toBe(false);
+    expect(result?.data).toMatchObject({
+      result: { state: "already_running", runId: null },
+    });
+    expect(result?.text).toContain("already running");
   });
 
   it("elects one concurrent owner and reports the second run as already running", async () => {
@@ -330,12 +432,14 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     };
 
     await route("/api/lifeops/family-workflows/packets/packet%2F1/drafts", {
+      expectedPacketVersion: 1,
       recipient: "+15551234567",
       recipientEntityId: "guest-1",
       calendarPrivacyMode: "busy_only",
     });
     expect(status).toBe(201);
     expect(createDraft).toHaveBeenCalledWith("packet/1", {
+      expectedPacketVersion: 1,
       recipient: "+15551234567",
       recipientEntityId: "guest-1",
       calendarPrivacyMode: "busy_only",
@@ -435,5 +539,30 @@ describe("FamilyWorkflowRuntimeService with real PGlite", () => {
     });
     expect(run).toHaveBeenCalledWith("scheduled");
     expect(result).toMatchObject({ ok: true });
+  });
+  it("rejects a stale reviewed packet before recipient checks or draft persistence", async () => {
+    const { service } = makeService();
+    const period = {
+      key: "2026-09",
+      startsOn: "2026-09-01",
+      endsOnExclusive: "2026-10-01",
+      timeZone: "America/New_York",
+    };
+    const first = await service.packets.buildInternal(period, [baseClaim()]);
+    const changed = await service.packets.buildInternal(period, [
+      { ...baseClaim(), statement: "Pickup changed to 4 PM." },
+    ]);
+    expect(changed.version).toBeGreaterThan(first.version);
+    await expect(
+      service.createDraft(first.packetId, {
+        expectedPacketVersion: first.version,
+        recipient: "owner@example.test",
+        recipientEntityId: "owner-test",
+        calendarPrivacyMode: "busy_only",
+      }),
+    ).rejects.toMatchObject({ code: "FAMILY_PACKET_VERSION_STALE" });
+    await expect(
+      service.packets.readLatestDraft(first.packetId),
+    ).resolves.toBeNull();
   });
 });

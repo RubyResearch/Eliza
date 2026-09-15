@@ -4,19 +4,25 @@
  * exclusion, and immutable canonical-approval binding.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
-import type { IAgentRuntime } from "@elizaos/core";
+import type { IAgentRuntime, Memory, UUID } from "@elizaos/core";
+import type { LifeOpsCalendarEvent } from "@elizaos/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ApprovalEnqueueInput,
   ApprovalRequest,
 } from "../approval-queue.types.js";
+import { collectCalendarClaims } from "../family-workflows/calendar-claims.js";
 import {
   ensureFamilyWorkspaceOperationStore,
   fenceFamilyWorkspace,
 } from "../family-workflows/workspace-operation-store.js";
 import { type RawSqlQuery, withRequiredTransaction } from "../sql.js";
+import { familyIntakeClaim } from "./intake-claims.js";
+
+import { FamilyIntakeReviewStore } from "./intake-review.js";
+import { getFamilyIntakeService } from "./intake-service.js";
 import {
   type FamilyPacketClaim,
   type FamilyPacketPeriod,
@@ -100,9 +106,11 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
   let db: PGlite;
   let runtime: IAgentRuntime;
   let service: MonthlyFamilyPacketService;
+  let beforeNextTransaction: (() => Promise<void>) | null;
 
   beforeEach(async () => {
     db = await PGlite.create();
+    beforeNextTransaction = null;
     runtime = {
       agentId: "agent-a",
       getService: () => null,
@@ -116,8 +124,11 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
             fn: (tx: {
               execute: (query: RawSqlQuery) => Promise<unknown>;
             }) => Promise<T> | T,
-          ) =>
-            db.transaction(async (transaction) =>
+          ) => {
+            const barrier = beforeNextTransaction;
+            beforeNextTransaction = null;
+            if (barrier) await barrier();
+            return db.transaction(async (transaction) =>
               fn({
                 execute: async (query) =>
                   transaction.query(
@@ -126,7 +137,8 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
                       .join(""),
                   ),
               }),
-            ),
+            );
+          },
         },
       },
     } as unknown as IAgentRuntime;
@@ -137,6 +149,324 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
   });
 
   afterEach(async () => db.close());
+
+  it.each([
+    ["2026-11", "2026-11-30"],
+    ["2028-02", "2028-02-29"],
+  ])("shows the inclusive final day in a %s draft", async (month, lastDay) => {
+    const selectedPeriod = period(month);
+    const packet = await service.buildInternal(selectedPeriod, []);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    const heading = draft.body.split("\n")[0];
+    expect(heading).toContain(lastDay);
+    expect(heading).not.toContain(selectedPeriod.endsOnExclusive);
+  });
+
+  it("rejects invalid civil-date boundaries before publishing a packet", async () => {
+    await expect(
+      service.buildInternal(
+        { ...period("2026-02"), endsOnExclusive: "2026-02-30" },
+        [],
+      ),
+    ).rejects.toMatchObject({ code: "FAMILY_PACKET_PERIOD_INVALID" });
+    expect(await service.list("2026-02")).toEqual([]);
+  });
+
+  it("summarizes open requests across categories after recipient filtering and removes resolved requests", async () => {
+    const open = claim("travel-request", {
+      section: "travel_consent_health",
+      statement: "Overnight travel is requested, not agreed.",
+      requests: ["Please confirm the proposed overnight trip."],
+      unanswered: true,
+    });
+    const privateRequest = claim("private-request", {
+      section: "school",
+      statement: "Private school concern",
+      requests: ["Private school response needed"],
+      visibility: "owner_only",
+      unanswered: true,
+    });
+    const packet = await service.buildInternal(period("2026-11"), [
+      open,
+      privateRequest,
+    ]);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    const unanswered = draft.body.split("## unanswered\n")[1];
+    expect(unanswered).toContain(open.requests[0]);
+    expect(unanswered).not.toContain("Missing:");
+    expect(draft.body).not.toContain(privateRequest.requests[0]);
+    expect(draft.includedClaimIds).toEqual([open.claimId]);
+    const resolved = await service.buildInternal(period("2026-11"), [
+      { ...open, unanswered: false },
+      privateRequest,
+    ]);
+    const resolvedDraft = await service.createExternalDraft(
+      resolved,
+      guestDraft,
+    );
+    expect(resolvedDraft.body.split("## unanswered\n")[1]).not.toContain(
+      open.requests[0],
+    );
+  });
+
+  it("blocks a previously approved correspondence draft after withdrawal", async () => {
+    const owner = randomUUID();
+    const recipient = randomUUID();
+    const documentId = randomUUID();
+    const text = "Please confirm pickup at 3 PM.";
+    const documents = {
+      async getDocumentByIdWithAccessContext(id: UUID): Promise<Memory> {
+        return {
+          id,
+          agentId: runtime.agentId,
+          roomId: runtime.agentId,
+          entityId: owner as UUID,
+          content: { text },
+          metadata: {
+            type: "document",
+            contentType: "text/plain",
+            ingestionState: "ready",
+          },
+        };
+      },
+    };
+    const intakeRuntime = {
+      ...runtime,
+      getSetting: (key: string) =>
+        key === "ELIZA_ADMIN_ENTITY_ID" ? owner : null,
+      getService: (name: string) => (name === "documents" ? documents : null),
+    } as unknown as IAgentRuntime;
+    const packets = new MonthlyFamilyPacketService(intakeRuntime);
+    const intake = getFamilyIntakeService(intakeRuntime);
+    const selected = await intake.select({
+      id: randomUUID(),
+      periodKey: "2026-09",
+      documentId,
+    });
+    const proposed = await intake.propose({
+      id: selected.id,
+      expectedRevision: selected.revision,
+      facts: [
+        {
+          id: randomUUID(),
+          section: "unanswered",
+          statement: text,
+          sourceQuote: text,
+          dates: [],
+          requests: ["Confirm pickup"],
+          commitments: [],
+          accountability: [],
+          urgency: null,
+          unanswered: true,
+          recipientEntityIds: [],
+        },
+      ],
+    });
+    const reviewed = await intake.review({
+      id: selected.id,
+      expectedRevision: proposed.revision,
+      facts: proposed.facts.map((fact) => ({
+        ...fact,
+        recipientEntityIds: [recipient],
+      })),
+    });
+    const sources = await intake.reviewedFacts("2026-09");
+    const claims = sources.map(familyIntakeClaim);
+    const packet = await packets.buildInternal(period("2026-09"), claims);
+    const forgedDraft = await packets.createExternalDraft(
+      {
+        ...packet,
+        claims: packet.claims.map((entry) => ({
+          ...entry,
+          statement: "Fabricated parental consent",
+          intakeBinding: undefined,
+        })),
+      },
+      { ...guestDraft, recipientEntityId: recipient },
+    );
+    expect(forgedDraft.body).toContain(text);
+    expect(forgedDraft.body).not.toContain("Fabricated parental consent");
+    const draft = await packets.createExternalDraft(packet, {
+      ...guestDraft,
+      recipientEntityId: recipient,
+      email: { subject: "September coordination", senderGrantId: "sender-1" },
+    });
+    expect(draft.body).toContain(text);
+    const request = await packets.enqueueDraftApproval({
+      draft,
+      queue: {
+        enqueueTransactional: async (input) => ({
+          request: approval(input),
+          reused: false,
+        }),
+        surfaceEnqueuedApproval: async () => undefined,
+      },
+      requestedBy: owner,
+      subjectUserId: owner,
+      expiresAt: new Date("2026-10-01T00:00:00Z"),
+    });
+    await expect(
+      packets.validateApprovedDraft({ ...request, state: "approved" }),
+    ).resolves.toMatchObject({ bodySha256: draft.bodySha256 });
+    for (const month of ["2026-10", "2027-02"]) {
+      const next = await packets.buildInternal(
+        period(month),
+        (await intake.reviewedFacts(month)).map(familyIntakeClaim),
+      );
+      expect(next.claims).toEqual(claims);
+    }
+    await intake.withdraw(reviewed.id, reviewed.revision);
+    const afterWithdrawal = await packets.buildInternal(
+      period("2027-03"),
+      (await intake.reviewedFacts("2027-03")).map(familyIntakeClaim),
+    );
+    expect(afterWithdrawal.claims).toEqual([]);
+    await expect(
+      packets.validateApprovedDraft({ ...request, state: "approved" }),
+    ).rejects.toMatchObject({ code: "FAMILY_INTAKE_REVIEW_CONFLICT" });
+    await expect(
+      packets.createExternalDraft(packet, {
+        ...guestDraft,
+        recipientEntityId: recipient,
+      }),
+    ).rejects.toMatchObject({ code: "FAMILY_INTAKE_REVIEW_CONFLICT" });
+    const store = new FamilyIntakeReviewStore(intakeRuntime);
+    expect((await store.read(selected.id))?.status).toBe("withdrawn");
+  });
+
+  it("includes opted-in school source facts in the external draft without sharing private calendar edits", async () => {
+    const event: LifeOpsCalendarEvent = {
+      id: "school-local",
+      externalId: "school-local",
+      agentId: "agent-a",
+      provider: "eliza",
+      side: "owner",
+      calendarId: "primary",
+      grantId: "eliza-calendar",
+      title: "Private custody discussion",
+      description: "Private school note",
+      location: "Private address",
+      status: "confirmed",
+      startAt: "2026-09-15T00:00:00.000Z",
+      endAt: "2026-09-16T00:00:00.000Z",
+      isAllDay: true,
+      timezone: "America/New_York",
+      htmlLink: null,
+      conferenceLink: null,
+      organizer: null,
+      attendees: [],
+      metadata: {},
+      syncedAt: "2026-08-30T12:00:00.000Z",
+      updatedAt: "2026-08-30T12:00:00.000Z",
+    };
+    const claims = collectCalendarClaims(
+      {
+        calendarId: "all",
+        events: [event],
+        state: "complete",
+        source: "synced",
+        sources: [],
+        timeMin: "2026-09-01T00:00:00.000Z",
+        timeMax: "2026-10-01T00:00:00.000Z",
+        syncedAt: "2026-08-30T12:00:00.000Z",
+      },
+      [],
+      [
+        {
+          sourceId: "public-district",
+          grantId: event.grantId,
+          calendarId: event.calendarId,
+          providerEventId: event.externalId,
+          packetVisibility: "guest_shareable",
+          event: {
+            eventKey: "labor-day",
+            title: "School closed for Labor Day",
+            startDate: "2026-09-07",
+            endDateExclusive: "2026-09-08",
+          },
+        },
+      ],
+    );
+    const packet = await service.buildInternal(period("2026-09"), claims);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    expect(draft.body).toContain("School closed for Labor Day");
+    expect(draft.body).toContain("2026-09-07");
+    expect(draft.body).not.toContain("Private");
+    expect(draft.body).not.toContain("2026-09-15");
+  });
+
+  it("deduplicates simultaneous packet generation and retains both concurrent draft requests", async () => {
+    const peer = new MonthlyFamilyPacketService(runtime);
+    await service.list();
+    await peer.list();
+    const [first, duplicate] = await Promise.all([
+      service.buildInternal(period("2026-09"), [claim("same")]),
+      peer.buildInternal(period("2026-09"), [claim("same")]),
+    ]);
+    expect(duplicate).toEqual(first);
+    const [left, right] = await Promise.all([
+      service.createExternalDraft(first, guestDraft),
+      peer.createExternalDraft(first, guestDraft),
+    ]);
+    expect(left.draftVersion).not.toBe(right.draftVersion);
+    expect(await service.readDraft(left.packetId, left.draftVersion)).toEqual(
+      left,
+    );
+    expect(await service.readDraft(right.packetId, right.draftVersion)).toEqual(
+      right,
+    );
+    const changed = await Promise.all([
+      service.buildInternal(period("2026-09"), [claim("changed-a")]),
+      peer.buildInternal(period("2026-09"), [claim("changed-b")]),
+    ]);
+    expect(changed[0].version).not.toBe(changed[1].version);
+    for (const packet of changed)
+      expect(await service.read(packet.packetId, packet.version)).toEqual(
+        packet,
+      );
+  });
+
+  it("rejects an approval if regeneration commits while approval publication waits", async () => {
+    const packet = await service.buildInternal(period("2026-09"), [
+      claim("initial"),
+    ]);
+    const draft = await service.createExternalDraft(packet, guestDraft);
+    const reached = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    beforeNextTransaction = async () => {
+      reached.resolve();
+      await resume.promise;
+    };
+    const queue = {
+      enqueueTransactional: vi.fn(async (input: ApprovalEnqueueInput) => ({
+        request: approval(input),
+        created: true,
+      })),
+      surfaceEnqueuedApproval: vi.fn(async () => undefined),
+    };
+    const pending = service.enqueueDraftApproval({
+      draft,
+      queue,
+      requestedBy: "owner",
+      subjectUserId: "owner",
+      expiresAt: new Date("2026-09-30T12:00:00.000Z"),
+    });
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "FAMILY_PACKET_INTERNAL_STALE",
+    });
+    await reached.promise;
+    try {
+      await service.buildInternal(period("2026-09"), [claim("replacement")]);
+    } finally {
+      resume.resolve();
+    }
+    await rejected;
+    expect(queue.enqueueTransactional).not.toHaveBeenCalled();
+    expect(queue.surfaceEnqueuedApproval).not.toHaveBeenCalled();
+    expect(
+      await service.readDraftApprovalId(draft.packetId, draft.draftVersion),
+    ).toBeNull();
+  });
 
   it.each(["packet", "draft", "revision", "approval"] as const)(
     "rejects a %s mutation after the workspace fence without persisting private data",
@@ -706,5 +1036,61 @@ describe("MonthlyFamilyPacketService with real PGlite", () => {
         }),
       ).rejects.toMatchObject({ code: "FAMILY_PACKET_APPROVAL_TAMPERED" });
     }
+  });
+  it("keeps versioned draft history while rejecting approval against replaced source evidence", async () => {
+    const firstPacket = await service.buildInternal(period("2026-09"), [
+      claim("first"),
+    ]);
+    const firstDraft = await service.createExternalDraft(
+      firstPacket,
+      guestDraft,
+    );
+    const queue = {
+      enqueueTransactional: vi.fn(async (input: ApprovalEnqueueInput) => ({
+        request: approval(input),
+        reused: false,
+      })),
+      surfaceEnqueuedApproval: vi.fn(async () => undefined),
+    };
+    const input = {
+      draft: firstDraft,
+      queue,
+      requestedBy: "owner",
+      subjectUserId: "owner",
+      expiresAt: new Date("2026-09-05T00:00:00.000Z"),
+    };
+    const request = await service.enqueueDraftApproval(input);
+    const secondPacket = await service.buildInternal(period("2026-09"), [
+      claim("replacement"),
+    ]);
+    await expect(
+      service.readLatestDraft(firstPacket.packetId, firstPacket.version),
+    ).resolves.toMatchObject({ draftVersion: firstDraft.draftVersion });
+    await expect(
+      service.readLatestDraft(secondPacket.packetId, secondPacket.version),
+    ).resolves.toBeNull();
+    await expect(service.enqueueDraftApproval(input)).rejects.toMatchObject({
+      code: "FAMILY_PACKET_INTERNAL_STALE",
+    });
+    await expect(
+      service.validateApprovedDraft({ ...request, state: "approved" }),
+    ).rejects.toMatchObject({ code: "FAMILY_PACKET_INTERNAL_STALE" });
+    expect(queue.enqueueTransactional).toHaveBeenCalledTimes(1);
+    const secondDraft = await service.createExternalDraft(
+      secondPacket,
+      guestDraft,
+    );
+    await expect(
+      service.readLatestDraft(secondPacket.packetId, secondPacket.version),
+    ).resolves.toMatchObject({
+      draftVersion: secondDraft.draftVersion,
+      internalVersion: secondPacket.version,
+    });
+    await expect(
+      service.readLatestDraft(firstPacket.packetId, firstPacket.version),
+    ).resolves.toMatchObject({
+      draftVersion: firstDraft.draftVersion,
+      internalVersion: firstPacket.version,
+    });
   });
 });

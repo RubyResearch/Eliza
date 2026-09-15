@@ -1066,6 +1066,14 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		if (!canRequesterManageDocumentDirectGrants(existing, params)) {
 			return { status: "forbidden" };
 		}
+		if (
+			params.requesterRole === "ADMIN" &&
+			!this.participantsByRoom
+				.get(String(existing.roomId))
+				?.has(String(params.requesterEntityId))
+		) {
+			return { status: "forbidden" };
+		}
 		for (const entityId of directGrantEntityIds) {
 			const entity = this.entities.get(String(entityId));
 			if (!entity || entity.agentId !== params.agentId) {

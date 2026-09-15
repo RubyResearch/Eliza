@@ -20,6 +20,41 @@ function runtime(): IAgentRuntime {
 }
 
 describe("LifeOps Google plugin delegation", () => {
+  it("keeps sending available without claiming separately ungranted Gmail reading", async () => {
+    const testRuntime = runtime();
+    const manager = getConnectorAccountManager(testRuntime);
+    manager.registerProvider({ provider: "google", label: "Google" });
+    await manager.upsertAccount("google", {
+      id: "acct_send_only",
+      role: "OWNER",
+      purpose: ["messaging"],
+      accessGate: "owner_binding",
+      status: "connected",
+      externalId: "send-only-sub",
+      displayHandle: "self@example.com",
+      metadata: {
+        grantedCapabilities: ["gmail.send"],
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.send"],
+      },
+    });
+    const service = new TestGoogleService(testRuntime);
+    const url = new URL("http://127.0.0.1/api/connectors/google/accounts");
+    const accountId = "connector-account:acct_send_only";
+    const status = await service.getGoogleConnectorStatus(
+      url,
+      "local",
+      "owner",
+      accountId,
+    );
+    expect(status.grantedCapabilities).not.toContain("google.gmail.triage");
+    await expect(
+      service.requireGoogleGmailGrant(url, "local", "owner", accountId),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      service.requireGoogleGmailSendGrant(url, "local", "owner", accountId),
+    ).resolves.toMatchObject({ connectorAccountId: "acct_send_only" });
+  });
+
   it("reports plugin-managed connector accounts as LifeOps Google status", async () => {
     const testRuntime = runtime();
     const manager = getConnectorAccountManager(testRuntime);

@@ -1,16 +1,7 @@
 /**
- * iMessage ConnectorAccountManager provider.
- *
- * Adapts the account inventory helpers in `accounts.ts` to the
- * `ConnectorAccountProvider` contract from
- * `@elizaos/core/connectors/account-manager`.
- *
- * Source of truth for accounts is character settings (`character.settings.imessage`)
- * plus native connector env-var fallbacks such as `IMESSAGE_DB_PATH`.
- * In practice there is a single local macOS Messages account per host, but the
- * accountId surface still applies for multi-handle deployments.
- *
- * iMessage does not use OAuth — it reads the local chat.db on macOS.
+ * Adapts configured iMessage accounts to the canonical connector inventory.
+ * Configuration alone never establishes readiness: only the default account
+ * backed by the running transport can be reported connected.
  */
 
 import type {
@@ -27,6 +18,8 @@ import {
   type ResolvedIMessageAccount,
   resolveIMessageAccount,
 } from "./accounts.js";
+
+import type { IIMessageService, IMessageServiceStatus } from "./types.js";
 
 export const IMESSAGE_PROVIDER_ID = "imessage";
 
@@ -46,7 +39,10 @@ function roleForAccount(_account: ResolvedIMessageAccount): "OWNER" | "AGENT" {
   return "OWNER";
 }
 
-function toConnectorAccount(account: ResolvedIMessageAccount): ConnectorAccount {
+function toConnectorAccount(
+  account: ResolvedIMessageAccount,
+  transport: IMessageServiceStatus | null
+): ConnectorAccount {
   const now = Date.now();
   return {
     id: normalizeAccountId(account.accountId),
@@ -55,11 +51,19 @@ function toConnectorAccount(account: ResolvedIMessageAccount): ConnectorAccount 
     role: roleForAccount(account),
     purpose: purposeForAccount(account),
     accessGate: accessGateForAccount(account),
-    status: account.enabled ? "connected" : "disabled",
+    status: !account.enabled
+      ? "disabled"
+      : normalizeAccountId(account.accountId) !== DEFAULT_ACCOUNT_ID
+        ? "error"
+        : transport?.connected === true
+          ? "connected"
+          : "pending",
     createdAt: now,
     updatedAt: now,
     metadata: {
-      dbPath: account.dbPath ?? null,
+      transport: transport?.transport ?? null,
+      channelId: transport?.channelId ?? null,
+      dbPath: transport?.transport === "native" ? transport.chatDbPath : null,
       dmPolicy: account.config.dmPolicy ?? "pairing",
       groupPolicy: account.config.groupPolicy ?? "allowlist",
     },
@@ -72,13 +76,16 @@ export function createIMessageConnectorAccountProvider(
   return {
     provider: IMESSAGE_PROVIDER_ID,
     label: "iMessage",
+    statusAuthority: "provider",
     listAccounts: async (_manager: ConnectorAccountManager): Promise<ConnectorAccount[]> => {
+      const transport =
+        runtime.getService<IIMessageService>(IMESSAGE_PROVIDER_ID)?.getStatus() ?? null;
       const enabled = listEnabledIMessageAccounts(runtime);
       if (enabled.length > 0) {
-        return enabled.map(toConnectorAccount);
+        return enabled.map((account) => toConnectorAccount(account, transport));
       }
       const fallback = resolveIMessageAccount(runtime, DEFAULT_ACCOUNT_ID);
-      return [toConnectorAccount(fallback)];
+      return [toConnectorAccount(fallback, transport)];
     },
     createAccount: async (input: ConnectorAccountPatch, _manager: ConnectorAccountManager) => {
       return {

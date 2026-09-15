@@ -9,6 +9,14 @@ import type {
   ApprovalQueue,
   ApprovalRequest,
 } from "../../lifeops/approval-queue.types.js";
+import {
+  ConnectorDeliveryEvidenceError,
+  ConnectorSenderChangedError,
+} from "../../lifeops/messaging/connector-delivery-evidence.js";
+import { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
+
+export { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
+
 import { ApprovalKnownNonDeliveryError } from "./messaging-helpers.js";
 
 export interface PreparedApprovalDispatch<T> {
@@ -17,17 +25,6 @@ export interface PreparedApprovalDispatch<T> {
     readonly value: T;
     readonly receipt: Readonly<Record<string, unknown>>;
   }>;
-}
-
-export class ApprovalAmbiguousDeliveryError extends Error {
-  constructor(
-    message: string,
-    public readonly providerReceipt: Readonly<Record<string, unknown>>,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "ApprovalAmbiguousDeliveryError";
-  }
 }
 
 export type ApprovalDispatchOutcome<T> =
@@ -91,7 +88,10 @@ export async function runApprovalDispatch<T>(args: {
     delivered = await args.prepared.dispatch(providerIdempotencyKey);
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
-    if (error instanceof ApprovalKnownNonDeliveryError) {
+    if (
+      error instanceof ApprovalKnownNonDeliveryError ||
+      error instanceof ConnectorSenderChangedError
+    ) {
       const request = await args.queue.markRetryableFailure({
         ...mutation,
         error: error.message,
@@ -101,7 +101,8 @@ export async function runApprovalDispatch<T>(args: {
     const request = await args.queue.markReconciliationRequired({
       ...mutation,
       error: error.message,
-      ...(error instanceof ApprovalAmbiguousDeliveryError
+      ...(error instanceof ApprovalAmbiguousDeliveryError ||
+      error instanceof ConnectorDeliveryEvidenceError
         ? { providerReceipt: error.providerReceipt }
         : {}),
     });

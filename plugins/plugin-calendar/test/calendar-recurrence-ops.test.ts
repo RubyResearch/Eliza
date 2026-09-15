@@ -186,6 +186,7 @@ function message(text: string): Memory {
     id: "00000000-0000-0000-0000-000000000101",
     entityId: "00000000-0000-0000-0000-000000000102",
     roomId: "00000000-0000-0000-0000-000000000103",
+    createdAt: Date.parse("2026-07-01T12:00:00.000Z"),
     content: { text },
   } as unknown as Memory;
 }

@@ -225,6 +225,7 @@ import {
   TelegramDomain,
   type TelegramMessageSearchResult,
   type TelegramReadReceiptResult,
+  type TelegramSendMessageResult,
 } from "./domains/telegram-service.js";
 import { TravelDomain } from "./domains/travel-service.js";
 import {
@@ -2215,7 +2216,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendIMessage(
     req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string }> {
+  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }> {
     return this.imessageDomain.sendIMessage(req);
   }
 
@@ -2257,9 +2258,10 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendTelegramMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     target: string;
     message: string;
-  }): Promise<{ ok: true; messageId: string | null }> {
+  }): Promise<TelegramSendMessageResult> {
     return this.telegramDomain.sendTelegramMessage(request);
   }
 
@@ -2328,6 +2330,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendDiscordMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     channelId?: string;
     /** Discord user id target (DM via createDM); exclusive with channelId. */
     userId?: string;

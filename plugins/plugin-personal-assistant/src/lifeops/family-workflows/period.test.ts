@@ -3,9 +3,42 @@ import { describe, expect, it } from "vitest";
 import {
   familyPacketCalendarWindow,
   nextFamilyPacketPeriod,
+  selectedFamilyPacketPeriod,
 } from "./period.js";
 
 describe("family packet calendar period", () => {
+  it("queries the selected leap-year month and December rollover", () => {
+    expect(
+      familyPacketCalendarWindow(selectedFamilyPacketPeriod("2028-02")),
+    ).toEqual({
+      timeMin: "2028-02-01T05:00:00.000Z",
+      timeMax: "2028-03-01T05:00:00.000Z",
+      timeZone: "America/New_York",
+    });
+    expect(
+      familyPacketCalendarWindow(selectedFamilyPacketPeriod("2026-12")),
+    ).toEqual({
+      timeMin: "2026-12-01T05:00:00.000Z",
+      timeMax: "2027-01-01T05:00:00.000Z",
+      timeZone: "America/New_York",
+    });
+  });
+
+  it.each([
+    "2026-00",
+    "2026-13",
+    "0000-01",
+    "2026-1",
+    "9999-12",
+    "not-a-month",
+  ])(
+    "rejects an invalid selected month %s before querying calendars",
+    (key) => {
+      expect(() => selectedFamilyPacketPeriod(key)).toThrow(
+        "Select a valid month",
+      );
+    },
+  );
   it.each([
     [
       "2026-10-15T12:00:00Z",

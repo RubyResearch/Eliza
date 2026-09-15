@@ -7,12 +7,14 @@
  * is a 400 with a field-specific message, never a dispatcher-translated 500,
  * and a well-formed body still issues the card and queues its approval (202).
  */
+
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { Plugin } from "@elizaos/core";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { tryHandleRuntimePluginRoute } from "../../../../packages/agent/src/api/runtime-plugin-routes.ts";
 import { LocalFileStorageService } from "../../../../packages/agent/src/services/file-storage.js";
+import { installCalendarCardConnectorStatusFixtures } from "../../test/helpers/calendar-card-connector-status.js";
 import { createLifeOpsTestRuntime } from "../../test/helpers/runtime.js";
 
 const fileStoragePlugin: Plugin = {
@@ -37,9 +39,13 @@ const valid = {
   events: [event],
 };
 
+afterEach(() => vi.restoreAllMocks());
+
 it("answers malformed card bodies with a 400 and issues a well-formed card", async () => {
   const host = await createLifeOpsTestRuntime({ plugins: [fileStoragePlugin] });
   const runtime = host.runtime;
+  installCalendarCardConnectorStatusFixtures();
+  runtime.setSetting("ELIZA_EXTERNAL_BASE_URL", "https://calendar.example.org");
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const handled = await tryHandleRuntimePluginRoute({

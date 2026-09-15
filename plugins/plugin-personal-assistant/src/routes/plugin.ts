@@ -320,6 +320,8 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   { type: "GET", path: "/api/lifeops/calendar/calendars" },
   { type: "PUT", path: "/api/lifeops/calendar/calendars/:id/include" },
   { type: "GET", path: "/api/lifeops/calendar/next-context" },
+  { type: "GET", path: "/api/lifeops/calendar/sync-control" },
+  { type: "POST", path: "/api/lifeops/calendar/sync-control" },
   { type: "GET", path: "/api/lifeops/calendar/links" },
   { type: "POST", path: "/api/lifeops/calendar/links" },
   { type: "POST", path: "/api/lifeops/calendar/cards" },
@@ -441,6 +443,7 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   { type: "POST", path: "/api/lifeops/goals" },
   { type: "POST", path: "/api/lifeops/features/toggle" },
   { type: "GET", path: "/api/lifeops/agreements" },
+  { type: "GET", path: "/api/lifeops/agreements/pin-targets" },
   { type: "POST", path: "/api/lifeops/agreements" },
   {
     type: "POST",
@@ -460,6 +463,13 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
   },
   { type: "POST", path: "/api/lifeops/agreements/grants/preview" },
   { type: "POST", path: "/api/lifeops/agreements/grants" },
+  { type: "POST", path: "/api/lifeops/account-handoffs" },
+  { type: "GET", path: "/api/lifeops/account-handoffs/active" },
+  { type: "GET", path: "/api/lifeops/account-handoffs/retirement-candidates" },
+  { type: "GET", path: "/api/lifeops/account-handoffs/calendar-entries" },
+  { type: "GET", path: "/api/lifeops/account-handoffs/:operationId" },
+  { type: "POST", path: "/api/lifeops/account-handoffs/:operationId/cancel" },
+  { type: "POST", path: "/api/lifeops/account-handoffs/:operationId/advance" },
   { type: "PUT", path: "/api/lifeops/family-workflows/school/source" },
   { type: "GET", path: "/api/lifeops/family-workflows/school/status" },
   { type: "POST", path: "/api/lifeops/family-workflows/school/run" },
@@ -480,6 +490,14 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
     path: "/api/lifeops/family-workflows/deletion/backups/resume",
   },
   { type: "GET", path: "/api/lifeops/family-workflows/email-options" },
+  {
+    type: "POST",
+    path: "/api/lifeops/family-workflows/email-recipients/confirm",
+  },
+  { type: "GET", path: "/api/lifeops/family-workflows/intake" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/import" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/interview" },
   { type: "GET", path: "/api/lifeops/family-workflows/packets" },
   { type: "POST", path: "/api/lifeops/family-workflows/packets" },
   // Knowledge-graph: entities + relationships.
@@ -493,6 +511,15 @@ const LIFEOPS_STATIC_ROUTES: RouteSpec[] = [
 ];
 
 const LIFEOPS_DYNAMIC_ROUTES: RouteSpec[] = [
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/:id/extract" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/:id/review" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/:id/withdraw" },
+  { type: "POST", path: "/api/lifeops/family-workflows/intake/:id/reselect" },
+  {
+    type: "POST",
+    path: "/api/lifeops/family-workflows/intake/:id/request-decision",
+  },
+
   {
     type: "GET",
     path: "/api/lifeops/family-workflows/school/runs/:runId",
@@ -509,6 +536,10 @@ const LIFEOPS_DYNAMIC_ROUTES: RouteSpec[] = [
   {
     type: "POST",
     path: "/api/lifeops/family-workflows/packets/:packetId/drafts/:draftVersion/revision",
+  },
+  {
+    type: "POST",
+    path: "/api/lifeops/family-workflows/packets/:packetId/drafts/:draftVersion/decision",
   },
   {
     type: "GET",
@@ -588,6 +619,9 @@ const LIFEOPS_DYNAMIC_ROUTES: RouteSpec[] = [
   { type: "PATCH", path: "/api/lifeops/relationships/:id" },
   { type: "POST", path: "/api/lifeops/relationships/:id/retire" },
   { type: "GET", path: "/api/lifeops/agreements/:id" },
+  { type: "GET", path: "/api/lifeops/agreements/:id/guest-options" },
+  { type: "GET", path: "/api/lifeops/agreements/:id/review" },
+  { type: "POST", path: "/api/lifeops/agreements/:id/review" },
   {
     type: "GET",
     path: "/api/lifeops/agreements/:id/shared",

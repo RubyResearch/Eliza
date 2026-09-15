@@ -280,6 +280,9 @@ describe("LifeOps raw route owner/admin gate", () => {
       ["GET", "/api/lifeops/agreements"],
       ["GET", "/api/lifeops/agreements/:id"],
       ["GET", "/api/lifeops/agreements/:id/guest-projection"],
+      ["GET", "/api/lifeops/agreements/:id/guest-options"],
+      ["GET", "/api/lifeops/agreements/:id/review"],
+      ["POST", "/api/lifeops/agreements/:id/review"],
       ["GET", "/api/lifeops/agreements/:id/download"],
       ["POST", "/api/lifeops/agreements/:id/obligations"],
       ["GET", "/api/lifeops/agreements/:id/pins"],
@@ -334,12 +337,19 @@ describe("LifeOps raw route owner/admin gate", () => {
   });
 
   it.each([
+    ["POST", "/api/lifeops/account-handoffs"],
+    ["GET", "/api/lifeops/account-handoffs/active"],
+    ["GET", "/api/lifeops/account-handoffs/:operationId"],
+    ["POST", "/api/lifeops/account-handoffs/:operationId/cancel"],
     ["POST", "/api/lifeops/agreements/:id/export"],
+    ["GET", "/api/lifeops/agreements/pin-targets"],
     ["GET", "/api/lifeops/family-workflows/email-options"],
     [
       "POST",
       "/api/lifeops/family-workflows/packets/:packetId/drafts/:draftVersion/revision",
     ],
+    ["GET", "/api/lifeops/agreements/:id/review"],
+    ["POST", "/api/lifeops/agreements/:id/review"],
   ] as const)(
     "denies unauthenticated %s %s before accessing family data",
     async (method, path) => {

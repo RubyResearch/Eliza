@@ -125,6 +125,12 @@ describe("scheduling approval integrity", () => {
 
   it.each([
     [
+      "sender",
+      (payload: ReturnType<typeof correlatedEmail>) => {
+        payload.grantId = "another-sender";
+      },
+    ],
+    [
       "recipient",
       (payload: ReturnType<typeof correlatedEmail>) => {
         payload.to = ["attacker@example.com"];

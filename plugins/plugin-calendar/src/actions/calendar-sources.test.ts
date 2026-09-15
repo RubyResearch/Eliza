@@ -17,6 +17,7 @@ import {
 } from "@elizaos/core";
 import { describe, expect, it, vi } from "vitest";
 import { CalendarServiceError } from "../internal/errors.js";
+import { CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE } from "../routes/mutation-gateway.js";
 import { CalendarService } from "../service/CalendarService.js";
 import {
   type CalendarSourceConnectionIntent,
@@ -39,11 +40,13 @@ function message(entityId = AGENT_ID): Memory {
   } as Memory;
 }
 
-function runtimeFixture(calendarService?: object) {
+function runtimeFixture(calendarService?: object, gateway?: object) {
   let manager: ConnectorAccountManager;
   const runtime = {
     agentId: AGENT_ID,
     getService: (serviceType: string) => {
+      if (serviceType === CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE)
+        return gateway ?? null;
       if (serviceType === CONNECTOR_ACCOUNT_SERVICE_TYPE) return manager;
       if (serviceType === CalendarService.serviceType) {
         return calendarService ?? null;
@@ -87,6 +90,125 @@ function connection(
 }
 
 describe("CALENDAR_SOURCES action", () => {
+  it("binds sync pause to a reviewed revision through the owner gateway", async () => {
+    const before = {
+      revision: 4,
+      paused: false,
+      destination: {
+        connectorAccountId: "owner-calendar-account",
+        providerCalendarId: "selected-calendar",
+      },
+      pendingDispatch: null,
+    };
+    const updateLinkedCalendarControl = vi.fn(async () => ({
+      ...before,
+      revision: 5,
+      paused: true,
+      receipt: {
+        id: "saved-pause-receipt",
+        operationKey: "owner-pause",
+        revision: 5,
+        committedAt: "2026-09-10T01:00:00.000Z",
+        replayed: false,
+      },
+    }));
+    const { runtime } = runtimeFixture(
+      { getLinkedCalendarControl: async () => before },
+      { updateLinkedCalendarControl },
+    );
+    const result = await invoke(runtime, {
+      operation: "pause_sync",
+      expectedRevision: 4,
+      idempotencyKey: "owner-pause",
+    });
+    expect(result?.success).toBe(true);
+    expect(updateLinkedCalendarControl).toHaveBeenCalledWith(expect.any(URL), {
+      operation: "pause",
+      expectedRevision: 4,
+      idempotencyKey: "owner-pause",
+    });
+    expect(result?.data).toMatchObject({
+      control: { paused: true, revision: 5 },
+      effectReceipt: {
+        outcome: "applied",
+        resource: { version: "5" },
+        commit: {
+          id: "saved-pause-receipt",
+          committedAt: "2026-09-10T01:00:00.000Z",
+        },
+      },
+    });
+  });
+
+  it.each([
+    ["recover_sync", "recover"],
+    ["use_builtin_only", "select"],
+  ])(
+    "routes %s through the owner boundary and reports a saved replay",
+    async (operation, expectedOperation) => {
+      const before = {
+        revision: 3,
+        paused: true,
+        destination: null,
+        pendingDispatch: null,
+      };
+      const receipt = {
+        id: "saved-replay",
+        operationKey: "review-key",
+        committedAt: "2026-09-10T01:00:00.000Z",
+        revision: 3,
+        replayed: true,
+      };
+      const updateLinkedCalendarControl = vi.fn(async () => ({
+        ...before,
+        receipt,
+      }));
+      const { runtime } = runtimeFixture(
+        { getLinkedCalendarControl: async () => before },
+        { updateLinkedCalendarControl },
+      );
+      const result = await invoke(runtime, {
+        operation,
+        expectedRevision: 2,
+        idempotencyKey: "review-key",
+      });
+      expect(result?.success).toBe(true);
+      expect(updateLinkedCalendarControl).toHaveBeenCalledExactlyOnceWith(
+        expect.any(URL),
+        {
+          operation: expectedOperation,
+          expectedRevision: 2,
+          idempotencyKey: "review-key",
+          ...(operation === "use_builtin_only" ? { destination: null } : {}),
+        },
+      );
+      expect(result?.data).toMatchObject({
+        effectReceipt: {
+          receiptId: receipt.id,
+          outcome: "noop",
+          idempotency: { key: "review-key", replayed: true },
+        },
+      });
+    },
+  );
+
+  it("rejects an unreviewed sync mutation without invoking the gateway", async () => {
+    const updateLinkedCalendarControl = vi.fn();
+    const { runtime } = runtimeFixture(
+      {
+        getLinkedCalendarControl: async () => ({
+          revision: 9,
+          paused: true,
+          destination: null,
+          pendingDispatch: null,
+        }),
+      },
+      { updateLinkedCalendarControl },
+    );
+    const result = await invoke(runtime, { operation: "resume_sync" });
+    expect(result?.success).toBe(false);
+    expect(updateLinkedCalendarControl).not.toHaveBeenCalled();
+  });
   it("denies non-owner callers before connector access", async () => {
     const { runtime, manager } = runtimeFixture();
     const startOAuth = vi.fn(async () => ({
@@ -422,18 +544,6 @@ describe("CALENDAR_SOURCES action", () => {
     expect(
       calendarSourcesAction.parameters?.map((parameter) => parameter.name),
     ).not.toContain("name");
-  });
-
-  it("models source operations as parameters rather than unresolved child actions", () => {
-    expect(calendarSourcesAction.subActions).toBeUndefined();
-    expect(
-      calendarSourcesAction.parameters?.find(
-        (parameter) => parameter.name === "operation",
-      )?.schema,
-    ).toMatchObject({
-      type: "string",
-      enum: ["list", "select", "deselect", "connect", "reconnect"],
-    });
   });
 
   it("hands ICS subscription creation to the owner instead of accepting a URL", async () => {

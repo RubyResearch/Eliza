@@ -5,12 +5,13 @@ import type {
   MonthlyFamilyDraft,
   MonthlyFamilyPacket,
 } from "../../lifeops/family-coordination/index.js";
-import type { FamilyEmailOptions } from "../../lifeops/family-workflows/runtime.js";
-import type { ParentingAgreementView } from "../../lifeops/household/agreement-knowledge.js";
 import type {
-  SchoolCalendarRunReview,
-  SchoolCalendarWorkflowStatus,
-} from "../../lifeops/school/calendar-workflow.js";
+  FamilyDraftApprovalStatus,
+  FamilyEmailOptions,
+  FamilySchoolWorkflowStatus,
+} from "../../lifeops/family-workflows/runtime.js";
+import type { ParentingAgreementView } from "../../lifeops/household/agreement-knowledge.js";
+import type { SchoolCalendarRunReview } from "../../lifeops/school/calendar-workflow.js";
 import type {
   FamilyOperationsAdapter,
   FamilyOperationsSnapshot,
@@ -22,8 +23,10 @@ import type {
 
 interface PacketPersistenceState {
   packetId: string;
+  internalVersion: number;
   draft: MonthlyFamilyDraft | null;
   approvalId: string | null;
+  approval: FamilyDraftApprovalStatus | null;
 }
 
 interface AgreementUploadState {
@@ -103,11 +106,18 @@ async function loadSection<T>(path: string, key: string): Promise<Loadable<T>> {
 }
 
 function schoolView(
-  status: SchoolCalendarWorkflowStatus,
+  status: FamilySchoolWorkflowStatus,
   review: SchoolCalendarRunReview | null,
 ): SchoolWorkflowView {
   const state = status.lastRun?.state ?? "never_run";
   return {
+    monthlySchedule: Object.hasOwn(status, "monthlySchedule")
+      ? { status: "ready", data: status.monthlySchedule }
+      : {
+          status: "unavailable",
+          message:
+            "The connected runtime does not report its saved family schedule. Update the runtime to verify it.",
+        },
     sourceId: status.sourceId,
     label: "Concord Public Schools calendar",
     state:
@@ -152,28 +162,32 @@ function packetView(
       : states.includes("missing")
         ? "missing"
         : "complete",
+    sections: packet.sections,
     claims: packet.claims.map((claim) => ({
       id: claim.claimId,
       section: claim.section,
       text: claim.statement,
     })),
-    draft: persistence?.draft
-      ? {
-          draftVersion: persistence.draft.draftVersion,
-          recipient: persistence.draft.recipient,
-          recipientEntityId: persistence.draft.recipientEntityId,
-          calendarPrivacyMode: persistence.draft.calendarPrivacyMode,
-          body: persistence.draft.body,
-          email: persistence.draft.email,
-          approvalId: persistence.approvalId ?? undefined,
-        }
-      : null,
+    draft:
+      persistence?.draft?.internalVersion === packet.version
+        ? {
+            draftVersion: persistence.draft.draftVersion,
+            recipient: persistence.draft.recipient,
+            recipientEntityId: persistence.draft.recipientEntityId,
+            calendarPrivacyMode: persistence.draft.calendarPrivacyMode,
+            body: persistence.draft.body,
+            bodySha256: persistence.draft.bodySha256,
+            approval: persistence.approval,
+            email: persistence.draft.email,
+            approvalId: persistence.approvalId ?? undefined,
+          }
+        : null,
   };
 }
 
 async function loadSchool(): Promise<Loadable<SchoolWorkflowView>> {
   try {
-    const status = await request<SchoolCalendarWorkflowStatus>(
+    const status = await request<FamilySchoolWorkflowStatus>(
       "/api/lifeops/family-workflows/school/status",
     );
     const review = status.lastRun?.runId
@@ -197,12 +211,18 @@ async function loadPackets(): Promise<Loadable<FamilyPacketView[]>> {
       packetStates?: PacketPersistenceState[];
     }>("/api/lifeops/family-workflows/packets");
     const states = new Map(
-      (payload.packetStates ?? []).map((state) => [state.packetId, state]),
+      (payload.packetStates ?? []).map((state) => [
+        JSON.stringify([state.packetId, state.internalVersion]),
+        state,
+      ]),
     );
     return {
       status: "ready",
       data: payload.packets.map((packet) =>
-        packetView(packet, states.get(packet.packetId)),
+        packetView(
+          packet,
+          states.get(JSON.stringify([packet.packetId, packet.version])),
+        ),
       ),
     };
   } catch (error) {
@@ -250,6 +270,45 @@ async function downloadFile(
 }
 
 export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
+  async decidePacketApproval(input) {
+    const response = await request<{
+      result: { success?: boolean; text?: string };
+    }>(
+      `/api/lifeops/family-workflows/packets/${encodeURIComponent(input.packetId)}/drafts/${input.draftVersion}/decision`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          approvalId: input.approvalId,
+          bodySha256: input.bodySha256,
+          decision: input.decision,
+        }),
+      },
+    );
+    if (response.result.success !== true)
+      throw new Error(
+        response.result.text ||
+          "Approval did not complete. Check the saved delivery status.",
+      );
+  },
+  async listRecipientContacts() {
+    const result = await request<{
+      entities: Array<{ entityId: string; preferredName: string }>;
+    }>("/api/lifeops/entities?type=person");
+    return result.entities.map((person) => ({
+      entityId: person.entityId,
+      name: person.preferredName,
+    }));
+  },
+  async confirmEmailRecipient(input) {
+    const result = await request<{
+      recipient: { entityId: string; name: string; address: string };
+    }>("/api/lifeops/family-workflows/email-recipients/confirm", {
+      method: "POST",
+      body: JSON.stringify({ ...input, confirmed: true }),
+    });
+    return result.recipient;
+  },
+
   async load(): Promise<FamilyOperationsSnapshot> {
     const [agreements, calendarLinks, school, packets, emailOptions] =
       await Promise.all([
@@ -258,7 +317,7 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
           "agreements",
         ),
         loadSection<LinkedCalendarView[]>(
-          "/api/lifeops/calendar/links",
+          "/api/lifeops/calendar/links?view=events",
           "links",
         ),
         loadSchool(),
@@ -400,12 +459,43 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
     );
     sessionStorage.removeItem(resumeKey);
   },
+  async readAgreementReview(artifactId) {
+    const response = await request<{
+      review: Awaited<
+        ReturnType<FamilyOperationsAdapter["readAgreementReview"]>
+      >;
+    }>(`/api/lifeops/agreements/${encodeURIComponent(artifactId)}/review`);
+    return response.review;
+  },
+  async prepareAgreementReview(artifactId) {
+    const response = await request<{
+      review: Awaited<
+        ReturnType<FamilyOperationsAdapter["prepareAgreementReview"]>
+      >;
+    }>(`/api/lifeops/agreements/${encodeURIComponent(artifactId)}/review`, {
+      method: "POST",
+    });
+    return response.review;
+  },
+  async addAgreementProposal(artifactId, proposal) {
+    return request<
+      Awaited<ReturnType<FamilyOperationsAdapter["addAgreementProposal"]>>
+    >(`/api/lifeops/agreements/${encodeURIComponent(artifactId)}/obligations`, {
+      method: "POST",
+      body: JSON.stringify(proposal),
+    });
+  },
   async decideObligation(obligation, decision, reason) {
     const response = await request<{ obligation: typeof obligation }>(
       `/api/lifeops/agreements/obligations/${encodeURIComponent(obligation.id)}/decision`,
       { method: "POST", body: JSON.stringify({ decision, reason }) },
     );
     return response.obligation;
+  },
+  async listPinTargets() {
+    return request<
+      Awaited<ReturnType<FamilyOperationsAdapter["listPinTargets"]>>
+    >("/api/lifeops/agreements/pin-targets");
   },
   async listPins(artifactId) {
     const response = await request<{
@@ -429,6 +519,13 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
       method: "DELETE",
     });
     return response.pin;
+  },
+  async listGuestAccessOptions(artifactId) {
+    return request<
+      Awaited<ReturnType<FamilyOperationsAdapter["listGuestAccessOptions"]>>
+    >(
+      `/api/lifeops/agreements/${encodeURIComponent(artifactId)}/guest-options`,
+    );
   },
   async previewGrant(input) {
     const response = await request<{
@@ -495,16 +592,40 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
       body: JSON.stringify(input),
     });
   },
+  async updateMonthlySchedule({ taskId, day, time, timezone }) {
+    if (
+      !Number.isInteger(day) ||
+      day < 1 ||
+      day > 31 ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)
+    ) {
+      throw new Error("Choose a day from 1 to 31 and a valid time.");
+    }
+    const [hour, minute] = time.split(":").map(Number);
+    await request(
+      `/api/lifeops/scheduled-tasks/${encodeURIComponent(taskId)}/edit`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          trigger: {
+            kind: "cron",
+            expression: `${minute} ${hour} ${day} * *`,
+            tz: timezone,
+          },
+        }),
+      },
+    );
+  },
   async approveSchoolDiff(runId) {
     await request("/api/lifeops/family-workflows/school/apply", {
       method: "POST",
       body: JSON.stringify({ runId }),
     });
   },
-  async generatePacket(_periodKey) {
+  async generatePacket(periodKey) {
     await request("/api/lifeops/family-workflows/packets", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ periodKey }),
     });
   },
   async createPacketDraft(input) {
@@ -513,6 +634,7 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
       {
         method: "POST",
         body: JSON.stringify({
+          expectedPacketVersion: input.expectedPacketVersion,
           recipient: input.recipient,
           recipientEntityId: input.recipientEntityId,
           calendarPrivacyMode: input.calendarPrivacyMode,
@@ -537,3 +659,5 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
     );
   },
 };
+
+export { request as familyOperationsRequest };

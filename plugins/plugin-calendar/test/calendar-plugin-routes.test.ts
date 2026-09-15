@@ -120,6 +120,9 @@ function makeCalendarService() {
       duplicateEventCount: 0,
     })),
     listLinkedCalendarEvents: vi.fn(async () => []),
+    listLinkedCalendarEventViews: vi.fn(async () => [
+      { id: "reviewed-link", event: { title: "Library pickup" } },
+    ]),
     getLinkedCalendarEvent: vi.fn(async () => null),
   };
 }
@@ -143,6 +146,24 @@ describe("calendar plugin HTTP routes", () => {
       rawPath: true,
       handler: expect.any(Function),
     });
+  });
+
+  it("serves linked-event names through the resolved owner route service", async () => {
+    const service = makeCalendarService();
+    const response = makeResponse();
+    await calendarRouteHandler()(
+      makeRequest({
+        method: "GET",
+        url: "/api/lifeops/calendar/links?view=events",
+      }) as never,
+      response as never,
+      makeRuntime(service) as never,
+    );
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      links: [{ id: "reviewed-link", event: { title: "Library pickup" } }],
+    });
+    expect(service.listLinkedCalendarEvents).not.toHaveBeenCalled();
   });
 
   it("keeps the host adapter available for the owner-gated LifeOps route", async () => {

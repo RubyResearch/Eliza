@@ -301,9 +301,8 @@
       },
       "ELIZAOS_CLOUD_IMAGE_DESCRIPTION_MAX_TOKENS": {
         "type": "number",
-        "description": "Maximum number of tokens allowed in the image-description model response.",
+        "description": "Optional positive-integer image-description output limit; unset sends no provider cap.",
         "required": false,
-        "default": 8192,
         "sensitive": false
       },
       "ELIZAOS_CLOUD_TTS_MODEL": {

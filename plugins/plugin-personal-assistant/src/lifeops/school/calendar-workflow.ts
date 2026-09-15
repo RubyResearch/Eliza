@@ -8,6 +8,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  DocumentService,
+  ElizaError,
   fetchRemoteMedia,
   fetchWithSsrfGuard,
   type IAgentRuntime,
@@ -15,8 +17,10 @@ import {
   type LookupFn,
   type PinnedLookupFetchLike,
   readResponseWithLimit,
+  resolveOwnerEntityIdOrDefault,
   type Service,
   ServiceType,
+  stringToUuid,
 } from "@elizaos/core";
 import { ELIZA_CALENDAR_GRANT_ID } from "@elizaos/plugin-calendar/internal/eliza-calendar";
 import type { CalendarOwnerMutationGateway } from "@elizaos/plugin-calendar/routes/mutation-gateway";
@@ -37,6 +41,7 @@ import {
 
 export const CONCORD_SCHOOL_CALENDAR_SOURCE: SchoolCalendarSourceConfig = {
   sourceId: "concord-cps-school-year-calendar",
+  packetVisibility: "guest_shareable",
   landingPageUrl:
     "https://www.concordps.org/district-resources/school-year-calendars",
   allowedHosts: ["www.concordps.org", "resources.finalsite.net"],
@@ -97,6 +102,8 @@ const SCHEMA = [
 ] as const;
 
 export interface SchoolCalendarSourceConfig {
+  /** Allows imported source facts in owner-reviewed family drafts; calendar edits remain private. */
+  packetVisibility?: "owner_only" | "guest_shareable";
   sourceId: string;
   landingPageUrl: string;
   allowedHosts: string[];
@@ -116,6 +123,15 @@ export interface SchoolCalendarSemanticEvent {
   startDate: string;
   endDateExclusive: string;
   citation?: SchoolCalendarCitation;
+}
+
+export interface SchoolCalendarImportedEvent {
+  packetVisibility?: "owner_only" | "guest_shareable";
+  sourceId: string;
+  grantId: string;
+  calendarId: string;
+  providerEventId: string;
+  event: SchoolCalendarSemanticEvent;
 }
 
 export interface SchoolCalendarCitation {
@@ -798,6 +814,36 @@ export class SchoolCalendarWorkflow {
     };
   }
 
+  async listImportedEvents(): Promise<SchoolCalendarImportedEvent[]> {
+    await this.ensureSchema();
+    const sources = await executeRawSql(
+      this.runtime,
+      `SELECT source_id, config_json FROM app_lifeops.life_school_calendar_sources WHERE agent_id=${sqlQuote(this.runtime.agentId)}`,
+    );
+    const result: SchoolCalendarImportedEvent[] = [];
+    for (const source of sources) {
+      const sourceId = toText(source.source_id);
+      const config = parseJsonRecord(
+        source.config_json,
+      ) as unknown as SchoolCalendarSourceConfig;
+      for (const event of await this.events(sourceId)) {
+        if (!event.active || !event.providerEventId) continue;
+        result.push({
+          sourceId,
+          packetVisibility:
+            config.packetVisibility === "guest_shareable"
+              ? "guest_shareable"
+              : "owner_only",
+          grantId: config.targetGrantId,
+          calendarId: config.targetCalendarId,
+          providerEventId: event.providerEventId,
+          event,
+        });
+      }
+    }
+    return result;
+  }
+
   async review(runId: string): Promise<SchoolCalendarRunReview | null> {
     await this.ensureSchema();
     const rows = await executeRawSql(
@@ -856,6 +902,7 @@ export class SchoolCalendarWorkflow {
     await this.insertRun(runId, config.sourceId, triggerKind, now);
     let retentionUncertain = false;
     try {
+      if (!this.deps.retainPdf) await this.retainRecordedSources();
       const { pdfUrl, bytes } = await this.retrieve(config);
       const contentSha256 = sha256(bytes);
       // Persist the canonical identity before storage can lose its acknowledgement.
@@ -1200,7 +1247,8 @@ export class SchoolCalendarWorkflow {
   ): Promise<void> {
     const at = this.now().toISOString();
     const code =
-      error instanceof SchoolCalendarWorkflowError
+      error instanceof SchoolCalendarWorkflowError ||
+      error instanceof ElizaError
         ? error.code
         : "SCHOOL_CALENDAR_APPLY_FAILED";
     const message = error instanceof Error ? error.message : String(error);
@@ -1308,7 +1356,89 @@ export class SchoolCalendarWorkflow {
         "SCHOOL_CALENDAR_FILE_STORE_UNAVAILABLE",
       );
     const stored = await files.store(bytes, "application/pdf");
+    if (
+      stored.hash !== sha256(bytes) ||
+      stored.url !== `/api/media/${stored.hash}.pdf`
+    )
+      throw new ElizaError(
+        "Canonical media storage returned an invalid school PDF reference.",
+        { code: "SCHOOL_CALENDAR_MEDIA_HASH_MISMATCH" },
+      );
+    await this.retainSourceReference(stored.url, stored.hash);
     return { url: stored.url, hash: stored.hash };
+  }
+
+  /** Preserve historical source references in the canonical document store. */
+  async retainRecordedSources(): Promise<void> {
+    const rows = await executeRawSql(
+      this.runtime,
+      `SELECT DISTINCT content_sha256,media_url FROM app_lifeops.life_school_calendar_runs WHERE agent_id=${sqlQuote(this.runtime.agentId)} AND content_sha256 IS NOT NULL`,
+    );
+    for (const row of rows) {
+      const digest = toText(row.content_sha256);
+      const url = toText(row.media_url);
+      if (!/^[a-f0-9]{64}$/.test(digest) || url !== `/api/media/${digest}.pdf`)
+        throw new ElizaError(
+          "A retained school source has an invalid hash or media reference.",
+          { code: "SCHOOL_CALENDAR_SOURCE_INTEGRITY" },
+        );
+      const files = this.runtime.getService<IFileStorageService>(
+        ServiceType.REMOTE_FILES,
+      );
+      if (!files)
+        throw new ElizaError(
+          "Canonical file storage is unavailable; restore it before checking school sources.",
+          { code: "SCHOOL_CALENDAR_FILE_STORE_UNAVAILABLE" },
+        );
+      const bytes = await files.read(`${digest}.pdf`);
+      if (!bytes || sha256(bytes) !== digest)
+        throw new ElizaError(
+          "A historical school PDF is missing or changed; recover its original bytes before continuing.",
+          { code: "SCHOOL_CALENDAR_SOURCE_INTEGRITY" },
+        );
+      await this.retainSourceReference(url, digest);
+    }
+  }
+
+  private async retainSourceReference(
+    url: string,
+    digest: string,
+  ): Promise<void> {
+    const documents = this.runtime.getService<DocumentService>(
+      DocumentService.serviceType,
+    );
+    if (!documents)
+      throw new ElizaError(
+        "The document service is unavailable; school source retention could not be recorded.",
+        { code: "SCHOOL_CALENDAR_DOCUMENT_STORE_UNAVAILABLE" },
+      );
+    const owner = resolveOwnerEntityIdOrDefault(this.runtime);
+    // This is an explicit source-link record, not a replacement transcription.
+    // Original PDF bytes remain in the canonical media store; metadata.mediaUrl
+    // makes their durable document reference visible to its existing collector.
+    await documents.addDocument({
+      agentId: this.runtime.agentId,
+      worldId: this.runtime.agentId,
+      roomId: this.runtime.agentId,
+      entityId: this.runtime.agentId,
+      clientDocumentId: stringToUuid(
+        `school-source:${this.runtime.agentId}:${digest}`,
+      ),
+      contentType: "text/plain",
+      originalFilename: "School calendar source.txt",
+      content: `Original school calendar PDF reference\n${url}\nSHA-256: ${digest}`,
+      metadata: {
+        title: "School calendar source",
+        source: "school-calendar",
+        mediaUrl: url,
+        contentSha256: digest,
+      },
+      scope: "owner-private",
+      scopedToEntityId: owner,
+      addedBy: owner,
+      addedByRole: "OWNER",
+      addedFrom: "lifeops",
+    });
   }
 
   private async extract(

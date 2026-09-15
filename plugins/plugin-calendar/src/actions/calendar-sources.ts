@@ -32,6 +32,7 @@ import type {
   LifeOpsCalendarSourceAdministrationSnapshot,
   LifeOpsCalendarSourceKey,
   LifeOpsIcsCalendarSyncResponse,
+  LifeOpsLinkedCalendarControlMutationResult,
 } from "@elizaos/shared";
 import { CalendarServiceError } from "../internal/errors.js";
 import {
@@ -43,6 +44,10 @@ import {
   MICROSOFT_CALENDAR_PROVIDER,
   microsoftAccountIdFromGrantId,
 } from "../microsoft/index.js";
+import {
+  CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE,
+  type CalendarOwnerMutationGateway,
+} from "../routes/mutation-gateway.js";
 import { CalendarService } from "../service/CalendarService.js";
 import {
   listCalendarSourceAdministration,
@@ -56,6 +61,12 @@ const SOURCE_OPERATIONS = [
   "deselect",
   "connect",
   "reconnect",
+  "sync_status",
+  "pause_sync",
+  "select_sync_destination",
+  "resume_sync",
+  "recover_sync",
+  "use_builtin_only",
 ] as const;
 
 export type CalendarSourceOperation = (typeof SOURCE_OPERATIONS)[number];
@@ -1093,7 +1104,7 @@ export function createCalendarSourcesAction(
         return resultWithCallback(
           {
             success: false,
-            text: "Choose a calendar source operation: list, select, deselect, connect, or reconnect.",
+            text: "Choose a calendar source operation or read sync_status before changing synchronization.",
             data: {
               actionName: ACTION_NAME,
               error: "MISSING_OPERATION",
@@ -1103,6 +1114,166 @@ export function createCalendarSourcesAction(
         );
       }
       try {
+        if (
+          operation === "sync_status" ||
+          operation === "pause_sync" ||
+          operation === "select_sync_destination" ||
+          operation === "resume_sync" ||
+          operation === "recover_sync" ||
+          operation === "use_builtin_only"
+        ) {
+          const calendar = runtime.getService<CalendarService>(
+            CalendarService.serviceType,
+          );
+          if (!calendar)
+            throw new ElizaError("Calendar service is unavailable.", {
+              code: "CALENDAR_SERVICE_UNAVAILABLE",
+            });
+          let control = await calendar.getLinkedCalendarControl();
+          let mutation: LifeOpsLinkedCalendarControlMutationResult | null =
+            null;
+          if (operation !== "sync_status") {
+            if (
+              typeof params.expectedRevision !== "number" ||
+              !Number.isSafeInteger(params.expectedRevision) ||
+              params.expectedRevision < 0 ||
+              typeof params.idempotencyKey !== "string" ||
+              !params.idempotencyKey.trim()
+            ) {
+              throw new ElizaError(
+                "Read sync status first, then supply its revision and a unique operation key.",
+                { code: "CALENDAR_SYNC_REVIEW_REQUIRED" },
+              );
+            }
+            const gatewayService = runtime.getService(
+              CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE,
+            );
+            if (
+              !gatewayService ||
+              !("updateLinkedCalendarControl" in gatewayService) ||
+              typeof gatewayService.updateLinkedCalendarControl !== "function"
+            ) {
+              throw new ElizaError("Owner calendar controls are unavailable.", {
+                code: "CALENDAR_OWNER_GATEWAY_UNAVAILABLE",
+              });
+            }
+            const gateway =
+              gatewayService as unknown as CalendarOwnerMutationGateway;
+            const common = {
+              expectedRevision: params.expectedRevision,
+              idempotencyKey: params.idempotencyKey,
+            };
+            if (operation === "select_sync_destination") {
+              if (
+                typeof params.connectorAccountId !== "string" ||
+                typeof params.calendarId !== "string"
+              ) {
+                throw new ElizaError(
+                  "Choose the exact account and calendar from the calendar source list.",
+                  { code: "CALENDAR_SYNC_DESTINATION_REQUIRED" },
+                );
+              }
+              mutation = await gateway.updateLinkedCalendarControl(
+                new URL("http://localhost/api/lifeops/calendar/sync-control"),
+                {
+                  ...common,
+                  operation: "select",
+                  destination: {
+                    connectorAccountId: params.connectorAccountId,
+                    providerCalendarId: params.calendarId,
+                  },
+                },
+              );
+            } else if (operation === "use_builtin_only") {
+              mutation = await gateway.updateLinkedCalendarControl(
+                new URL("http://localhost/api/lifeops/calendar/sync-control"),
+                { ...common, operation: "select", destination: null },
+              );
+            } else {
+              mutation = await gateway.updateLinkedCalendarControl(
+                new URL("http://localhost/api/lifeops/calendar/sync-control"),
+                {
+                  ...common,
+                  operation:
+                    operation === "pause_sync"
+                      ? "pause"
+                      : operation === "recover_sync"
+                        ? "recover"
+                        : "resume",
+                },
+              );
+            }
+            control = mutation;
+            if (mutation.receipt.revision !== control.revision) {
+              throw new ElizaError(
+                "The saved calendar receipt does not match the returned review.",
+                { code: "CALENDAR_SYNC_RECEIPT_MISMATCH" },
+              );
+            }
+          }
+          const text = control.paused
+            ? "Calendar synchronization is paused."
+            : "Calendar synchronization is enabled for the reviewed destination.";
+          const observedAt = new Date().toISOString();
+          const receiptBase = {
+            receiptId:
+              mutation?.receipt.id ??
+              opaqueEffectId("calendar-sync-receipt", [
+                runtime.agentId,
+                operation,
+                control.revision,
+              ]),
+            operation: `calendar.${operation}`,
+            resource: {
+              kind: "calendar.sync_control",
+              id: runtime.agentId,
+              version: String(control.revision),
+            },
+            artifacts: [],
+            observedAt,
+            idempotency: {
+              key: mutation ? mutation.receipt.operationKey : null,
+              replayed: mutation ? mutation.receipt.replayed : false,
+            },
+          };
+          const effectReceipt: EffectReceipt = !mutation
+            ? {
+                ...receiptBase,
+                outcome: "noop",
+                reason: "Observed the saved calendar sync control.",
+              }
+            : mutation.receipt.replayed
+              ? {
+                  ...receiptBase,
+                  outcome: "noop",
+                  reason:
+                    "The saved operation receipt still matches the current review.",
+                }
+              : {
+                  ...receiptBase,
+                  outcome: "applied",
+                  commit: {
+                    kind: "durable",
+                    id: mutation.receipt.id,
+                    committedAt: mutation.receipt.committedAt,
+                  },
+                };
+          return resultWithCallback(
+            {
+              success: true,
+              text: control.pendingDispatch
+                ? `${text} A previous calendar operation still needs to finish or be reconciled.`
+                : text,
+              data: {
+                actionName: ACTION_NAME,
+                operation,
+                control,
+                effectReceipt,
+              },
+            },
+            callback,
+          );
+        }
         if (operation === "list") {
           const snapshot = await listCalendarSourceAdministration(runtime, {
             forceSync: params.forceSync === true,
@@ -1232,9 +1403,22 @@ export function createCalendarSourcesAction(
     },
     parameters: [
       {
+        name: "expectedRevision",
+        description:
+          "Revision returned by sync_status; required for every sync mutation, including recover_sync and use_builtin_only.",
+        required: false,
+        schema: { type: "number" },
+      },
+      {
+        name: "idempotencyKey",
+        description: "Unique key for this reviewed sync-control operation.",
+        required: false,
+        schema: { type: "string" },
+      },
+      {
         name: "operation",
         description:
-          "Calendar source operation. list reads the sources; select and deselect write feed inclusion; connect and reconnect start owner authorization. Always list before select/deselect so the exact identity and current version are available.",
+          "list reads sources; select/deselect change feed inclusion; connect/reconnect start authorization. sync_status reads the saved sync destination and revision. pause_sync pauses dispatch; select_sync_destination verifies and saves an exact account/calendar while paused; resume_sync verifies and resumes; recover_sync checks a pending operation without resuming; use_builtin_only clears the sync destination while paused. Read list for exact identities and sync_status for the revision before changing sync controls.",
         required: true,
         schema: { type: "string", enum: [...SOURCE_OPERATIONS] },
       },

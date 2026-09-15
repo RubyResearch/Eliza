@@ -430,7 +430,8 @@ export type LifeOpsLinkedCalendarState =
   | "dirty"
   | "conflicted"
   | "quarantined"
-  | "paused";
+  | "paused"
+  | "local_only";
 
 export interface LifeOpsLinkedCalendarLink {
   id: string;
@@ -447,6 +448,48 @@ export interface LifeOpsLinkedCalendarLink {
   createdAt: string;
   updatedAt: string;
 }
+
+/** Owner sync review with local event details; null means the event no longer exists. */
+export interface LifeOpsLinkedCalendarEventView
+  extends LifeOpsLinkedCalendarLink {
+  event: Pick<
+    LifeOpsCalendarEvent,
+    "title" | "startAt" | "endAt" | "isAllDay"
+  > | null;
+}
+
+/** Owner-visible sync review; internal dispatch receipts never leave the service. */
+export interface LifeOpsLinkedCalendarControl {
+  revision: number;
+  paused: boolean;
+  destination: {
+    connectorAccountId: string;
+    providerCalendarId: string;
+  } | null;
+  pendingDispatch: { linkId: string } | null;
+}
+
+export interface LifeOpsLinkedCalendarControlMutationResult
+  extends LifeOpsLinkedCalendarControl {
+  receipt: {
+    id: string;
+    operationKey: string;
+    committedAt: string;
+    revision: number;
+    replayed: boolean;
+  };
+}
+
+export type UpdateLifeOpsLinkedCalendarControlRequest = {
+  expectedRevision: number;
+  idempotencyKey: string;
+} & (
+  | { operation: "pause" | "resume" | "recover" }
+  | {
+      operation: "select";
+      destination: LifeOpsLinkedCalendarControl["destination"];
+    }
+);
 
 export interface CreateLifeOpsLinkedCalendarLinkRequest {
   localEventId: string;
@@ -471,6 +514,25 @@ export interface DisconnectLifeOpsLinkedCalendarRequest {
   idempotencyKey: string;
   /** Both independently useful events are retained; only synchronization stops. */
   retainEvents: true;
+}
+
+/** Prepares a reviewed local event for a new provider destination without deleting the old provider event. */
+export interface RebindLifeOpsLinkedCalendarRequest {
+  expectedUpdatedAt: string;
+  expectedLocalRevision: number;
+  expectedControlRevision: number;
+  connectorAccountId: string;
+  providerCalendarId: string;
+  idempotencyKey: string;
+  retainPreviousProviderEvent: true;
+}
+
+export interface RebindLifeOpsLinkedCalendarResponse {
+  previous: LifeOpsLinkedCalendarLink;
+  link: LifeOpsLinkedCalendarLink;
+  controlRevision: number;
+  receipt: { operationKey: string; replayed: boolean };
+  providerMutation: "none";
 }
 
 export interface LifeOpsLinkedCalendarMutationResponse {

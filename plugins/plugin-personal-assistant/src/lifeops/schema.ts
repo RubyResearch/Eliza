@@ -29,6 +29,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -62,6 +63,32 @@ export const lifeConnectorGrants = appLifeopsPgSchema.table(
     updatedAt: text("updated_at").notNull(),
   },
   (t) => [unique().on(t.agentId, t.provider, t.side, t.mode, t.identityEmail)],
+);
+
+/** Persists reviewed account handoffs and their resumable side-effect boundaries. */
+export const lifeAccountHandoffs = appLifeopsPgSchema.table(
+  "life_account_handoffs",
+  {
+    agentId: text("agent_id").notNull(),
+    ownerEntityId: text("owner_entity_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    revision: integer("revision").notNull().default(0),
+    phase: text("phase").notNull().default("reviewed"),
+    reviewJson: text("review_json").notNull(),
+    receiptJson: text("receipt_json").notNull().default("{}"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.ownerEntityId, t.operationId] }),
+    uniqueIndex("life_account_handoffs_active_owner")
+      .on(t.agentId, t.ownerEntityId)
+      .where(sql`${t.phase} NOT IN ('completed', 'cancelled')`),
+  ],
 );
 
 export const lifeAccountPrivacy = appLifeopsPgSchema.table(
@@ -2162,6 +2189,7 @@ export const lifeBriefItemEngagements = appLifeopsPgSchema.table(
 // ---------------------------------------------------------------------------
 
 export const lifeOpsSchema = {
+  lifeAccountHandoffs,
   lifeConnectorGrants,
   lifeAccountPrivacy,
   lifeTaskDefinitions,

@@ -28,6 +28,11 @@ import {
   SELF_ENTITY_ID,
 } from "@elizaos/shared";
 import {
+  type ConfirmEmailRecipientInput,
+  type ConfirmedEmailRecipient,
+  confirmEmailRecipient,
+} from "./confirmed-email-recipient.ts";
+import {
   executeRawSql,
   parseJsonArray,
   parseJsonValue,
@@ -123,6 +128,12 @@ export class EntityStore {
     private readonly runtime: IAgentRuntime,
     private readonly agentId: string,
   ) {}
+
+  confirmEmailRecipient(
+    input: ConfirmEmailRecipientInput,
+  ): Promise<ConfirmedEmailRecipient> {
+    return confirmEmailRecipient(this.runtime, this.agentId, input);
+  }
 
   /**
    * Bootstrap the special `self` entity if it does not exist. Idempotent.

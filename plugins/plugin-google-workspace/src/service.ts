@@ -339,6 +339,12 @@ export class GoogleWorkspaceService extends Service implements IGoogleWorkspaceS
     return this.calendarClient.getEvent(params);
   }
 
+  findEventByIdempotencyKey(
+    params: GoogleAccountRef & { calendarId: string; idempotencyKey: string; timeZone?: string }
+  ): Promise<GoogleCalendarEvent | null> {
+    return this.calendarClient.findEventByIdempotencyKey(params);
+  }
+
   createEvent(params: GoogleCalendarEventInput): Promise<GoogleCalendarEvent> {
     return this.calendarClient.createEvent(params);
   }

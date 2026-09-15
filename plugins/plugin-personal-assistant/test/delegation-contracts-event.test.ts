@@ -137,6 +137,7 @@ describe("delegation connector event normalization", () => {
       nowIso: "2026-07-09T18:01:00.000Z",
       repository,
       approvalQueue,
+      resolveEmailSender: expect.any(Function),
     });
   });
 

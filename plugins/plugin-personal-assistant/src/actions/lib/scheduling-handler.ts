@@ -894,14 +894,35 @@ function approvalChannelForDraft(
 
 function approvalPayloadForDraft(
   draft: SchedulingMessageDraft,
+  senderGrantId?: string,
 ): ApprovalPayload {
-  return schedulingApprovalPayloadForDraft(draft);
+  return schedulingApprovalPayloadForDraft(draft, senderGrantId);
+}
+
+async function resolveSchedulingSender(
+  runtime: IAgentRuntime,
+  channel: string | undefined,
+): Promise<{ grantId: string; email: string } | null> {
+  if (channel !== "email") return null;
+  const { LifeOpsService } = await loadLifeOpsServiceModule();
+  const grant = await new LifeOpsService(runtime).requireGoogleGmailSendGrant(
+    INTERNAL_URL,
+    "local",
+    "owner",
+  );
+  if (!grant.id || !grant.identityEmail)
+    throw new ElizaError(
+      "Reconnect the Google sender before creating an email approval.",
+      { code: "SCHEDULING_SENDER_UNAVAILABLE" },
+    );
+  return { grantId: grant.id, email: grant.identityEmail };
 }
 
 async function enqueueSchedulingDraft(args: {
   runtime: IAgentRuntime;
   message: Memory;
   draft: SchedulingMessageDraft;
+  sender: { grantId: string; email: string } | null;
   tx: TransactionalDb;
 }): Promise<SchedulingApprovalEnqueueResult> {
   const channel = getChannelRegistry(args.runtime)?.get(
@@ -926,7 +947,7 @@ async function enqueueSchedulingDraft(args: {
     args.message.entityId.trim().length > 0
       ? args.message.entityId
       : String(args.runtime.agentId);
-  const payload = approvalPayloadForDraft(args.draft);
+  const payload = approvalPayloadForDraft(args.draft, args.sender?.grantId);
   const scheduling = readSchedulingApprovalCorrelation(payload);
   if (!scheduling) {
     throw new ElizaError(
@@ -945,6 +966,7 @@ async function enqueueSchedulingDraft(args: {
   const reason = [
     `Review exact ${args.draft.messageKind} scheduling draft before sending.`,
     `Channel: ${args.draft.transportChannel}`,
+    ...(args.sender ? [`From: ${args.sender.email}`] : []),
     `To: ${args.draft.recipientName} (${args.draft.recipient})`,
     ...(payload.action === "send_email" ? [`Subject: ${payload.subject}`] : []),
     "Message:",
@@ -1271,6 +1293,10 @@ export async function runSchedulingNegotiationHandler(
         await service.resolveCounterpartyTargetForRelationship(
           params.relationshipId ?? null,
         );
+      const sender = await resolveSchedulingSender(
+        runtime,
+        counterparty?.channel,
+      );
       const { neg, approval } = await withRequiredTransaction(
         runtime,
         async (tx) => {
@@ -1283,7 +1309,13 @@ export async function runSchedulingNegotiationHandler(
           });
           const draft = await service.draftOpeningMessage(neg, counterparty);
           const approval = draft
-            ? await enqueueSchedulingDraft({ runtime, message, draft, tx })
+            ? await enqueueSchedulingDraft({
+                runtime,
+                message,
+                draft,
+                sender,
+                tx,
+              })
             : null;
           return { neg, approval };
         },
@@ -1344,6 +1376,10 @@ export async function runSchedulingNegotiationHandler(
       const counterparty = negotiationBeforeMutation
         ? await service.resolveCounterpartyTarget(negotiationBeforeMutation)
         : null;
+      const sender = await resolveSchedulingSender(
+        runtime,
+        counterparty?.channel,
+      );
       const { proposal, approval } = await withRequiredTransaction(
         runtime,
         async (tx) => {
@@ -1380,7 +1416,13 @@ export async function runSchedulingNegotiationHandler(
                   counterparty,
                 );
           const approval = draft
-            ? await enqueueSchedulingDraft({ runtime, message, draft, tx })
+            ? await enqueueSchedulingDraft({
+                runtime,
+                message,
+                draft,
+                sender,
+                tx,
+              })
             : null;
           return { proposal, approval };
         },
@@ -1462,6 +1504,10 @@ export async function runSchedulingNegotiationHandler(
       const counterparty = negotiationBeforeMutation
         ? await service.resolveCounterpartyTarget(negotiationBeforeMutation)
         : null;
+      const sender = await resolveSchedulingSender(
+        runtime,
+        counterparty?.channel,
+      );
       const { neg, proposal, approval } = await withRequiredTransaction(
         runtime,
         async (tx) => {
@@ -1492,7 +1538,13 @@ export async function runSchedulingNegotiationHandler(
             counterparty,
           );
           const approval = draft
-            ? await enqueueSchedulingDraft({ runtime, message, draft, tx })
+            ? await enqueueSchedulingDraft({
+                runtime,
+                message,
+                draft,
+                sender,
+                tx,
+              })
             : null;
           return { neg, proposal, approval };
         },
@@ -1544,6 +1596,10 @@ export async function runSchedulingNegotiationHandler(
       const counterparty = negotiationBeforeMutation
         ? await service.resolveCounterpartyTarget(negotiationBeforeMutation)
         : null;
+      const sender = await resolveSchedulingSender(
+        runtime,
+        counterparty?.channel,
+      );
       const { negotiation, approval } = await withRequiredTransaction(
         runtime,
         async (tx) => {
@@ -1558,7 +1614,13 @@ export async function runSchedulingNegotiationHandler(
             counterparty,
           );
           const approval = draft
-            ? await enqueueSchedulingDraft({ runtime, message, draft, tx })
+            ? await enqueueSchedulingDraft({
+                runtime,
+                message,
+                draft,
+                sender,
+                tx,
+              })
             : null;
           return { negotiation, approval };
         },

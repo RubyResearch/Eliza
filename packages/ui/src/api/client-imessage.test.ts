@@ -58,6 +58,29 @@ describe("ElizaClient native iMessage routes", () => {
     );
   });
 
+  it("preserves hosted transport and webhook status across the HTTP boundary", async () => {
+    const { client } = makeClient({
+      "/api/setup/imessage/status": {
+        connector: "imessage",
+        state: "paired",
+        detail: {
+          available: true,
+          connected: true,
+          transport: "blooio",
+          chatDbAvailable: false,
+          webhookPath: "/api/imessage/webhook/blooio",
+          channelId: "synthetic-channel",
+          permissionAction: null,
+        },
+      },
+    });
+    const status = await client.getIMessageStatus();
+    expect(status.bridgeType).toBe("blooio");
+    expect(status.connected).toBe(true);
+    expect(status.webhookPath).toBe("/api/imessage/webhook/blooio");
+    expect(status.permissionAction).toBeNull();
+  });
+
   it("preserves native message and chat DTOs from plugin-imessage", async () => {
     const message = {
       id: "msg-1",

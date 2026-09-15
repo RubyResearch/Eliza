@@ -17,6 +17,8 @@ export const MAX_SQL_JSON_SANITIZE_NODES = 10_000;
 export const MAX_SQL_JSON_SANITIZE_BYTES = 1_048_576;
 /** Maximum escaped UTF-8 bytes contributed by one string value. */
 export const MAX_SQL_JSON_SANITIZE_STRING_BYTES = MAX_SQL_JSON_SANITIZE_BYTES;
+/** Document content budget matches the supported 32 MiB upload envelope. */
+const MAX_DOCUMENT_JSON_BYTES = 32 * 1_048_576;
 /** Maximum escaped UTF-8 bytes contributed by one property key. */
 export const MAX_SQL_JSON_SANITIZE_KEY_BYTES = 65_536;
 /** Maximum decimal digits projected from one BigInt value. */
@@ -40,6 +42,7 @@ interface SanitizeContext {
   visits: number;
   bytes: number;
   rejectNul?: boolean;
+  maxBytes?: number;
   documentText?: boolean;
 }
 
@@ -57,11 +60,12 @@ function chargeBytes(context: SanitizeContext, bytes: number, reason: string): v
     failUnbounded({ reason, bytes: "invalid" });
   }
   context.bytes += bytes;
-  if (context.bytes > MAX_SQL_JSON_SANITIZE_BYTES) {
+  const maxBytes = context.maxBytes ?? MAX_SQL_JSON_SANITIZE_BYTES;
+  if (context.bytes > maxBytes) {
     failUnbounded({
       reason: "serialized-bytes",
       bytes: context.bytes,
-      max: MAX_SQL_JSON_SANITIZE_BYTES,
+      max: maxBytes,
       source: reason,
     });
   }
@@ -144,22 +148,35 @@ export function serializeJsonb(
   value: unknown,
   options: { documentText?: boolean } = {}
 ): string | undefined {
+  return serializeJsonbWithBudget(value, MAX_SQL_JSON_SANITIZE_BYTES, options.documentText);
+}
+
+/** Preserve complete document content within the supported upload envelope. */
+export function serializeDocumentJsonb(value: unknown): string | undefined {
+  return serializeJsonbWithBudget(value, MAX_DOCUMENT_JSON_BYTES);
+}
+
+function serializeJsonbWithBudget(
+  value: unknown,
+  maxBytes: number,
+  documentText = false
+): string | undefined {
   // Decode legacy JSON for structural validation; keep its original numeric
   // tokens so arbitrary-precision jsonb numbers never round through JS Number.
   let decoded = value;
   if (typeof value === "string") {
     // Check before JSON.parse allocates a second tree. The code-unit guard
     // bounds the UTF-8 measurement allocation as well as the decoded input.
-    if (value.length > MAX_SQL_JSON_SANITIZE_BYTES) {
+    if (value.length > maxBytes) {
       failUnbounded({
         reason: "encoded-json-bytes",
         codeUnits: value.length,
-        max: MAX_SQL_JSON_SANITIZE_BYTES,
+        max: maxBytes,
       });
     }
     const bytes = new TextEncoder().encode(value).byteLength;
-    if (bytes > MAX_SQL_JSON_SANITIZE_BYTES) {
-      failUnbounded({ reason: "encoded-json-bytes", bytes, max: MAX_SQL_JSON_SANITIZE_BYTES });
+    if (bytes > maxBytes) {
+      failUnbounded({ reason: "encoded-json-bytes", bytes, max: maxBytes });
     }
     try {
       decoded = JSON.parse(value);
@@ -171,19 +188,17 @@ export function serializeJsonb(
         severity: "fatal",
       });
     }
-    sanitizeJsonValue(decoded, { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true }, 0);
+    sanitizeJsonValue(
+      decoded,
+      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes, documentText },
+      0
+    );
     return value;
   }
   return JSON.stringify(
     sanitizeJsonValue(
       decoded,
-      {
-        seen: new WeakSet(),
-        visits: 0,
-        bytes: 0,
-        rejectNul: true,
-        documentText: options.documentText,
-      },
+      { seen: new WeakSet(), visits: 0, bytes: 0, rejectNul: true, maxBytes, documentText },
       0
     )
   );
@@ -217,7 +232,11 @@ function sanitizeJsonValue(value: unknown, context: SanitizeContext, depth: numb
     // write/read round-trip.
     chargeBytes(
       context,
-      measureJsonStringBytes(value, MAX_SQL_JSON_SANITIZE_STRING_BYTES, "string-bytes"),
+      measureJsonStringBytes(
+        value,
+        context.maxBytes ?? MAX_SQL_JSON_SANITIZE_STRING_BYTES,
+        "string-bytes"
+      ),
       "string"
     );
     return value.includes(NUL) ? value.replaceAll(NUL, "") : value;

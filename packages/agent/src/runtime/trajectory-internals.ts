@@ -4347,7 +4347,8 @@ const TRAJECTORY_REDACT_PATTERNS: { re: RegExp; label: string }[] = [
   { re: /xox[bpars]-[A-Za-z0-9-]{10,}/g, label: "<SLACK_TOKEN>" },
   { re: /0x[a-fA-F0-9]{40}/g, label: "<ETH_ADDR>" },
   { re: /\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b/g, label: "<BTC_ADDR>" },
-  { re: /\b\d{13,19}\b/g, label: "<CARD>" },
+  // Decimal geometry is source evidence; neither side of its decimal point is a PAN.
+  { re: /(?<!\d\.)\b\d{13,19}\b(?!\.\d)/g, label: "<CARD>" },
 ];
 
 export function redactTrajectoryText(value: unknown): unknown {

@@ -15,7 +15,16 @@
  * action/channel enums (Commandment 7).
  */
 import { sql } from "drizzle-orm";
-import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import {
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { agentTable } from "./agent";
 
 export const approvalRequestTable = pgTable(
@@ -28,6 +37,8 @@ export const approvalRequestTable = pgTable(
     requestedBy: text("requested_by").notNull(),
     /** Owner whose approval is required. */
     subjectUserId: text("subject_user_id").notNull(),
+    /** Control revision at insertion; null identifies approvals predating the fence. */
+    admissionRevision: integer("admission_revision"),
     /** Closed enum from `ApprovalAction`. */
     action: text("action").notNull(),
     /** Discriminated union from `ApprovalPayload`. */

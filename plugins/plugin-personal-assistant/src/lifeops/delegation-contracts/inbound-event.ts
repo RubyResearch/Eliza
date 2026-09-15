@@ -5,11 +5,19 @@
  * extracts their shared thread and sender fields before the delegation policy
  * processor persists state and creates approval-gated reply drafts.
  */
-import type { IAgentRuntime, Memory, MessagePayload } from "@elizaos/core";
+import {
+  ElizaError,
+  type IAgentRuntime,
+  type Memory,
+  type MessagePayload,
+} from "@elizaos/core";
+import { INTERNAL_URL } from "../access.js";
 import type { ApprovalQueue } from "../approval-queue.types.js";
+import { googleGrantIdForAccount } from "../google-plugin-delegates.js";
 import type {
   DelegationChannel,
   DelegationContractRepository,
+  DelegationEmailSender,
   DelegationInboundProcessingResult,
   DelegationInboundTurn,
 } from "./index.js";
@@ -175,7 +183,27 @@ export function delegationInboundTurnFromMessage(
     contentMetadata.renewalDeltaPercent,
   );
 
+  const accountIds = [
+    metadata.accountId,
+    record(metadata.origin).accountId,
+    record(metadata.delivery).accountId,
+  ].filter((value) => value !== undefined && value !== null);
+  if (
+    accountIds.some(
+      (value) =>
+        typeof value !== "string" || !value.trim() || value !== value.trim(),
+    ) ||
+    new Set(accountIds).size > 1
+  )
+    throw new ElizaError(
+      "The incoming account is missing or inconsistent. Reconnect the source before drafting a reply.",
+      { code: "DELEGATION_REPLY_ACCOUNT_INVALID" },
+    );
+  const replyConnectorAccountId = accountIds[0];
   return {
+    ...(typeof replyConnectorAccountId === "string"
+      ? { replyConnectorAccountId }
+      : {}),
     channel,
     threadId: threadIdFromMessage(message, content, metadata),
     sender: senderName,
@@ -201,6 +229,9 @@ export interface DelegationInboundMessageDependencies {
     readonly nowIso: string;
     readonly repository: DelegationContractRepository;
     readonly approvalQueue: ApprovalQueue;
+    readonly resolveEmailSender: (
+      ownerUserId: string,
+    ) => Promise<DelegationEmailSender>;
   }) => Promise<DelegationInboundProcessingResult>;
   readonly now?: () => Date;
 }
@@ -219,6 +250,45 @@ export function createDelegationInboundMessageHandler(
       nowIso: (dependencies.now?.() ?? new Date()).toISOString(),
       repository: dependencies.createRepository(runtime),
       approvalQueue: dependencies.createApprovalQueue(runtime),
+      resolveEmailSender: (ownerUserId) =>
+        resolveDelegationEmailSender(runtime, turn, ownerUserId),
     });
   };
+}
+
+/** Resolves the receiving owner account explicitly; an absent binding never selects the default sender. */
+export async function resolveDelegationEmailSender(
+  runtime: IAgentRuntime,
+  turn: DelegationInboundTurn,
+  ownerUserId: string,
+): Promise<DelegationEmailSender> {
+  const accountId = turn.replyConnectorAccountId;
+  if (
+    (turn.channel !== "email" && turn.channel !== "gmail") ||
+    !accountId ||
+    accountId !== accountId.trim()
+  )
+    throw new ElizaError(
+      "The receiving email account is unavailable. Reconnect it before reviewing a holding reply.",
+      { code: "DELEGATION_REPLY_ACCOUNT_INVALID" },
+    );
+  const { LifeOpsService } = await import("../service.js");
+  const grant = await new LifeOpsService(runtime, {
+    ownerEntityId: ownerUserId,
+  }).requireGoogleGmailSendGrant(
+    INTERNAL_URL,
+    "local",
+    "owner",
+    googleGrantIdForAccount(accountId),
+  );
+  if (
+    grant.connectorAccountId !== accountId ||
+    !grant.identityEmail ||
+    !grant.id
+  )
+    throw new ElizaError(
+      "The receiving email account no longer matches this reply.",
+      { code: "DELEGATION_REPLY_SENDER_UNAVAILABLE" },
+    );
+  return { grantId: grant.id, email: grant.identityEmail };
 }

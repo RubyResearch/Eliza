@@ -11,7 +11,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Auth } from "googleapis";
+import { Auth, type calendar_v3 } from "googleapis";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GoogleCalendarClient, type GoogleCalendarMutationError } from "./calendar.js";
 import { GoogleApiClientFactory } from "./client-factory.js";
@@ -21,8 +21,8 @@ interface ProviderEvent {
   id: string;
   etag: string;
   summary: string;
-  start: { dateTime: string; timeZone: string };
-  end: { dateTime: string; timeZone: string };
+  start: calendar_v3.Schema$EventDateTime;
+  end: calendar_v3.Schema$EventDateTime;
   attendees: Array<{
     email: string;
     self?: boolean;
@@ -151,8 +151,18 @@ beforeAll(async () => {
         return;
       }
       if (request.method === "PATCH") {
+        const start = { ...event.start, ...(body.start as ProviderEvent["start"] | undefined) };
+        const end = { ...event.end, ...(body.end as ProviderEvent["end"] | undefined) };
+        if ((start.date && start.dateTime) || (end.date && end.dateTime)) {
+          writeJson(response, 400, {
+            error: { code: 400, message: "Cannot combine date and dateTime" },
+          });
+          return;
+        }
         const updated: ProviderEvent = {
           ...event,
+          start,
+          end,
           ...(typeof body.summary === "string" ? { summary: body.summary } : {}),
           ...(Array.isArray(body.recurrence) ? { recurrence: body.recurrence as string[] } : {}),
           ...(Array.isArray(body.attendees)
@@ -243,6 +253,79 @@ describe("Google Calendar provider mutation safety", () => {
         },
       },
     });
+  });
+
+  it("inspects an original create receipt without writing and rejects a foreign marker", async () => {
+    const params = {
+      accountId: "owner-account",
+      calendarId: "disposable-recovery-calendar",
+      idempotencyKey: "recovery-original-create",
+    };
+    expect(await client.findEventByIdempotencyKey(params)).toBeNull();
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+    const created = await client.createEvent({
+      ...params,
+      title: "Synthetic recovery event",
+      start: "2026-08-01T16:00:00.000Z",
+      end: "2026-08-01T17:00:00.000Z",
+      timeZone: "UTC",
+      sendUpdates: "none",
+    });
+    requests = [];
+    const found = await client.findEventByIdempotencyKey(params);
+    expect(found?.id).toBe(created.id);
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+    const stored = events.get(created.id);
+    if (!stored) throw new Error("Expected the provider's persisted create");
+    stored.extendedProperties = { private: { elizaosIdempotencyKeySha256: "foreign" } };
+    await expect(client.findEventByIdempotencyKey(params)).rejects.toMatchObject({
+      code: "GOOGLE_CALENDAR_IDEMPOTENCY_CONFLICT",
+    });
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it("converts timed events to all-day and back over real HTTP without changing identity", async () => {
+    const created = await client.createEvent({
+      accountId: "owner-account",
+      title: "School recess",
+      start: "2026-11-01T00:00:00.000Z",
+      end: "2026-11-03T00:00:00.000Z",
+      timeZone: "America/New_York",
+      idempotencyKey: "school-conversion",
+    });
+    const createdEtag = created.metadata?.etag;
+    if (typeof createdEtag !== "string") throw new Error("Missing created event ETag");
+    const allDay = await client.updateEvent({
+      accountId: "owner-account",
+      eventId: created.id,
+      start: "2026-11-01",
+      end: "2026-11-03",
+      timeZone: "America/New_York",
+      expectedEtag: createdEtag,
+      sendUpdates: "none",
+    });
+    expect(allDay.isAllDay).toBe(true);
+    expect(allDay.end).toBe("2026-11-03T00:00:00.000Z");
+    const allDayEtag = allDay.metadata?.etag;
+    if (typeof allDayEtag !== "string") throw new Error("Missing all-day event ETag");
+    const timed = await client.updateEvent({
+      accountId: "owner-account",
+      eventId: created.id,
+      start: "2026-11-01T14:00:00.000Z",
+      end: "2026-11-01T15:00:00.000Z",
+      timeZone: "America/New_York",
+      expectedEtag: allDayEtag,
+      sendUpdates: "none",
+    });
+    expect(timed.id).toBe(created.id);
+    expect(timed.isAllDay).toBe(false);
+    expect(timed.start).toBe("2026-11-01T14:00:00.000Z");
+    expect(events.size).toBe(1);
+    expect(
+      requests
+        .filter((request) => request.method === "PATCH")
+        .every((request) => request.query.get("sendUpdates") === "none")
+    ).toBe(true);
   });
 
   it("enforces If-Match and explicit notification policy for update, RSVP, and delete", async () => {

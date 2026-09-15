@@ -48,6 +48,32 @@ describe.each([
       ).tools;
       if (!normalized)
         throw new Error("calendar tool family was not normalized");
+      for (const action of family) {
+        const tool = normalized[action.name] as {
+          strict?: boolean;
+          inputSchema: { jsonSchema: ActionParameterSchema };
+        };
+        const details = tool.inputSchema.jsonSchema.properties?.details;
+        if (
+          action.parameters?.some((parameter) => parameter.name === "details")
+        ) {
+          if (!details)
+            throw new Error(
+              "Normalized calendar tool omitted its details schema",
+            );
+          const omittedErrors: string[] = [];
+          validateSchema(details, {}, "details", omittedErrors);
+          expect(omittedErrors).toEqual([]);
+          const invalidErrors: string[] = [];
+          validateSchema(
+            details,
+            { travelOriginAddress: false },
+            "details",
+            invalidErrors,
+          );
+          expect(invalidErrors.length).toBeGreaterThan(0);
+        }
+      }
       const tool = normalized[create.name] as {
         strict?: boolean;
         inputSchema: { jsonSchema: ActionParameterSchema };

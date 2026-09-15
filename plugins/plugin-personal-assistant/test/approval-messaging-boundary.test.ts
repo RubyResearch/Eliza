@@ -61,6 +61,44 @@ describe("approval messaging boundary", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it.each(["telegram-message-1", null])(
+    "preserves Telegram evidence and refuses missing identifiers (%s)",
+    async (messageId) => {
+      const receipt = {
+        providerMessageIds: messageId ? [messageId] : [],
+        acceptedAt: 1_780_000_000_000,
+        persistence: { status: "persisted", memoryIds: [] },
+      };
+      const prepared = await prepareCrossChannelSend({
+        runtime: {} as IAgentRuntime,
+        service: {
+          getTelegramConnectorStatus: async () => ({
+            connected: true,
+            grantedCapabilities: ["telegram.send"],
+          }),
+          sendTelegramMessage: async () => ({ ok: true, messageId, receipt }),
+        } as unknown as LifeOpsService,
+        channel: "telegram",
+        target: "chat-1",
+        body: "Synthetic calendar review",
+      });
+      if (messageId) {
+        expect(await prepared.dispatch("telegram-approval")).toEqual({
+          provider: "telegram",
+          messageId,
+          receipt,
+        });
+      } else {
+        await expect(
+          prepared.dispatch("telegram-approval"),
+        ).rejects.toMatchObject({
+          code: "APPROVAL_DELIVERY_UNCERTAIN",
+          providerReceipt: { provider: "telegram", messageId: null, receipt },
+        });
+      }
+    },
+  );
+
   it("fails closed before claim when iMessage is unavailable", async () => {
     const sendIMessage = vi.fn();
     const service = {
@@ -89,6 +127,12 @@ describe("approval messaging boundary", () => {
       provider: "discord",
       channelId: "channel-1",
       deliveryStatus: "sent" as const,
+      providerMessageId: "discord-part-2",
+      receipt: {
+        providerMessageIds: ["discord-part-1", "discord-part-2"],
+        acceptedAt: 1_780_000_000_000,
+        persistence: { status: "persisted", memoryIds: [] },
+      },
     }));
     const sendIMessage = vi.fn(async () => ({
       ok: true as const,
@@ -119,7 +163,11 @@ describe("approval messaging boundary", () => {
       body: "hello",
     });
 
-    await discord.dispatch("approval:discord");
+    const discordReceipt = await discord.dispatch("approval:discord");
+    expect(discordReceipt).toMatchObject({
+      messageId: "discord-part-2",
+      receipt: { providerMessageIds: ["discord-part-1", "discord-part-2"] },
+    });
     await imessage.dispatch("approval:imessage");
     expect(sendDiscordMessage).toHaveBeenCalledWith(
       expect.objectContaining({ allowTransportFallback: false }),

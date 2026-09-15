@@ -14,6 +14,7 @@
  * the stored parent document under the database isolation context. On start it
  * also migrates the legacy `knowledge` partition into the document partitions.
  */
+
 import { existsSync, statSync } from "node:fs";
 import { filterByAccessContext } from "../../access-control/filter";
 import {
@@ -21,6 +22,7 @@ import {
 	canRequesterMutateDocument,
 	DOCUMENT_LIST_MAX_LIMIT,
 	DOCUMENT_LIST_MAX_OFFSET,
+	documentMutationSnapshotMatches,
 	documentRoleHasGlobalVisibility,
 	isDocumentVisibleToRequester,
 	queryDocumentsWithCapability,
@@ -52,6 +54,7 @@ import {
 } from "../../types";
 import { splitChunks, validateUuid } from "../../utils";
 import { Semaphore } from "../../utils/prompt-batcher/shared";
+import { toWellFormedUnicode } from "../../utils/well-formed";
 import { bm25Scores, normalizeBm25Scores } from "./bm25.ts";
 import { validateModelConfig } from "./config";
 import { addDocumentFromFilePath, loadDocumentsFromPath } from "./docs-loader";
@@ -62,6 +65,12 @@ import {
 	preparePreChunkedFragmentMemories,
 	processFragmentsSynchronously,
 } from "./document-processor.ts";
+import {
+	type DocumentPinTargets,
+	documentPinTargets,
+	isDocumentPinnedForRoom,
+	validateDocumentPinTargets,
+} from "./pinning.ts";
 import { embedRecallQuery } from "./recall-embed.ts";
 import type {
 	AddDocumentOptions,
@@ -79,7 +88,6 @@ import {
 	generateContentBasedId,
 	isBinaryContentType,
 	isTextBackedDocumentContent,
-	looksLikeBase64,
 	normalizeDocumentContentType,
 	stripDocumentFilenameExtension,
 } from "./utils.ts";
@@ -601,10 +609,99 @@ export class DocumentService extends Service {
 			: null;
 	}
 
+	async getDocumentPinsWithAccessContext(
+		documentId: UUID,
+		accessContext: AccessContext,
+	): Promise<{ targets: DocumentPinTargets; pinRevision: string }> {
+		if (accessContext.role !== "OWNER")
+			throw new ElizaError("Only the owner can manage document pins", {
+				code: "DOCUMENT_PIN_FORBIDDEN",
+			});
+		const document = await this.getDocumentByIdWithAccessContext(
+			documentId,
+			accessContext,
+		);
+		const snapshot = document && readDocumentMutationSnapshot(document);
+		if (!document || !snapshot)
+			throw new ElizaError("Document is unavailable", {
+				code: "DOCUMENT_PIN_NOT_FOUND",
+				context: { documentId },
+			});
+		return {
+			targets: documentPinTargets(document),
+			pinRevision: await this.documentAccessRevision(documentId, snapshot),
+		};
+	}
+
+	async setDocumentPinsWithAccessContext(
+		documentId: UUID,
+		targets: DocumentPinTargets,
+		accessContext: AccessContext,
+		expectedPinRevision: string,
+	): Promise<Memory> {
+		if (accessContext.role !== "OWNER")
+			throw new ElizaError("Only the owner can manage document pins", {
+				code: "DOCUMENT_PIN_FORBIDDEN",
+			});
+		const validated = validateDocumentPinTargets(targets);
+		const rooms = await this.runtime.adapter.getRoomsByIds(validated.roomIds);
+		if (
+			rooms.length !== validated.roomIds.length ||
+			rooms.some((room) => room.agentId !== this.runtime.agentId)
+		)
+			throw new ElizaError("A selected chat is not available to this agent", {
+				code: "DOCUMENT_PIN_ROOM_INVALID",
+			});
+		const document = await this.getDocumentByIdWithAccessContext(
+			documentId,
+			accessContext,
+		);
+		const snapshot = document && readDocumentMutationSnapshot(document);
+		if (!document || !snapshot)
+			throw new ElizaError("Document is unavailable", {
+				code: "DOCUMENT_PIN_NOT_FOUND",
+				context: { documentId },
+			});
+		if (
+			expectedPinRevision !==
+			(await this.documentAccessRevision(documentId, snapshot))
+		)
+			throw new ElizaError("Pins changed. Reload and review before saving", {
+				code: "DOCUMENT_PIN_CONFLICT",
+			});
+		const result = await this.runtime.adapter.compareAndSwapDocument({
+			agentId: this.runtime.agentId,
+			documentId,
+			requesterEntityId: accessContext.requesterEntityId,
+			requesterRole: "OWNER",
+			requesterRoomIds: [],
+			expected: snapshot,
+			replacement: {
+				...document,
+				metadata: {
+					...document.metadata,
+					type: MemoryType.DOCUMENT,
+					pinned: false,
+					pinTargets: {
+						agent: validated.agent,
+						roomIds: validated.roomIds,
+					},
+				},
+			},
+		});
+		if (result.status !== "updated")
+			throw new ElizaError("Pins changed before saving. Reload and review", {
+				code: "DOCUMENT_PIN_CONFLICT",
+				context: { documentId, status: result.status },
+			});
+		return result.document;
+	}
+
 	async setDocumentDirectGrantsWithAccessContext(
 		documentId: UUID,
 		directGrantEntityIds: UUID[],
 		accessContext: AccessContext,
+		expectedAccessRevision?: string,
 	): Promise<Memory> {
 		const grants = validateDocumentDirectGrantEntityIds(directGrantEntityIds);
 		const { snapshot, requestContext } =
@@ -612,6 +709,19 @@ export class DocumentService extends Service {
 				documentId,
 				accessContext,
 			);
+		if (
+			expectedAccessRevision !== undefined &&
+			expectedAccessRevision !==
+				(await this.documentAccessRevision(documentId, snapshot))
+		) {
+			throw new ElizaError(
+				"Document access changed. Reload and review the current audience before saving.",
+				{
+					code: "DOCUMENT_GRANT_MUTATION_CONFLICT",
+					context: { documentId },
+				},
+			);
+		}
 		const result = await this.runtime.adapter.updateDocumentDirectGrants({
 			...requestContext,
 			documentId,
@@ -641,6 +751,39 @@ export class DocumentService extends Service {
 			accessContext,
 		);
 		return snapshot.directGrantEntityIds ?? [];
+	}
+
+	/** Returns one authorized audience snapshot with its opaque review revision. */
+	async getDocumentDirectGrantStateWithAccessContext(
+		documentId: UUID,
+		accessContext: AccessContext,
+	): Promise<{ directGrantEntityIds: UUID[]; accessRevision: string }> {
+		const { snapshot } = await this.getDocumentDirectGrantManagementTarget(
+			documentId,
+			accessContext,
+		);
+		return {
+			directGrantEntityIds: snapshot.directGrantEntityIds ?? [],
+			accessRevision: await this.documentAccessRevision(documentId, snapshot),
+		};
+	}
+
+	private async documentAccessRevision(
+		documentId: UUID,
+		snapshot: DocumentMutationSnapshot,
+	): Promise<string> {
+		// Grant updates do not advance the content revision. Bind the complete
+		// authorization snapshot so a grant-only change also invalidates a review.
+		const bytes = new TextEncoder().encode(
+			JSON.stringify([
+				"document-access-review-v1",
+				this.runtime.agentId,
+				documentId,
+				snapshot,
+			]),
+		);
+		const digest = await crypto.subtle.digest("SHA-256", bytes);
+		return `dar1_${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 	}
 
 	private async getDocumentDirectGrantManagementTarget(
@@ -1020,7 +1163,87 @@ export class DocumentService extends Service {
 		};
 	}
 
-	/** Runs the DOCUMENTS provider's search and inventory reads on one snapshot. */
+	/** Rechecks each candidate against the complete destination audience and rejects changing snapshots. */
+	private async readConversationDocuments(
+		message: Memory,
+		loadCandidates: () => Promise<Memory[]>,
+		changedCode = "DOCUMENT_CONTEXT_CHANGED",
+	): Promise<Memory[]> {
+		const room = await this.runtime.getRoom(message.roomId);
+		if (!room || room.agentId !== this.runtime.agentId) return [];
+		const participants = await this.runtime.getParticipantsForRoom(
+			message.roomId,
+		);
+		if (!participants.includes(message.entityId)) return [];
+		const candidates = await loadCandidates();
+		const readers = participants.filter(
+			(entityId) => entityId !== this.runtime.agentId,
+		);
+		const visible: Memory[] = [];
+		for (const document of candidates) {
+			const documentId = document.id;
+			if (!documentId) continue;
+			const reads = await Promise.all(
+				readers.map((entityId) =>
+					this.getDocumentById(documentId, { ...message, entityId }),
+				),
+			);
+			if (reads.some((read) => read === null)) continue;
+			const snapshot = readDocumentMutationSnapshot(document);
+			if (
+				!snapshot ||
+				reads.some(
+					(read) =>
+						read !== null &&
+						(!documentMutationSnapshotMatches(read, snapshot) ||
+							read.content.text !== document.content.text),
+				)
+			) {
+				throw new ElizaError(
+					"Document changed while preparing the reply. Retry with current knowledge.",
+					{
+						code: changedCode,
+						context: { documentId },
+					},
+				);
+			}
+			visible.push(document);
+		}
+		const currentParticipants = await this.runtime.getParticipantsForRoom(
+			message.roomId,
+		);
+		if (
+			participants.length !== currentParticipants.length ||
+			participants.some((id) => !currentParticipants.includes(id))
+		) {
+			throw new ElizaError(
+				"Chat participants changed while preparing knowledge. Retry with the current audience.",
+				{
+					code: changedCode,
+					context: { roomId: message.roomId },
+				},
+			);
+		}
+		return visible;
+	}
+
+	/** Returns pins readable by every current human participant in the destination chat. */
+	async listConversationPins(message: Memory): Promise<Memory[]> {
+		return this.readConversationDocuments(
+			message,
+			async () => {
+				const documents = await this.listAllDocumentsWithRequester(() =>
+					resolveDocumentRequester(this.runtime, message),
+				);
+				return documents.filter((document) =>
+					isDocumentPinnedForRoom(document, message.roomId),
+				);
+			},
+			"DOCUMENT_PIN_CONTEXT_CHANGED",
+		);
+	}
+
+	/** Composes search and inventory only from documents readable by the whole destination audience. */
 	async composeProviderDocuments(message: Memory): Promise<{
 		relevantFragments: StoredDocument[];
 		documents: Memory[];
@@ -1030,17 +1253,55 @@ export class DocumentService extends Service {
 			this.runtime,
 			message,
 		);
-		const [relevantFragments, documents] = await Promise.all([
-			this.searchDocumentsWithRequester(
-				message,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				resolveRequester,
-			),
-			this.listAllDocumentsWithRequester(resolveRequester),
-		]);
+		let fragments: StoredDocument[] = [];
+		const documents = await this.readConversationDocuments(
+			message,
+			async () => {
+				const [search, inventory] = await Promise.all([
+					this.searchDocumentsWithRequester(
+						message,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						resolveRequester,
+					),
+					this.listAllDocumentsWithRequester(resolveRequester),
+				]);
+				fragments = search;
+				return inventory;
+			},
+		);
+		const visible = new Map<string, Memory>();
+		for (const document of documents) {
+			if (document.id) visible.set(document.id, document);
+		}
+		const relevantFragments = fragments.filter((fragment) => {
+			const parentId = fragment.metadata?.documentId;
+			const parent =
+				typeof parentId === "string" ? visible.get(parentId) : undefined;
+			if (!parent) return false;
+			const snapshot = readDocumentMutationSnapshot(parent);
+			const fragmentRevision = fragment.metadata?.documentRevision;
+			const parentAttempt =
+				parent.metadata && Reflect.get(parent.metadata, "revisionAttemptId");
+			if (
+				!snapshot ||
+				(fragmentRevision === undefined ? 0 : fragmentRevision) !==
+					snapshot.revision ||
+				(parentAttempt !== undefined &&
+					fragment.metadata?.revisionAttemptId !== parentAttempt)
+			) {
+				throw new ElizaError(
+					"Document search and audience review saw different revisions. Retry with current knowledge.",
+					{
+						code: "DOCUMENT_CONTEXT_CHANGED",
+						context: { documentId: parentId },
+					},
+				);
+			}
+			return true;
+		});
 		return {
 			relevantFragments,
 			documents,
@@ -1049,7 +1310,8 @@ export class DocumentService extends Service {
 					| DocumentMemoryMetadata
 					| undefined;
 				return (
-					metadata?.type === MemoryType.DOCUMENT && metadata.pinned === true
+					metadata?.type === MemoryType.DOCUMENT &&
+					isDocumentPinnedForRoom(document, message.roomId)
 				);
 			}),
 		};
@@ -1317,6 +1579,61 @@ export class DocumentService extends Service {
 		);
 	}
 
+	/** Validates the human author and room used for an explicitly chat-scoped ingestion. */
+	private async assertChatDocumentOrigin(
+		options: Pick<
+			AddDocumentOptions,
+			| "agentId"
+			| "worldId"
+			| "roomId"
+			| "entityId"
+			| "scope"
+			| "scopedToEntityId"
+			| "addedBy"
+		>,
+	): Promise<"OWNER" | "ADMIN" | "USER"> {
+		const room = await this.runtime.getRoom(options.roomId);
+		const participants = await this.runtime.getParticipantsForRoom(
+			options.roomId,
+		);
+		const author = options.addedBy ?? options.entityId;
+		if (
+			(options.agentId !== undefined &&
+				options.agentId !== this.runtime.agentId) ||
+			!room ||
+			room.agentId !== this.runtime.agentId ||
+			room.worldId !== options.worldId ||
+			author !== options.entityId ||
+			author === this.runtime.agentId ||
+			!participants.includes(author) ||
+			(options.scope !== undefined && options.scope !== "global") ||
+			options.scopedToEntityId !== undefined
+		) {
+			throw new ElizaError(
+				"Chat sharing requires the author's current chat and its participant audience",
+				{ code: "DOCUMENT_CHAT_SHARING_FORBIDDEN" },
+			);
+		}
+		const requester = await resolveDocumentRequester(this.runtime, {
+			agentId: this.runtime.agentId,
+			entityId: author,
+			roomId: options.roomId,
+			worldId: options.worldId,
+			content: { text: "" },
+		});
+		if (
+			requester.role !== "OWNER" &&
+			requester.role !== "ADMIN" &&
+			requester.role !== "USER"
+		) {
+			throw new ElizaError(
+				"This chat identity cannot create shared knowledge",
+				{ code: "DOCUMENT_CHAT_SHARING_FORBIDDEN" },
+			);
+		}
+		return requester.role;
+	}
+
 	async addDocument(options: AddDocumentOptions): Promise<{
 		clientDocumentId: string;
 		storedDocumentMemoryId: UUID;
@@ -1327,9 +1644,96 @@ export class DocumentService extends Service {
 		requireDocumentScopeUuid(options.roomId, "roomId");
 		requireDocumentScopeUuid(options.entityId, "entityId");
 
+		if (options.audience === "chat") {
+			const addedByRole = await this.assertChatDocumentOrigin(options);
+			if (
+				options.directGrantEntityIds?.length ||
+				options.metadata?.directGrantEntityIds !== undefined ||
+				options.metadata?.share !== undefined ||
+				(options.metadata?.scope !== undefined &&
+					options.metadata.scope !== "global") ||
+				options.metadata?.scopedToEntityId !== undefined ||
+				options.pinned === true ||
+				options.metadata?.pinned === true ||
+				options.metadata?.pinTargets !== undefined
+			) {
+				throw new ElizaError(
+					"Review additional readers separately from chat sharing",
+					{ code: "DOCUMENT_CHAT_SHARING_INVALID" },
+				);
+			}
+			options = {
+				...options,
+				scope: "global",
+				addedFrom: "chat",
+				addedBy: options.entityId,
+				addedByRole,
+			};
+		}
+
+		const binaryInput =
+			normalizeDocumentContentType(options.contentType) === "application/pdf" ||
+			options.originalFilename.toLowerCase().endsWith(".pdf") ||
+			isBinaryContentType(options.contentType, options.originalFilename);
+		if (
+			options.contentEncoding !== undefined &&
+			options.contentEncoding !== "utf8" &&
+			options.contentEncoding !== "base64"
+		)
+			throw new ElizaError("Use utf8 or base64 for document contentEncoding", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+		if (binaryInput && options.contentEncoding === "utf8")
+			throw new ElizaError("Binary documents require Base64 input", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+		if (!binaryInput && options.contentEncoding === "base64") {
+			const encoded = options.content.replace(/\s/g, "");
+			const bytes = Buffer.from(encoded, "base64");
+			if (
+				!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+					encoded,
+				) ||
+				bytes.toString("base64") !== encoded
+			)
+				throw new ElizaError(
+					"Encoded text must contain valid canonical Base64",
+					{ code: "DOCUMENT_BASE64_INVALID" },
+				);
+			try {
+				options = {
+					...options,
+					content: new TextDecoder("utf-8", {
+						fatal: true,
+						ignoreBOM: true,
+					}).decode(bytes),
+					contentEncoding: "utf8",
+				};
+			} catch (cause) {
+				// error-policy:J2 Encoded text with invalid UTF-8 is rejected before persistence.
+				throw new ElizaError("Encoded text is not valid UTF-8", {
+					code: "DOCUMENT_ENCODING_INVALID",
+					cause,
+				});
+			}
+		}
+		if (
+			!binaryInput &&
+			toWellFormedUnicode(options.content) !== options.content
+		)
+			throw new ElizaError("Document text contains invalid Unicode", {
+				code: "DOCUMENT_ENCODING_INVALID",
+			});
+
 		const contentBasedId = generateContentBasedId(options.content, agentId, {
+			literalText: !binaryInput,
 			includeFilename: options.originalFilename,
 			contentType: options.contentType,
+			...(options.audience === "chat"
+				? {
+						namespace: `chat:${options.roomId.toLowerCase()}:${options.entityId.toLowerCase()}`,
+					}
+				: {}),
 		}) as UUID;
 
 		logger.info(
@@ -1343,6 +1747,18 @@ export class DocumentService extends Service {
 				existingDocument.metadata?.type === MemoryType.CUSTOM)
 		) {
 			const snapshot = readDocumentMutationSnapshot(existingDocument);
+			if (
+				options.audience === "chat" &&
+				(!snapshot ||
+					snapshot.scope !== "global" ||
+					snapshot.roomId !== options.roomId ||
+					snapshot.directGrantEntityIds?.length)
+			) {
+				throw new ElizaError(
+					"This document's readers changed. Review its current sharing before uploading it again",
+					{ code: "DOCUMENT_CHAT_SHARING_CHANGED" },
+				);
+			}
 			if (!snapshot) {
 				const metadata = existingDocument.metadata as
 					| Record<string, unknown>
@@ -1428,6 +1844,7 @@ export class DocumentService extends Service {
 		roomId,
 		entityId,
 		scope,
+		audience,
 		scopedToEntityId,
 		addedBy,
 		addedByRole,
@@ -1506,49 +1923,8 @@ export class DocumentService extends Service {
 				);
 				documentContentToStore = content;
 			} else {
-				if (looksLikeBase64(content)) {
-					try {
-						const decodedBuffer = Buffer.from(content, "base64");
-						const decodedText = decodedBuffer.toString("utf8");
-
-						const invalidCharCount = (decodedText.match(/\ufffd/g) || [])
-							.length;
-						const textLength = decodedText.length;
-
-						if (invalidCharCount > 0 && invalidCharCount / textLength > 0.1) {
-							throw new Error(
-								"Decoded content contains too many invalid characters",
-							);
-						}
-
-						logger.debug(
-							`Successfully decoded base64 content for text file: ${originalFilename}`,
-						);
-						extractedText = decodedText;
-						documentContentToStore = decodedText;
-					} catch (e) {
-						// error-policy:J2 Preserve the decoding failure as the cause
-						// of a document-specific validation error.
-						logger.error(
-							{ error: e instanceof Error ? e : new Error(String(e)) },
-							`Failed to decode base64 for ${originalFilename}`,
-						);
-						throw new ElizaError(
-							`File ${originalFilename} appears to be corrupted or incorrectly encoded`,
-							{
-								code: "DOCUMENT_ENCODING_INVALID",
-								context: { originalFilename, contentType },
-								cause: e,
-							},
-						);
-					}
-				} else {
-					logger.debug(
-						`Treating content as plain text for file: ${originalFilename}`,
-					);
-					extractedText = content;
-					documentContentToStore = content;
-				}
+				extractedText = content;
+				documentContentToStore = content;
 			}
 
 			if (!extractedText || extractedText.trim() === "") {
@@ -1577,6 +1953,9 @@ export class DocumentService extends Service {
 			const ingestionAttemptId = this.runtime.createRunId();
 			const scopedMetadata = {
 				...metadata,
+				textBacked:
+					!isPdfFile &&
+					!isBinaryContentType(normalizedContentType, originalFilename),
 				scope: documentScope,
 				scopedToEntityId: scopedEntityId,
 				addedBy: addedBy ?? entityId,
@@ -1704,6 +2083,17 @@ export class DocumentService extends Service {
 					);
 				}
 
+				if (audience === "chat") {
+					await this.assertChatDocumentOrigin({
+						agentId,
+						roomId,
+						worldId,
+						entityId,
+						scope,
+						scopedToEntityId,
+						addedBy,
+					});
+				}
 				const completed = await this.runtime.adapter.compareAndSwapDocument({
 					...this.ingestionMutationContext(),
 					documentId: clientDocumentId,
@@ -2553,7 +2943,7 @@ export class DocumentService extends Service {
 				const documentId = generateContentBasedId(
 					trimmedItem,
 					this.runtime.agentId,
-					{ includeFilename: filename },
+					{ includeFilename: filename, literalText: true },
 				) as UUID;
 
 				if (await this.checkExistingDocument(documentId)) {

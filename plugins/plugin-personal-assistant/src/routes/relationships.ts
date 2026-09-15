@@ -35,11 +35,8 @@ function makeStore(ctx: LifeOpsRouteContext): RelationshipStore | null {
     ctx.error(ctx.res, "Knowledge graph service is not available", 503);
     return null;
   }
-  return knowledgeGraph.getRelationshipStore(
-    ctx.state.adminEntityId
-      ? String(ctx.state.adminEntityId)
-      : defaultAgentId(ctx.state.runtime),
-  );
+  // Edges share the agent partition of their entities and household consumers.
+  return knowledgeGraph.getRelationshipStore(defaultAgentId(ctx.state.runtime));
 }
 
 function parseRelationshipFilter(url: URL): RelationshipFilter {

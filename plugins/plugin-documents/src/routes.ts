@@ -140,6 +140,7 @@ function parseKnowledgeFacet(
     : undefined;
 }
 type DocumentUploadBody = {
+  audience?: unknown;
   content: string;
   filename: string;
   contentType?: unknown;
@@ -996,6 +997,88 @@ export async function handleDocumentsRoutes(
     return true;
   }
 
+  const docPinsMatch = /^\/api\/documents\/([^/]+)\/pins$/.exec(pathname);
+  if ((method === "GET" || method === "PATCH") && docPinsMatch) {
+    if (accessContext.role !== "OWNER") {
+      error(res, "Only the owner can manage document pins", 403);
+      return true;
+    }
+    const id = decodeMatchedPathComponent(ctx, docPinsMatch[1], "document id");
+    if (!id) return true;
+    if (!isUuidValue(id)) {
+      error(res, "document id must be a valid UUID");
+      return true;
+    }
+    try {
+      if (method === "GET") {
+        if (!documentsService.getDocumentPinsWithAccessContext) {
+          error(res, "Document pin authority is unavailable", 503);
+          return true;
+        }
+        const state = await documentsService.getDocumentPinsWithAccessContext(
+          id as UUID,
+          accessContext,
+        );
+        json(res, { documentId: id, ...state });
+      } else {
+        if (!documentsService.setDocumentPinsWithAccessContext) {
+          error(res, "Document pin authority is unavailable", 503);
+          return true;
+        }
+        const body = await readJsonBody<{
+          agent?: unknown;
+          roomIds?: unknown;
+          expectedPinRevision?: unknown;
+        }>(req, res, { maxBytes: 128 * 1024 });
+        if (!body) return true;
+        if (
+          typeof body.agent !== "boolean" ||
+          !Array.isArray(body.roomIds) ||
+          typeof body.expectedPinRevision !== "string" ||
+          !/^dar1_[a-f0-9]{64}$/.test(body.expectedPinRevision)
+        ) {
+          error(
+            res,
+            "Provide an agent pin, chat identifiers and the reviewed pin revision",
+            400,
+          );
+          return true;
+        }
+        const roomIds: UUID[] = [];
+        for (const roomId of body.roomIds) {
+          if (!isUuidValue(roomId)) {
+            error(res, "Chat identifiers must be valid UUIDs", 400);
+            return true;
+          }
+          roomIds.push(roomId.trim() as UUID);
+        }
+        await documentsService.setDocumentPinsWithAccessContext(
+          id as UUID,
+          { agent: body.agent, roomIds },
+          accessContext,
+          body.expectedPinRevision,
+        );
+        json(res, { ok: true, documentId: id });
+      }
+    } catch (cause) {
+      // error-policy:J1 Translate typed pin failures at the authenticated HTTP boundary.
+      if (!(cause instanceof ElizaError)) throw cause;
+      const status =
+        cause.code === "DOCUMENT_PIN_NOT_FOUND"
+          ? 404
+          : cause.code === "DOCUMENT_PIN_FORBIDDEN"
+            ? 403
+            : cause.code === "DOCUMENT_PIN_CONFLICT"
+              ? 409
+              : cause.code === "DOCUMENT_PIN_ROOM_INVALID" ||
+                  cause.code === "DOCUMENT_PIN_TARGETS_INVALID"
+                ? 400
+                : 500;
+      error(res, cause.message, status);
+    }
+    return true;
+  }
+
   const docIdMatch = /^\/api\/documents\/([^/]+)$/.exec(pathname);
   const docAccessMatch = /^\/api\/documents\/([^/]+)\/access$/.exec(pathname);
   if (method === "GET" && docAccessMatch) {
@@ -1009,19 +1092,19 @@ export async function handleDocumentsRoutes(
       error(res, "document id must be a valid UUID");
       return true;
     }
-    if (!documentsService.getDocumentDirectGrantsWithAccessContext) {
+    if (!documentsService.getDocumentDirectGrantStateWithAccessContext) {
       error(res, "Canonical document grant authority is unavailable", 503);
       return true;
     }
     try {
-      const directGrantEntityIds =
-        await documentsService.getDocumentDirectGrantsWithAccessContext(
+      const accessState =
+        await documentsService.getDocumentDirectGrantStateWithAccessContext(
           decodedDocumentId.trim() as UUID,
           accessContext,
         );
       json(res, {
         documentId: decodedDocumentId.trim(),
-        directGrantEntityIds,
+        ...accessState,
       });
     } catch (cause) {
       // error-policy:J1 The HTTP boundary translates typed ACL failures without exposing storage details.
@@ -1046,14 +1129,24 @@ export async function handleDocumentsRoutes(
       error(res, "Canonical document grant authority is unavailable", 503);
       return true;
     }
-    const body = await readJsonBody<{ directGrantEntityIds?: unknown }>(
-      req,
-      res,
-      {
-        maxBytes: 128 * 1024,
-      },
-    );
+    const body = await readJsonBody<{
+      directGrantEntityIds?: unknown;
+      expectedAccessRevision?: unknown;
+    }>(req, res, {
+      maxBytes: 128 * 1024,
+    });
     if (!body) return true;
+    if (
+      typeof body.expectedAccessRevision !== "string" ||
+      !/^dar1_[a-f0-9]{64}$/.test(body.expectedAccessRevision)
+    ) {
+      error(
+        res,
+        "Reload document access and provide its reviewed expectedAccessRevision",
+        400,
+      );
+      return true;
+    }
     if (!Array.isArray(body.directGrantEntityIds)) {
       error(res, "directGrantEntityIds must be an array of UUIDs");
       return true;
@@ -1072,6 +1165,7 @@ export async function handleDocumentsRoutes(
           decodedDocumentId.trim() as UUID,
           requestedGrants,
           accessContext,
+          body.expectedAccessRevision,
         );
       // `metadata` is the MemoryMetadata union; only DocumentMetadata carries
       // the grants, so narrow with `in` before reading.
@@ -1248,6 +1342,45 @@ export async function handleDocumentsRoutes(
     fragmentCount: number;
     warnings?: string[];
   }> {
+    const metadata = asRecord(document.metadata);
+    const requestedAddedFrom = document.addedFrom ?? metadata?.addedFrom;
+    if (document.audience !== undefined && document.audience !== "chat") {
+      throw new ElizaError("Unsupported document audience", {
+        code: "DOCUMENT_CHAT_SHARING_INVALID",
+      });
+    }
+    const chatAudience =
+      document.audience === "chat" ||
+      (requestedAddedFrom === "chat" &&
+        document.scope === undefined &&
+        metadata?.scope === undefined &&
+        document.scopedToEntityId === undefined &&
+        metadata?.scopedToEntityId === undefined);
+    if (chatAudience) {
+      if (
+        (document.scope !== undefined && document.scope !== "global") ||
+        (metadata?.scope !== undefined && metadata.scope !== "global") ||
+        document.scopedToEntityId !== undefined ||
+        metadata?.scopedToEntityId !== undefined
+      ) {
+        throw new ElizaError(
+          "Choose either chat sharing or an explicit private scope",
+          { code: "DOCUMENT_CHAT_SHARING_INVALID" },
+        );
+      }
+      if (
+        !runtime ||
+        !["OWNER", "ADMIN", "USER"].includes(actor.role) ||
+        !(await runtime.getParticipantsForRoom(location.roomId)).includes(
+          actor.entityId,
+        )
+      ) {
+        throw new ElizaError(
+          "Chat sharing requires a current authorized participant",
+          { code: "DOCUMENT_CHAT_SHARING_FORBIDDEN" },
+        );
+      }
+    }
     let content = document.content;
     // Capture the bytes exactly as uploaded before any content rewrite (e.g.
     // image → description text), so the linked original-bytes file is faithful.
@@ -1306,7 +1439,13 @@ export async function handleDocumentsRoutes(
       isTextBackedContentType(contentType) ||
       hasTextBackedFilename(document.filename);
 
-    const uploadFilters = filtersFromUploadBody(document, actor);
+    const uploadFilters = chatAudience
+      ? {
+          scope: "global" as const,
+          scopedToEntityId: undefined,
+          error: undefined,
+        }
+      : filtersFromUploadBody(document, actor);
     if (uploadFilters.error) {
       throw new Error(uploadFilters.error);
     }
@@ -1316,16 +1455,12 @@ export async function handleDocumentsRoutes(
       uploadFilters.scope === "user-private"
         ? (scopedToEntityId ?? actor.entityId)
         : actor.entityId;
-    const metadata = asRecord(document.metadata);
-    const requestedAddedFrom =
-      typeof document.addedFrom === "string" && document.addedFrom.trim()
-        ? document.addedFrom.trim()
-        : typeof metadata?.addedFrom === "string" && metadata.addedFrom.trim()
-          ? metadata.addedFrom.trim()
+    const addedFrom: DocumentAddedFrom =
+      requestedAddedFrom === "chat"
+        ? "chat"
+        : requestedAddedFrom === "import"
+          ? "import"
           : "upload";
-    const addedFrom = (
-      requestedAddedFrom === "import" ? "import" : "upload"
-    ) as DocumentAddedFrom;
     const source = addedFrom;
 
     // Persist the ORIGINAL uploaded bytes (content-addressed) and link them on
@@ -1365,6 +1500,7 @@ export async function handleDocumentsRoutes(
     }
 
     const result = await service.addDocument({
+      ...(chatAudience ? { audience: "chat" as const } : {}),
       agentId,
       worldId,
       roomId,
@@ -1450,6 +1586,22 @@ export async function handleDocumentsRoutes(
         location.value,
       );
     } catch (err) {
+      // error-policy:J1 Map canonical chat audience failures at the upload boundary.
+      if (
+        err instanceof ElizaError &&
+        err.code.startsWith("DOCUMENT_CHAT_SHARING_")
+      ) {
+        error(
+          res,
+          err.message,
+          err.code === "DOCUMENT_CHAT_SHARING_CHANGED"
+            ? 409
+            : err.code === "DOCUMENT_CHAT_SHARING_INVALID"
+              ? 400
+              : 403,
+        );
+        return true;
+      }
       const message = err instanceof Error ? err.message : String(err);
       error(
         res,

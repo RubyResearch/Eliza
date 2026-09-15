@@ -19,6 +19,7 @@ import {
   check,
   index,
   integer,
+  jsonb,
   pgSchema,
   primaryKey,
   text,
@@ -278,6 +279,55 @@ export const linkedCalendarEvents = calendarPgSchema.table(
   ],
 );
 
+export const linkedCalendarControl = calendarPgSchema.table(
+  "linked_calendar_control",
+  {
+    agentId: text("agent_id").primaryKey(),
+    revision: integer("revision").notNull().default(0),
+    paused: boolean("paused").notNull().default(true),
+    connectorAccountId: text("connector_account_id"),
+    providerCalendarId: text("provider_calendar_id"),
+    dispatchToken: text("dispatch_token"),
+    dispatchLinkId: text("dispatch_link_id"),
+  },
+  (t) => [
+    check("linked_calendar_control_revision_valid", sql`${t.revision} >= 0`),
+    check(
+      "linked_calendar_control_dispatch_valid",
+      sql`
+      (${t.dispatchToken} IS NULL AND ${t.dispatchLinkId} IS NULL) OR
+      (${t.dispatchToken} IS NOT NULL AND length(${t.dispatchToken}) > 0
+        AND ${t.dispatchLinkId} IS NOT NULL AND length(${t.dispatchLinkId}) > 0
+        AND ${t.connectorAccountId} IS NOT NULL)`,
+    ),
+    check(
+      "linked_calendar_control_destination_valid",
+      sql`
+      (${t.connectorAccountId} IS NULL AND ${t.providerCalendarId} IS NULL AND ${t.paused})
+      OR (${t.connectorAccountId} IS NOT NULL AND length(trim(${t.connectorAccountId})) > 0
+        AND ${t.providerCalendarId} IS NOT NULL AND length(trim(${t.providerCalendarId})) > 0)`,
+    ),
+  ],
+);
+
+export const linkedCalendarControlMutations = calendarPgSchema.table(
+  "linked_calendar_control_mutations",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id").notNull(),
+    operationKey: text("operation_key").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    snapshot: jsonb("snapshot").notNull(),
+    committedAt: text("committed_at").notNull(),
+  },
+  (t) => [
+    unique("linked_calendar_control_mutations_operation_unique").on(
+      t.agentId,
+      t.operationKey,
+    ),
+  ],
+);
+
 export const calendarSchema = {
   calendarEvents,
   calendarSyncStates,
@@ -286,4 +336,6 @@ export const calendarSchema = {
   calendarFeedPreferences,
   googleCalendarWatchChannels,
   linkedCalendarEvents,
+  linkedCalendarControl,
+  linkedCalendarControlMutations,
 };

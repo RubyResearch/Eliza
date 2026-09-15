@@ -45,8 +45,9 @@ vi.mock("@elizaos/shared/platform/native-library-policy", () => ({
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
 describe("Apple Calendar native change ABI", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+  let calendar: typeof import("./apple-calendar.js");
+
+  beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
     ffi.setGeneration(0);
@@ -54,7 +55,10 @@ describe("Apple Calendar native change ABI", () => {
       value: "darwin",
       configurable: true,
     });
-  });
+    // Load the cold module graph before measuring the listener lifecycle.
+    calendar = await import("./apple-calendar.js");
+    vi.useFakeTimers();
+  }, 120_000);
 
   afterEach(() => {
     vi.useRealTimers();
@@ -63,7 +67,6 @@ describe("Apple Calendar native change ABI", () => {
   });
 
   it("registers, delivers a generation change, and unsubscribes idempotently", async () => {
-    const calendar = await import("./apple-calendar.js");
     const listener = vi.fn();
     const subscription =
       await calendar.subscribeNativeAppleCalendarChanges(listener);
@@ -83,7 +86,6 @@ describe("Apple Calendar native change ABI", () => {
   }, 15_000);
 
   it("isolates a failing reentrant listener from the remaining subscribers", async () => {
-    const calendar = await import("./apple-calendar.js");
     let firstSubscription: { remove: () => Promise<void> } | null | undefined;
     const first = vi.fn(() => {
       void firstSubscription?.remove();

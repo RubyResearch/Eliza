@@ -28,6 +28,15 @@ vi.mock("react-dom/server", () => ({
 
 vi.mock("@elizaos/agent", async () => import("./stubs/agent.ts"));
 vi.mock("@elizaos/ui", async () => import("./stubs/ui.ts"));
+// jsdom has no layout observer. Radio behavior is exercised here; real geometry
+// and resize behavior are validated in Chromium, not by this inert shim.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class implements ResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  };
+}
 vi.mock(
   "@elizaos/plugin-google-workspace",
   async () => import("./stubs/plugin-google-workspace.ts"),

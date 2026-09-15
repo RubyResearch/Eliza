@@ -18,7 +18,7 @@ bun add @elizaos/plugin-pdf
 
 ## Configuration
 
-No environment variables or configuration required. Uses [`unpdf`](https://github.com/unjs/unpdf) for local, self-contained PDF processing.
+Native text and metadata extraction use [`unpdf`](https://github.com/unjs/unpdf) locally without provider configuration. Complete document extraction also requires a working `IMAGE_DESCRIPTION` model handler in the agent runtime. Configure that provider and its credentials before using agreement ingestion; a transcription outage rejects the complete result with `PDF_PAGE_TRANSCRIPTION_UNAVAILABLE`, retaining the failed page and underlying cause.
 
 ## Enabling the Plugin
 

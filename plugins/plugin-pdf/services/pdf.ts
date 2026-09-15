@@ -9,7 +9,7 @@
  */
 
 import type { IAgentRuntime } from "@elizaos/core";
-import { ModelType, Service, ServiceType } from "@elizaos/core";
+import { ElizaError, ModelType, Service, ServiceType } from "@elizaos/core";
 import { getDocumentProxy, getResolvedPDFJS, renderPageAsImage } from "unpdf";
 import type {
   PdfCompleteDocument,
@@ -278,24 +278,37 @@ export class PdfService extends Service {
           ocrText = this.cleanUpContent(await options.ocrPage({ pageNumber, pngBytes }));
           if (!ocrText) ocrText = null;
         }
-        const response = await this.runtime.useModel(ModelType.IMAGE_DESCRIPTION, {
-          imageUrl: rendered,
-          stream: false,
-          prompt: [
-            `Transcribe every visible word on PDF page ${pageNumber} exactly and in reading order.`,
-            "Preserve headings, labels, table cells, dates, handwriting, and meaningful layout relationships.",
-            "Do not summarize, omit repeated text, or infer text that is not visible.",
-            "Reconcile the rendered page against all parser and OCR evidence below; resolve disagreements from the image and explicitly note any unresolved ambiguity.",
-            "After the exact transcription, describe non-text visual information needed to understand the page.",
-            "If and only if the rendered page is completely blank, return exactly [BLANK PAGE].",
-            `Native flattened text evidence: ${JSON.stringify(nativeText)}`,
-            `Native positioned text evidence: ${JSON.stringify(nativePositionedText)}`,
-            `OCR evidence: ${JSON.stringify(ocrText)}`,
-            options.visionPrompt?.trim() ?? "",
-          ]
-            .filter(Boolean)
-            .join("\n"),
-        });
+        const response = await this.runtime
+          .useModel(ModelType.IMAGE_DESCRIPTION, {
+            imageUrl: rendered,
+            stream: false,
+            prompt: [
+              `Transcribe every visible word on PDF page ${pageNumber} exactly and in reading order.`,
+              "Preserve headings, labels, table cells, dates, handwriting, and meaningful layout relationships.",
+              "Do not summarize, omit repeated text, or infer text that is not visible.",
+              "Reconcile the rendered page against all parser and OCR evidence below; resolve disagreements from the image and explicitly note any unresolved ambiguity.",
+              "After the exact transcription, describe non-text visual information needed to understand the page.",
+              "If and only if the rendered page is completely blank, return exactly [BLANK PAGE].",
+              `Native flattened text evidence: ${JSON.stringify(nativeText)}`,
+              `Native positioned text evidence: ${JSON.stringify(nativePositionedText)}`,
+              `OCR evidence: ${JSON.stringify(ocrText)}`,
+              options.visionPrompt?.trim() ?? "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          })
+          .catch((cause) => {
+            // error-policy:J2 identify a failed transcription dependency without blaming the PDF.
+            throw new ElizaError(
+              "PDF page transcription is unavailable. Check the model service and retry the upload.",
+              {
+                code: "PDF_PAGE_TRANSCRIPTION_UNAVAILABLE",
+                context: { pageNumber, pageCount },
+                cause,
+                severity: "ephemeral",
+              }
+            );
+          });
         const visionText = response.description.trim();
         if (!visionText) {
           throw new Error("IMAGE_DESCRIPTION returned an empty page transcription");
@@ -330,7 +343,9 @@ export class PdfService extends Service {
         pages.push(result);
         await options.onPageComplete?.(result);
       } catch (error) {
-        // error-policy:J2 add page provenance and preserve the original cause.
+        // error-policy:J2 preserve typed dependency failures; add provenance to parser failures.
+        if (error instanceof ElizaError && error.code === "PDF_PAGE_TRANSCRIPTION_UNAVAILABLE")
+          throw error;
         throw new Error(
           `Complete PDF extraction failed on page ${pageNumber} of ${pageCount}: ${error instanceof Error ? error.message : String(error)}`,
           { cause: error }

@@ -36,6 +36,16 @@ export function reviewAccountTransition(
     throw new Error(
       "Verify the email address of both accounts before switching.",
     );
+  if (
+    previousEmail.trim().toLowerCase() ===
+      replacementEmail.trim().toLowerCase() ||
+    (previous.grant.connectorAccountId &&
+      previous.grant.connectorAccountId ===
+        replacement.grant.connectorAccountId)
+  )
+    throw new Error(
+      "Both connections belong to the same Google account. Choose a different replacement account.",
+    );
   const missing = previous.grantedCapabilities.filter(
     (capability) => !replacement.grantedCapabilities.includes(capability),
   );

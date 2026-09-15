@@ -53,9 +53,9 @@ const DOCUMENT_UPLOAD_SCOPE_OPTIONS: ReadonlyArray<{
   {
     value: "global",
     labelKey: "documentsview.ScopeGlobal",
-    defaultLabel: "Global",
+    defaultLabel: "Chat participants",
     titleKey: "documentsview.ScopeGlobalDescription",
-    defaultTitle: "Visible to everyone who can use this agent.",
+    defaultTitle: "Shared within its chat. Not public on the internet.",
     Icon: Globe2,
   },
   {

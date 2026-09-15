@@ -27,6 +27,8 @@ Repo-wide conventions (logger-only, ESM, naming, architecture rules, git workflo
 | PATCH  | `/api/documents/:id` | Update document text content (re-fragments) |
 | PATCH  | `/api/documents/:id/access` | Replace bounded direct entity read grants (OWNER or room ADMIN) |
 | GET    | `/api/documents/:id/access` | Read direct grants through the same management authority |
+| GET    | `/api/documents/:id/pins` | Read agent and chat pin placements with their review revision (OWNER) |
+| PATCH  | `/api/documents/:id/pins` | Save reviewed agent and chat pin placements without changing read access (OWNER) |
 | DELETE | `/api/documents/:id` | Delete document and all its fragments |
 
 **Actions:** none registered here. `OWNER_DOCUMENTS` is registered by
@@ -78,7 +80,7 @@ bun run --cwd plugins/plugin-documents test                # vitest run (unit te
 bun run --cwd plugins/plugin-documents test:e2e:manual     # vitest run live e2e tests
 ```
 
-No `lint` or `typecheck` scripts — use repo-root commands for those.
+No package `lint` script is defined; use the repository lint gate.
 
 ## Config / env vars
 
@@ -93,8 +95,9 @@ provided by the host route boundary. Missing context returns `401`; the plugin
 never treats an absent caller as owner. Request headers alone are not an
 identity or authorization authority. Preserve the caller's exact role through
 storage authorization: ADMIN is not OWNER, GUEST is not USER, and an unresolved
-role is rejected. Guests may read only global documents in their current rooms
-and may not mutate documents.
+role is rejected. Guests may read global documents in their current rooms and
+non-agent-private documents explicitly granted to their resolved entity identity.
+Direct grants never confer document mutation or sharing authority.
 
 List, facet, search, parent, and fragment REST reads must call the
 access-context-aware `DocumentService` methods. Do not use
@@ -130,7 +133,7 @@ must never become a competing read authority or post-filter raw storage rows.
 ## Conventions / gotchas
 
 - **No service ownership.** This plugin does not define `DocumentsServiceLike` — it imports it from `@elizaos/agent/api/documents-service-loader`. If the service times out during loading, the route returns 503 with a `Retry-After: 5` header; if the service is simply absent (e.g. agent not running), it returns 503 without that header.
-- **Scope defaults.** When no scope is specified on upload, the default is `user-private` for USER/ADMIN, `agent-private` for AGENT, and `global` for OWNER/RUNTIME. GUEST and unresolved callers cannot upload.
+- **Scope defaults.** Uploads with `addedFrom: "chat"` and no explicit scope use the current chat participant audience; `audience: "chat"` requests this explicitly. The canonical service validates the human author and current room membership. Explicit private uploads remain private, and contradictory chat/private options are rejected. Other uploads default to `user-private` for USER/ADMIN, `agent-private` for AGENT, and `global` for OWNER/RUNTIME. GUEST and unresolved callers cannot upload. Chat sharing neither publishes to the internet nor grants mutation authority.
 - **Bundled and character documents** are read-only: `getDocumentEditability` and `getDocumentDeleteability` enforce this in the presenter, and the PATCH/DELETE handlers check these flags before proceeding.
 - **Image upload.** Images are stored as text. If `includeImageDescriptions: true` is passed in the metadata, the handler calls `runtime.useModel(ModelType.IMAGE_DESCRIPTION, ...)` to generate a description. If the model call fails, a warning is included in the response and the stored text explicitly says that image description was unavailable.
 - **YouTube URLs.** `POST /api/documents/url` detects YouTube URLs via `isYouTubeUrl()` from `@elizaos/core` and sets `source: "youtube"` in metadata; the transcript is fetched by `fetchDocumentFromUrl()`.
@@ -146,3 +149,9 @@ the package's relevant build, typecheck, lint, and test commands, then exercise
 the real integration boundary changed by the work. Inspect the produced domain
 artifacts and failure behavior; do not substitute mocked success for the system
 under test.
+
+## Document pins
+
+The document detail view offers separate reader and pin editors. Pin placement is owner-managed and independent of read permissions: an agent pin applies across its chats, while individual chat pins persist independently. Every save requires the opaque revision returned by the pin read; stale writes return 409 and require a new read and review. The editor preserves saved chat identities missing from the current conversation directory and displays an error if either inventory cannot be loaded.
+
+Core owns persistence and response-context admission. Its automatic pin provider includes a document only when every current chat participant can read it; participant or document changes during preparation require retry. Pinning does not publish a document on the internet or change its readers.

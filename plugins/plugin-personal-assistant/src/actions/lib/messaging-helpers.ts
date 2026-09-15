@@ -10,7 +10,12 @@ import {
   readTwilioCredentialsFromEnv,
   sendTwilioSms,
 } from "@elizaos/plugin-phone/twilio";
+import {
+  assertCalendarCardSender,
+  type CalendarCardSenderBinding,
+} from "../../lifeops/calendar-card-sender.js";
 import type { LifeOpsService } from "../../lifeops/service.js";
+import { ApprovalAmbiguousDeliveryError } from "./approval-delivery-errors.js";
 
 export type CrossChannelSendChannel =
   | "telegram"
@@ -89,52 +94,98 @@ export async function prepareCrossChannelSend(args: {
   channel: CrossChannelSendChannel;
   target: string;
   body: string;
+  sender?: CalendarCardSenderBinding;
 }): Promise<PreparedCrossChannelSend> {
   const target = requireText(args.target, "target");
   const body = requireText(args.body, "body");
+  if (args.sender) {
+    if (args.sender.channel !== args.channel)
+      throw new ApprovalConnectorPreflightError(
+        "CALENDAR_CARD_SENDER_MISMATCH",
+        "The approved sender belongs to a different channel.",
+      );
+    await assertCalendarCardSender(args.service, args.sender);
+  }
+  const recheckSender = async () => {
+    if (!args.sender) return;
+    try {
+      await assertCalendarCardSender(args.service, args.sender);
+    } catch (error) {
+      // error-policy:J1 no provider call started; a changed sender requires fresh review.
+      throw new ApprovalKnownNonDeliveryError(
+        "CALENDAR_CARD_SENDER_CHANGED",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
 
   switch (args.channel) {
     case "telegram": {
-      const status = await args.service.getTelegramConnectorStatus("owner");
+      const status = await args.service.getTelegramConnectorStatus(
+        args.sender?.side ?? "owner",
+      );
       requireConnected(status, "telegram", "telegram.send");
       return {
         provider: "telegram",
         supportsProviderIdempotency: false,
         dispatch: async () => {
+          await recheckSender();
           const sent = await args.service.sendTelegramMessage({
-            side: "owner",
+            side: args.sender?.side ?? "owner",
+            expectedIdentityId: args.sender?.identityId,
             target,
             message: body,
           });
-          return {
+          const receipt = {
             provider: "telegram",
             messageId: sent.messageId,
+            receipt: sent.receipt,
           };
+          if (!sent.messageId) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "Telegram returned no provider message identifier; reconcile before sending again.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }
     case "discord": {
-      const status = await args.service.getDiscordConnectorStatus("owner");
+      const status = await args.service.getDiscordConnectorStatus(
+        args.sender?.side ?? "owner",
+      );
       requireConnected(status, "discord", "discord.send");
       return {
         provider: "discord",
         supportsProviderIdempotency: false,
         dispatch: async () => {
+          await recheckSender();
           const sent = await args.service.sendDiscordMessage({
-            side: "owner",
+            side: args.sender?.side ?? "owner",
+            expectedIdentityId: args.sender?.identityId,
             channelId: target,
             text: body,
             allowTransportFallback: false,
           });
-          return {
+          const receipt = {
             provider: sent.provider,
-            // The result is a union over channel- and user-addressed sends.
-            // This call addressed a channel, so read the id the transport
-            // actually used and fall back to the one we asked for rather than
-            // asserting the variant.
-            channelId: "channelId" in sent ? sent.channelId : target,
+            channelId: "channelId" in sent ? sent.channelId : null,
             deliveryStatus: sent.deliveryStatus,
+            messageId: sent.providerMessageId,
+            receipt: sent.receipt,
           };
+          if (
+            sent.deliveryStatus !== "sent" ||
+            !sent.providerMessageId ||
+            receipt.channelId !== target
+          ) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "Discord delivery is not confirmed for the approved destination. Reconcile the provider evidence before retrying.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }
@@ -145,15 +196,32 @@ export async function prepareCrossChannelSend(args: {
         provider: "imessage",
         supportsProviderIdempotency: false,
         dispatch: async () => {
+          await recheckSender();
           const sent = await args.service.sendIMessage({
             to: target,
             text: body,
             transport: "native",
+            ...(args.sender
+              ? {
+                  expectedAccount: {
+                    identityId: args.sender.identityId,
+                    transport: args.sender.transport,
+                  },
+                }
+              : {}),
           });
-          return {
+          const receipt = {
             provider: "imessage",
             messageId: sent.messageId ?? null,
+            ...(sent.messageIds ? { messageIds: sent.messageIds } : {}),
           };
+          if (!sent.messageId?.trim()) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "iMessage returned no provider message identifier; reconcile before sending again.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }

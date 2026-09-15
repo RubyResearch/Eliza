@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type AgentNotification,
+  ElizaError,
   type IAgentRuntime,
   logger,
   type NotificationInput,
@@ -16,6 +17,11 @@ import {
   toWellFormedUnicode,
   truncateWellFormed,
 } from "@elizaos/core";
+import {
+  ApprovalDispatchControlStore,
+  approvalAccountAdmissionSql,
+  approvalDispatchAdmissionCte,
+} from "./dispatch-control.ts";
 import {
   executeRawSql,
   executeRawSqlTx,
@@ -57,7 +63,7 @@ const ALLOWED_TRANSITIONS: Readonly<
   pending: ["approved", "rejected", "expired"],
   approved: ["executing", "rejected", "expired"],
   executing: ["done", "retryable", "reconciliation_required"],
-  retryable: ["executing", "rejected"],
+  retryable: ["executing", "rejected", "expired"],
   reconciliation_required: ["done", "retryable"],
   done: [],
   rejected: [],
@@ -1057,15 +1063,15 @@ export class PgApprovalQueue implements ApprovalQueue {
     const now = new Date();
     const idempotencyKey = input.idempotencyKey?.trim() || null;
     const initialState = confirmedResolution ? "approved" : "pending";
-    const sql = `INSERT INTO approval_requests (
+    const sql = `${approvalDispatchAdmissionCte(this.agentId, input.subjectUserId)} INSERT INTO approval_requests (
         id, state, requested_by, subject_user_id, action, payload, channel, reason,
         idempotency_key, expires_at, resolved_at, resolved_by, resolution_reason,
         execution_attempt_id, execution_provider, provider_idempotency_key,
         execution_claimed_at, dispatch_started_at, provider_receipt,
         execution_error, reconciliation_resolved_at, reconciliation_resolved_by,
         reconciliation_reason,
-        agent_id, created_at, updated_at
-      ) VALUES (
+        agent_id, created_at, updated_at, admission_revision
+      ) SELECT
         ${sqlText(id)},
         ${sqlText(initialState)},
         ${sqlText(input.requestedBy)},
@@ -1082,8 +1088,9 @@ export class PgApprovalQueue implements ApprovalQueue {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         ${sqlText(this.agentId)},
         ${timestampLiteral(now)},
-        ${timestampLiteral(now)}
-      )
+        ${timestampLiteral(now)}, revision
+      FROM approval_admission
+      WHERE ${approvalAccountAdmissionSql(`${sqlJson(payload)}::jsonb`, "revision")}
       ${
         idempotencyKey
           ? "ON CONFLICT (agent_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING"
@@ -1095,12 +1102,20 @@ export class PgApprovalQueue implements ApprovalQueue {
       : await executeRawSql(this.runtime, sql);
     if (rows.length === 0) {
       if (!idempotencyKey) {
-        throw new Error("[ApprovalQueue] enqueue returned no rows");
+        throw new ElizaError(
+          "Select and review an active sender account before creating this approval",
+          {
+            code: "APPROVAL_ACCOUNT_REVIEW_REQUIRED",
+          },
+        );
       }
       const existing = await this.fetchByIdempotencyKey(idempotencyKey, tx);
       if (!existing) {
-        throw new Error(
-          "[ApprovalQueue] idempotent enqueue conflict returned no existing row",
+        throw new ElizaError(
+          "Select and review an active sender account before creating this approval",
+          {
+            code: "APPROVAL_ACCOUNT_REVIEW_REQUIRED",
+          },
         );
       }
       if (!sameIdempotentApproval(existing, input, payload)) {
@@ -1213,7 +1228,8 @@ export class PgApprovalQueue implements ApprovalQueue {
     assertTransition(claim.requestId, current.state, "executing");
     const attemptId = randomUUID();
     const now = new Date();
-    const sql = `UPDATE approval_requests
+    const sql = `${approvalDispatchAdmissionCte(this.agentId, claim.subjectUserId, claim.requestId)}
+      UPDATE approval_requests
       SET state = ${sqlText("executing")},
           execution_attempt_id = ${sqlText(attemptId)},
           execution_provider = ${sqlText(claim.provider)},
@@ -1230,9 +1246,35 @@ export class PgApprovalQueue implements ApprovalQueue {
         AND agent_id = ${sqlText(this.agentId)}
         AND subject_user_id = ${sqlText(claim.subjectUserId)}
         AND state = ${sqlText(current.state)}
+        AND EXISTS (SELECT 1 FROM approval_permission WHERE NOT paused AND permitted)
       RETURNING ${SELECT_COLUMNS}`;
     const rows = await executeRawSql(this.runtime, sql);
     if (rows.length === 0) {
+      const control = await new ApprovalDispatchControlStore(
+        this.runtime,
+        this.agentId,
+      ).read(claim.subjectUserId);
+      if (control.paused) {
+        throw new ElizaError(
+          "Dispatch is paused for account handoff; finish or cancel the handoff before sending",
+          {
+            code: "APPROVAL_DISPATCH_PAUSED",
+            context: {
+              subjectUserId: claim.subjectUserId,
+              operationId: control.operationId,
+            },
+          },
+        );
+      }
+      const permission = await executeRawSql(
+        this.runtime,
+        `${approvalDispatchAdmissionCte(this.agentId, claim.subjectUserId, claim.requestId)} SELECT permitted FROM approval_permission`,
+      );
+      if (permission[0]?.permitted === false)
+        throw new ElizaError(
+          "This approval predates account handoff. Review a new approval with an explicit sender account.",
+          { code: "APPROVAL_ACCOUNT_REVIEW_REQUIRED" },
+        );
       return this.throwLostRace(
         claim.requestId,
         claim.subjectUserId,

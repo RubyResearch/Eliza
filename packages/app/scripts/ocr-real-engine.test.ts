@@ -139,7 +139,7 @@ describe("real OCR blank-vs-unreadable classification", () => {
     expect(retried.text).toMatch(/Desert Dusk/i);
   }, 90_000);
 
-  it("keeps unreadable launcher content distinct from blank pixels", async () => {
+  it("rejects a launcher captured in place of the expected view without calling populated pixels blank", async () => {
     const auditDir = join(dir, "launcher-audit");
     const viewportDir = join(auditDir, "mobile-portrait");
     mkdirSync(viewportDir, { recursive: true });
@@ -183,8 +183,9 @@ describe("real OCR blank-vs-unreadable classification", () => {
       true,
     );
     expect(entry.pixelBlank).toBe(false);
-    // Visible pixels do not satisfy the semantic gate when no OCR pass can
-    // recover the required launcher labels. Keep that failure distinct from blank.
+    // The historical capture contains launcher icons rather than the requested
+    // view. A successful fallback must retain that semantic mismatch, not turn
+    // a nonblank but wrong screen into accepted product evidence.
     expect(entry.ocrVerdict).toBe("broken");
     expect(entry.regression).toBe(true);
     expect(entry.reasons.join(" ")).toMatch(/missing expected content/i);

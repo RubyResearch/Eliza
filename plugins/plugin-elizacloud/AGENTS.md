@@ -240,7 +240,7 @@ All settings are optional except `ELIZAOS_CLOUD_API_KEY` (required for any authe
 | Var | Default |
 |---|---|
 | `ELIZAOS_CLOUD_IMAGE_DESCRIPTION_MODEL` | `gpt-5.4-mini` |
-| `ELIZAOS_CLOUD_IMAGE_DESCRIPTION_MAX_TOKENS` | `8192` |
+| `ELIZAOS_CLOUD_IMAGE_DESCRIPTION_MAX_TOKENS` | unset; only an explicit positive integer sends a provider output cap |
 | `ELIZAOS_CLOUD_IMAGE_GENERATION_MODEL` | `google/nano-banana-2/text-to-image` |
 | `ELIZAOS_CLOUD_TTS_MODEL` | `gpt-5-mini-tts` |
 | `ELIZAOS_CLOUD_TTS_TIMEOUT_MS` | `60000`; `0` disables the deadline |

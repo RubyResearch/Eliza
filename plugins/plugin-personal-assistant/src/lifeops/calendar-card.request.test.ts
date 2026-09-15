@@ -35,6 +35,7 @@ describe("parseCalendarCardRequest", () => {
     expect(parsed).toEqual({
       ok: true,
       request: {
+        channel: "imessage",
         date: "2026-03-02",
         timeZone: "America/New_York",
         privacyMode: "full",
@@ -56,6 +57,10 @@ describe("parseCalendarCardRequest", () => {
   });
 
   it.each([
+    [
+      { ...valid, channel: "email" },
+      "channel must be imessage, telegram, or discord",
+    ],
     [null, "Calendar card request must be an object"],
     [[], "Calendar card request must be an object"],
     [

@@ -30,6 +30,7 @@ import {
   type MessageConnectorUserContext,
   Role,
   type Room,
+  type SendHandlerResult,
   Service,
   type TargetInfo,
   type ThreadHandle,
@@ -396,6 +397,7 @@ export class TelegramService extends Service {
   private botToken: string | null;
   private defaultAccountId = DEFAULT_ACCOUNT_ID;
   private accountStates: Map<string, TelegramAccountRuntime> = new Map();
+  private stopping = false;
 
   /**
    * Constructor for TelegramService class.
@@ -802,6 +804,9 @@ export class TelegramService extends Service {
    * @returns A Promise that resolves once the bot has stopped.
    */
   async stop(): Promise<void> {
+    // A released token is available to a replacement, not to this service's
+    // pending failure handler or previously scheduled retry.
+    this.stopping = true;
     const states =
       this.accountStates instanceof Map
         ? Array.from(this.accountStates.values())
@@ -1080,6 +1085,7 @@ export class TelegramService extends Service {
     const stableRunMs = 60_000;
 
     const ownsToken = (): boolean => {
+      if (this.stopping) return false;
       if (!botToken) {
         return true;
       }
@@ -3280,50 +3286,24 @@ export class TelegramService extends Service {
     runtime: IAgentRuntime,
     target: TargetInfo,
     content: Content,
-  ): Promise<void> {
+  ): SendHandlerResult {
     const { accountId, messageManager, chatId, threadId } =
       await this.resolveTelegramSendTarget(runtime, target);
 
-    try {
-      // Use existing MessageManager method, pass chatId and content
-      // Assuming sendMessage handles splitting, markdown, etc.
-      await messageManager.sendMessage(
-        chatId,
-        {
-          ...content,
-          metadata: {
-            ...((content.metadata && typeof content.metadata === "object"
-              ? content.metadata
-              : {}) as Record<string, unknown>),
-            accountId,
-          },
-        },
-        undefined,
-        threadId,
-      );
-      logger.info(
-        {
-          src: "plugin:telegram",
-          agentId: runtime.agentId,
+    return messageManager.sendMessageWithReceipt(
+      chatId,
+      {
+        ...content,
+        metadata: {
+          ...((content.metadata && typeof content.metadata === "object"
+            ? content.metadata
+            : {}) as Record<string, unknown>),
           accountId,
-          chatId,
-          threadId,
         },
-        "Message sent",
-      );
-    } catch (error) {
-      logger.error(
-        {
-          src: "plugin:telegram",
-          agentId: runtime.agentId,
-          accountId,
-          chatId,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Error sending message",
-      );
-      throw error;
-    }
+      },
+      undefined,
+      threadId,
+    );
   }
 
   /**

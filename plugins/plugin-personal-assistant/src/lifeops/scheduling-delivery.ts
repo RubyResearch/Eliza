@@ -5,6 +5,7 @@
  * ambiguous sends non-retriable until an operator reconciles the provider.
  */
 import { randomUUID } from "node:crypto";
+import { approvalDispatchAdmissionCte } from "@elizaos/agent";
 import { ElizaError, type IAgentRuntime } from "@elizaos/core";
 import type {
   DispatchReceipt,
@@ -64,7 +65,7 @@ export type BeginSchedulingDeliveryResult =
     }
   | {
       readonly kind: "blocked";
-      readonly reason: "in_flight" | "ambiguous";
+      readonly reason: "in_flight" | "ambiguous" | "paused";
       readonly attempt: SchedulingDeliveryAttempt;
     }
   | {
@@ -328,6 +329,23 @@ export class SchedulingDeliveryStore {
     correlation: SchedulingApprovalCorrelation,
   ): Promise<BeginSchedulingDeliveryResult> {
     return withRequiredTransaction(this.runtime, async (tx) => {
+      // Share the canonical admission row lock with pause/resume and other
+      // approval claims, holding it until this claim transaction commits.
+      const admissionRows = await executeRawSqlTx(
+        tx,
+        `${approvalDispatchAdmissionCte(this.runtime.agentId, request.subjectUserId, request.id)} SELECT paused, permitted FROM approval_permission`,
+      );
+      const admission = admissionRows[0];
+      if (
+        !admission ||
+        typeof admission.paused !== "boolean" ||
+        typeof admission.permitted !== "boolean"
+      )
+        throw deliveryInvariant(
+          "SCHEDULING_DELIVERY_ADMISSION_INVALID",
+          "dispatch admission returned no valid control",
+          { approvalRequestId: request.id },
+        );
       let attempt = await this.byApprovalRequestIdTx(tx, request.id);
       if (!attempt) {
         attempt = await prepareSchedulingDelivery(tx, {
@@ -369,6 +387,23 @@ export class SchedulingDeliveryStore {
         };
       }
 
+      if (admission.paused)
+        return { kind: "blocked", reason: "paused", attempt };
+
+      if (!admission.permitted) {
+        const invalidated = await this.invalidateTx(tx, request, attempt, {
+          error: "SCHEDULING_APPROVAL_STALE",
+          detail:
+            "Review a new approval for the current sender account after handoff",
+        });
+        return {
+          kind: "invalidated",
+          error: "SCHEDULING_APPROVAL_STALE",
+          detail: "The sender approval predates account handoff",
+          attempt: invalidated,
+        };
+      }
+
       const sourceFailure = await this.sourcePreconditionFailureTx(
         tx,
         correlation,
@@ -390,6 +425,7 @@ export class SchedulingDeliveryStore {
                 updated_at = ${sqlText(new Date().toISOString())}
           WHERE id = ${sqlText(request.id)}
             AND agent_id = ${sqlText(this.runtime.agentId)}
+            AND subject_user_id = ${sqlText(request.subjectUserId)}
             AND state = ${sqlText("approved")}
           RETURNING id`,
       );

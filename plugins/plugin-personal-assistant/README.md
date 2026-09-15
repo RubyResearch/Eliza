@@ -38,6 +38,33 @@ isolated port (41873 by default):
 bun run --cwd plugins/plugin-personal-assistant test:connections:e2e
 ```
 
+Telegram delivery retains the complete provider receipt, including all message identifiers for split messages. Approval dispatch without a provider identifier requires reconciliation and cannot be automatically replayed. Telegram and Discord runtime sends also preserve partial-delivery and failed-persistence receipts. Once a provider call begins, lost acknowledgements retain the attempted account and destination and cannot fall through to another transport.
+
+## Private daily calendar cards
+
+`POST /api/lifeops/calendar/cards` accepts an explicit `channel` of `imessage`,
+`telegram`, or `discord`; omitted channels preserve the iMessage default.
+Telegram targets are chat identifiers and Discord targets are channel
+identifiers. Creation queues an owner review and does not send. The approval
+binds its exact recipient, channel, calendar content, and private card identity;
+changing any of them requires a new review. Version-four reviews bind the approving owner, intended reader and sending account separately. Telegram and Discord use the configured agent bot; iMessage requires a known sending account. The review shows the sending identity and transport, which are rechecked before dispatch. An account change requires a new review. Captured provider handlers are checked immediately before invocation. Hosted iMessage binds the configured Blooio channel. Native iMessage card creation remains unavailable until the connector can expose a verified sending identity; ordinary connector availability is insufficient. Legacy version-one approvals remain iMessage-only; version-two reviews
+retain their original same-owner/recipient contract.
+
+Set `ELIZA_EXTERNAL_BASE_URL` to the agent's public HTTPS origin before issuing
+cards. Missing, non-HTTPS, private-network, or path-bearing addresses stop
+creation before a card or approval is stored. Incoming request headers and
+local tunnel addresses never determine the recipient's link.
+
+Card links require the intended authenticated principal as well as the
+single-use capability. Expired, revoked, already-opened, and anonymous reads
+remain denied. A queued card is not delivery evidence; connector setup,
+reachable HTTPS links, and actual provider receipts require separate verification.
+
+Discord approval completion requires a confirmed send, a provider message ID,
+and the reviewed channel. Uncertain status, missing delivery identity, or a
+different destination retains the observed receipt in reconciliation and cannot
+be automatically dispatched again. Multi-part sends retain every provider ID.
+
 ## Undated todo lifecycle
 
 Undated owner todos remain task definitions with `cadence.kind = "unscheduled"`.
@@ -228,8 +255,8 @@ requests with their staging bytes in the runtime's canonical private
 Commit requires every ordered chunk and verifies the reassembled byte length
 and optional whole-file SHA-256 before immutable storage. The server—not the
 form—parses the page count. `PdfService.extractCompleteDocument` then accounts
-for every page with native text plus rendered-page vision transcription for
-images or text-empty pages. One failed page fails ingestion; partial content is
+for every page with native text plus rendered-page vision transcription of
+every page. One failed page fails ingestion; partial content is
 never published as a complete owner-private `DocumentService` record. LifeOps
 persists the media SHA-256, handle, document id, byte size, MIME type, filename,
 parser-derived page count, complete extracted text and page map, and version chain; it does
@@ -247,12 +274,45 @@ in-range page citation plus the cited source text. Only the owner can make the t
 `approved` or `rejected` decision. Agent and chat pins are independent
 discovery records and never confer access.
 
+Owners choose **Prepare review** on an uploaded agreement, or request
+`OWNER_AGREEMENT_KNOWLEDGE` with `prepare_review`. The owner-only
+`POST /api/lifeops/agreements/:id/review` verifies the original PDF and saved
+extraction against their ingestion hashes, sends complete page evidence to the
+model, and validates every proposed citation against its claimed pages. Invalid
+or incomplete output saves nothing. Generation creates unapproved proposals;
+approval, pinning, sharing, scheduling, and delivery remain separate operations.
+
+The proposal batch and its completion record commit atomically. Concurrent
+requests and retries recover the first committed review, including later owner
+decisions; `GET /api/lifeops/agreements/:id/review` restores it after reload.
+A saved empty result is explicitly identified and does not certify that the PDF
+contains no commitments. Owners must still inspect the original source for
+omissions and interpretation errors. Each immutable agreement version has one
+prepared review; failed attempts can be retried without partial proposals.
+
+Review generation uses the canonical trajectory recorder when capture is
+enabled, binding the model call to the artifact and source hashes. Existing
+chat steps retain their context; direct owner requests get a standalone
+trajectory. Reading or retrying a prepared review does not repeat generation.
+
 The owner is the only implicit reader. A guest read requires a resource grant
 bound to one exact household grant with `knowledge.read`; the guest entity must
 have a verified identity, and both grants must remain unrevoked and unexpired.
 Guest views expose approved obligations only. Revoking the relationship-backed
 household grant immediately invalidates every agreement binding that relies on
 it.
+
+The owner permission selector reads
+`GET /api/lifeops/agreements/:id/guest-options`. It lists verified people with
+active `knowledge.read` permissions in the agreement's household, retaining the
+exact household grant behind each named choice. Expired, revoked, wrong-scope,
+and other-household permissions are excluded. Existing agreement bindings stay
+available for owner removal even when their underlying permission is inactive.
+Changing the selected person or permission invalidates the preview. Enabling
+access revalidates the exact permission in the domain, and the UI confirms the
+saved binding by reading it back; uncertain writes require refresh before retry.
+The selector does not create identities, verify contacts, or issue household
+permissions implicitly.
 
 A knowledge-only household grant may explicitly supply `subjectEntityIds: []`.
 Omitting the field remains an invalid action request. The canonical scope
@@ -449,11 +509,19 @@ internals; it consumes the plugin's public exports only. See
 - Health domain: `plugins/plugin-health/README.md`.
 - REST routes: `src/routes/`.
 
+Owner review corrections use the same complete-source citation validation as
+model-generated proposals. The Family Operations editor and owner action
+`add_proposal` save an unapproved correction through the existing obligations
+route. Identical corrections to the same immutable artifact recover the same
+record and its current decision, including after restart or a lost response.
+Saving a correction does not prepare a model review, approve, pin or share it.
+
 ### Family workspace export
 
 The owner-only `POST /api/lifeops/family-workflows/export` downloads a ZIP with
-all family agreement versions, retained school PDFs, monthly packet versions
-and drafts, their approval records, and stored provider/school mutation receipts.
+all family agreement versions, retained school PDFs, selected correspondence,
+every intake review revision, monthly packet versions and drafts, their approval
+records, and stored provider/school mutation receipts.
 Each member has a SHA-256 checksum. Agreement archives preserve their existing
 source/extraction and review/access provenance; packet and workflow records use
 one database statement snapshot. The manifest records this component-snapshot
@@ -463,6 +531,44 @@ healthy-looking partial archive. Connection credentials and executor lease
 tokens are excluded. Export records preparation, not receipt by the client,
 and does not revoke access or delete data.
 
+Selected correspondence is read through the canonical owner document boundary.
+Its complete text must match the SHA-256 recorded by every referencing intake
+revision; changed or unavailable originals fail export explicitly. Repeated
+references reuse one archive member. The manifest binds each original to its
+document identity and content hash, while retaining proposal and owner-review
+history separately. Unrelated documents and another agent's intake are excluded.
+
+## Selected correspondence and monthly drafts
+
+Owner-selected correspondence is stored as a complete private document before
+extraction. Direct extraction uses the canonical trajectory recorder when enabled,
+binding the intake identity, review revision and source hash to the full model
+input and output. Invalid model output records a failed attempt and leaves the
+selection unchanged. Extraction inside a chat retains that chat's recording
+context. Generated facts remain proposals without disclosure recipients until
+owner review; recipient identities come from the canonical contact graph and need
+not be UUIDs.
+
+Monthly packet periods retain exclusive end dates in storage, while draft headings
+show the inclusive final civil date. The unanswered summary uses the typed request
+state across source categories after recipient filtering. A request already shown
+under travel, school or scheduling receives a short follow-up entry; its original
+claim and source binding remain single records. Resolved requests leave that
+summary. Neither a prepared draft nor a successful extraction approves delivery.
+
+## School source retention
+
+School PDF bytes stay in the canonical media store. Each original PDF has a
+private source-link document whose media reference is visible to the existing
+media garbage collector. The record identifies the original PDF and its hash;
+it is not a transcription or an approved agreement obligation. Repeated checks
+reuse the same document instead of accumulating references.
+
+Before retrieving a source, the leased school workflow verifies historical PDF
+hashes and restores their document references. A missing or changed historical
+source fails explicitly and requires recovery of its exact original bytes.
+New PDFs gain their reference before a run can complete, including hash no-ops.
+The workflow does not create another file store, collector, or reference counter.
 
 Family lifecycle admission wraps the canonical scheduling SQL stores. It resolves
 monthly tasks, grant warnings, and family approval reminders through typed task
@@ -511,3 +617,13 @@ removal and a committed completion journal change the job to `complete`.
 Owners can inspect or retry through the deletion panel and the owner-only
 `/backups/preview`, `/backups`, and `/backups/resume` routes under the deletion
 prefix. Scheduling and cleanup errors remain visible for recovery.
+
+School settings create the canonical monthly family task when absent. The task
+checks school dates and prepares an owner-review packet; it never sends email.
+The Family Operations view reports the persisted schedule and status, including
+customized or dismissed tasks, and links to Automations for review. Its monthly
+timing editor updates the same canonical task through the scheduled-task edit
+API, preserves the saved timezone and lifecycle status, and refreshes the saved
+schedule after acceptance. Days 29–31 warn about skipped shorter months. Saving
+school settings preserves an existing schedule and its status. Older runtimes
+that do not return schedule status display an explicit unavailable state.

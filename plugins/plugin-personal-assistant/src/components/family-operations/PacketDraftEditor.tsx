@@ -21,6 +21,56 @@ export function PacketDraftEditor({
   const [subject, setSubject] = useState(draft.email?.subject ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  async function decide(decision: "approve" | "reject") {
+    if (!draft.approvalId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await adapter.decidePacketApproval({
+        packetId,
+        draftVersion: draft.draftVersion,
+        approvalId: draft.approvalId,
+        bodySha256: draft.bodySha256,
+        decision,
+      });
+    } catch (cause) {
+      // error-policy:J4 The persisted result is refreshed before any retry is offered.
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Decision could not be confirmed. Check delivery status.",
+      );
+    } finally {
+      await refresh();
+      setBusy(false);
+    }
+  }
+  const decisionState = draft.approval?.state;
+  const canApprove =
+    decisionState === "pending" ||
+    decisionState === "approved" ||
+    decisionState === "retryable";
+  const approvalMessage = !draft.approvalId
+    ? "Draft has not been submitted for approval."
+    : !draft.approval
+      ? "Approval status unavailable. Refresh before taking another action."
+      : decisionState === "done"
+        ? draft.approval.providerAccepted === true
+          ? "Accepted by the email provider."
+          : "Completed; provider delivery confirmation is unavailable."
+        : decisionState === "executing"
+          ? "Delivery is in progress. Check status before retrying."
+          : decisionState === "reconciliation_required"
+            ? "Delivery outcome is unknown. Verify the provider record before retrying."
+            : decisionState === "retryable"
+              ? "Delivery failed before acceptance. You can retry the reviewed email."
+              : decisionState === "approved"
+                ? "Approved; delivery has not completed."
+                : decisionState === "rejected"
+                  ? "Rejected. This approval will not send the email."
+                  : decisionState === "expired"
+                    ? "Approval expired. Prepare and review a new draft."
+                    : "Awaiting your decision on the exact email above.";
   async function save() {
     setBusy(true);
     setError(null);
@@ -90,8 +140,58 @@ export function PacketDraftEditor({
     );
   return (
     <div className="flex flex-wrap gap-2">
+      <p className="w-full" role="status">
+        {approvalMessage}
+      </p>
+      {draft.approval?.error ? (
+        <p className="w-full" role="alert">
+          {draft.approval.error}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="w-full" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {draft.email && canApprove ? (
+        <Button
+          variant="accentDarkHover"
+          disabled={busy}
+          onClick={() => void decide("approve")}
+        >
+          {decisionState === "retryable"
+            ? "Retry reviewed email"
+            : "Approve and send email"}
+        </Button>
+      ) : null}
+      {draft.email && decisionState === "pending" ? (
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => void decide("reject")}
+        >
+          Reject email
+        </Button>
+      ) : null}
+      {draft.approvalId ? (
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => void refresh()}
+        >
+          Refresh delivery status
+        </Button>
+      ) : null}
       {draft.email ? (
-        <Button variant="outline" onClick={() => setEditing(true)}>
+        <Button
+          variant="outline"
+          disabled={
+            busy ||
+            decisionState === "executing" ||
+            decisionState === "reconciliation_required"
+          }
+          onClick={() => setEditing(true)}
+        >
           Edit email draft
         </Button>
       ) : null}

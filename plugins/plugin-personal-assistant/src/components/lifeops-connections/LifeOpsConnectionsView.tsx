@@ -1,6 +1,7 @@
 /** Focused onboarding and ongoing-management UI for Gmail and calendar sources. */
 
 import type {
+  LifeOpsCalendarProvider,
   LifeOpsCalendarSourceHealth,
   LifeOpsCalendarSummary,
   LifeOpsGoogleCapability,
@@ -40,6 +41,8 @@ import {
 } from "react";
 import { AccountTransitionPanel } from "./AccountTransitionPanel.js";
 import { defaultLifeOpsConnectionsAdapter } from "./adapter.js";
+import { CalendarSyncPanel } from "./CalendarSyncPanel.js";
+import type { AccountHandoffAdapter } from "./handoff-adapter.js";
 import type {
   LifeOpsConnectionsAdapter,
   LifeOpsConnectionsSnapshot,
@@ -48,6 +51,14 @@ import type {
   LifeOpsSeedRangeDays,
   LifeOpsSeedReceipt,
 } from "./types.js";
+
+const CALENDAR_PROVIDER_LABELS: Record<LifeOpsCalendarProvider, string> = {
+  eliza: "Eliza Calendar",
+  google: "Google Calendar",
+  microsoft: "Microsoft Calendar",
+  apple_calendar: "Apple Calendar",
+  ics: "Calendar subscription",
+};
 
 const GOOGLE_CAPABILITY_OPTIONS: Array<{
   capability: LifeOpsGoogleCapability;
@@ -74,8 +85,7 @@ const GOOGLE_CAPABILITY_OPTIONS: Array<{
     capability: "google.gmail.send",
     title: "Send approved email",
     scope: "gmail.send",
-    detail:
-      "Every send still requires confirmation immediately before it runs.",
+    detail: "Send email using your approval and automation settings.",
     defaultOn: false,
   },
   {
@@ -97,7 +107,7 @@ const GOOGLE_CAPABILITY_OPTIONS: Array<{
     capability: "google.calendar.write",
     title: "Change Google Calendar",
     scope: "calendar.events",
-    detail: "Create, update, invite, or delete only after confirmation.",
+    detail: "Sync events and run calendar changes you authorize.",
     defaultOn: false,
   },
 ];
@@ -305,10 +315,12 @@ function permissionPresentation(permission: PermissionState): {
 
 export interface LifeOpsConnectionsViewProps {
   adapter?: LifeOpsConnectionsAdapter;
+  handoffAdapter?: AccountHandoffAdapter;
 }
 
 export function LifeOpsConnectionsView({
   adapter = defaultLifeOpsConnectionsAdapter,
+  handoffAdapter,
 }: LifeOpsConnectionsViewProps) {
   const [snapshot, setSnapshot] = useState<LifeOpsConnectionsSnapshot | null>(
     null,
@@ -611,6 +623,24 @@ export function LifeOpsConnectionsView({
     );
   }
 
+  if (!snapshot) {
+    return (
+      <main style={ROOT_STYLE}>
+        <div className="lifeops-shell">
+          <h1>Connections are unavailable</h1>
+          <div className="lifeops-banner lifeops-banner-error" role="alert">
+            <AlertTriangle size={18} aria-hidden />
+            <span>{error}</span>
+          </div>
+          <Button type="button" onClick={() => void refresh(false)}>
+            Retry
+          </Button>
+        </div>
+        <LifeOpsStyles />
+      </main>
+    );
+  }
+
   return (
     <main style={ROOT_STYLE}>
       <div className="lifeops-shell">
@@ -619,15 +649,15 @@ export function LifeOpsConnectionsView({
             <p className="lifeops-eyebrow">LifeOps connections</p>
             <h1>Bring your inbox and calendars into one trustworthy view.</h1>
             <p>
-              You choose accounts, calendars, history, and permissions. Eliza
-              keeps provider provenance and asks again before any external
-              change.
+              You choose accounts, calendars, history, and permissions. Calendar
+              synchronization uses the destination and settings you approve.
             </p>
           </div>
           <Button
             type="button"
             onClick={() => void refresh(true)}
             disabled={loading || busy !== null}
+            className="lifeops-primary"
             aria-label="Retry all connection checks and synchronization"
           >
             <RefreshCw size={16} aria-hidden /> Refresh health
@@ -654,9 +684,13 @@ export function LifeOpsConnectionsView({
         </div>
 
         {snapshot ? (
+          <CalendarSyncPanel adapter={adapter} calendars={snapshot.calendars} />
+        ) : null}
+
+        {snapshot ? (
           <AccountTransitionPanel
             snapshot={snapshot}
-            adapter={adapter}
+            api={handoffAdapter}
             refresh={() => refresh(false)}
           />
         ) : null}
@@ -901,18 +935,22 @@ export function LifeOpsConnectionsView({
                 <CalendarDays size={20} aria-hidden />
                 <div>
                   <strong>
-                    {source.key.provider === "apple_calendar"
-                      ? "Apple Calendar"
-                      : "Google Calendar"}
-                    {source.summary ? ` · ${source.summary}` : ""}
+                    {CALENDAR_PROVIDER_LABELS[source.key.provider]}
+                    {source.summary &&
+                    source.summary !==
+                      CALENDAR_PROVIDER_LABELS[source.key.provider]
+                      ? ` · ${source.summary}`
+                      : ""}
                   </strong>
                   <span>Last sync {formatTime(source.syncedAt)}</span>
                   <small>
                     {source.changeDelivery
                       ? `${source.changeDelivery.mode} updates · ${source.changeDelivery.status}`
-                      : source.key.provider === "apple_calendar"
-                        ? "EventKit store-change updates with polling recovery"
-                        : "Polling recovery available"}
+                      : source.key.provider === "eliza"
+                        ? "Stored in Eliza"
+                        : source.key.provider === "apple_calendar"
+                          ? "EventKit store-change updates with polling recovery"
+                          : "Polling recovery available"}
                   </small>
                   {source.error ? (
                     <small className="lifeops-error-copy">

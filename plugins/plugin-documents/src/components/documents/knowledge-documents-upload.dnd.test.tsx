@@ -254,8 +254,8 @@ describe("UploadZone — native file drop (handleDrop)", () => {
         uploadStatus={null}
       />,
     );
-    // Switch scope from the default (user-private) to Global before dropping.
-    fireEvent.click(getByRole("button", { name: "Global" }));
+    // Select the chat audience before dropping the file.
+    fireEvent.click(getByRole("button", { name: "Chat participants" }));
 
     const zone = container.querySelector("fieldset") as HTMLFieldSetElement;
     fireEvent.drop(zone, {

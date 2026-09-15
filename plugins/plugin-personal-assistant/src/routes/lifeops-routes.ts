@@ -119,10 +119,16 @@ import {
   calendarCardApprovalPayload,
   composeDailyCalendarCard,
   parseCalendarCardRequest,
+  resolveCalendarCardOrigin,
 } from "../lifeops/calendar-card.js";
+import {
+  CalendarCardSenderError,
+  resolveCalendarCardSender,
+} from "../lifeops/calendar-card-sender.js";
 import { probeFullDiskAccess } from "../lifeops/fda-probe.js";
 import { LifeOpsRepository } from "../lifeops/repository.js";
 import { LifeOpsService, LifeOpsServiceError } from "../lifeops/service.js";
+import { handleAccountHandoffRoutes } from "./account-handoff.js";
 import { entityHasVerifiedMachineAuthBinding } from "./authenticated-entity-principal.js";
 import { handleFamilyWorkflowRoutes } from "./family-workflows.js";
 
@@ -260,6 +266,9 @@ const LIFEOPS_RATE_LIMITS = {
   // credentials or initiate consent flows.
   oauth_init: { maxRequests: 5, windowMs: 60_000 },
   connector_write: { maxRequests: 10, windowMs: 60_000 },
+  // A saved account switch takes multiple revision-checked checkpoints; it
+  // must not exhaust the budget for starting new connector consent flows.
+  account_handoff_advance: { maxRequests: 30, windowMs: 60_000 },
   // Generic outbound messaging (X DMs, iMessage, Telegram). Tighter
   // than the default to limit blast radius.
   outbound_message: { maxRequests: 5, windowMs: 60_000 },
@@ -1255,6 +1264,19 @@ export async function handleLifeOpsRoutes(
       return true;
     }
     const cardRequest = parsedRequest.request;
+    const publicAddress = resolveCalendarCardOrigin(runtime);
+    if (publicAddress.status !== "configured") {
+      json(
+        res,
+        {
+          error:
+            "Configure the agent's public HTTPS address before creating a calendar card.",
+          code: "CALENDAR_CARD_PUBLIC_ORIGIN_UNAVAILABLE",
+        },
+        503,
+      );
+      return true;
+    }
     const authenticatedEntityId = String(
       ctx.state.requestEntityId ?? ctx.state.adminEntityId ?? SELF_ENTITY_ID,
     );
@@ -1265,6 +1287,20 @@ export async function handleLifeOpsRoutes(
       (await entityHasVerifiedMachineAuthBinding(runtime, recipientEntityId));
     if (!recipientCanAuthenticate) {
       json(res, { error: "Invalid calendar card request" }, 400);
+      return true;
+    }
+    const cardService = getService(ctx);
+    if (!cardService) return true;
+    let sender: Awaited<ReturnType<typeof resolveCalendarCardSender>>;
+    try {
+      sender = await resolveCalendarCardSender(
+        cardService,
+        cardRequest.channel,
+      );
+    } catch (error) {
+      // error-policy:J1 expose missing sending identity before storing a card or approval.
+      if (!(error instanceof CalendarCardSenderError)) throw error;
+      json(res, { error: error.message, code: error.code }, 503);
       return true;
     }
     const ttlMs = cardRequest.ttlMs ?? 24 * 60 * 60_000;
@@ -1280,7 +1316,7 @@ export async function handleLifeOpsRoutes(
       recipientEntityId,
       html: placeholder.html,
       ttlMs,
-      baseUrl: url.origin,
+      baseUrl: publicAddress.origin,
     });
     const composition = composeDailyCalendarCard({
       date: cardRequest.date,
@@ -1296,6 +1332,9 @@ export async function handleLifeOpsRoutes(
       );
     }
     const payload = calendarCardApprovalPayload({
+      ownerEntityId: authenticatedEntityId,
+      sender,
+      channel: cardRequest.channel,
       recipient: cardRequest.recipient,
       recipientEntityId,
       cardId: issued.cardId,
@@ -1306,12 +1345,12 @@ export async function handleLifeOpsRoutes(
     try {
       approval = await queue.enqueue({
         requestedBy: "OWNER_CALENDAR_CARD",
-        subjectUserId: recipientEntityId,
+        subjectUserId: authenticatedEntityId,
         action: "send_message",
         payload,
-        channel: "imessage",
-        reason: `Send the private ${cardRequest.privacyMode} calendar card for ${cardRequest.date}.`,
-        idempotencyKey: `calendar-card:v1:${composition.envelopeSha256}`,
+        channel: cardRequest.channel,
+        reason: `Send the private ${cardRequest.privacyMode} calendar card for ${cardRequest.date} from ${sender.displayName} (${sender.identityId}) using ${sender.transport}.`,
+        idempotencyKey: `calendar-card:v4:${authenticatedEntityId}:${cardRequest.channel}:${composition.envelopeSha256}`,
         expiresAt: new Date(Date.now() + ttlMs),
       });
       await queue.surfaceEnqueuedApproval(approval);
@@ -1350,6 +1389,8 @@ export async function handleLifeOpsRoutes(
     typeof value.reconcileLinkedCalendar === "function" &&
     "resolveLinkedCalendarConflict" in value &&
     typeof value.resolveLinkedCalendarConflict === "function" &&
+    "rebindLinkedCalendar" in value &&
+    typeof value.rebindLinkedCalendar === "function" &&
     "disconnectLinkedCalendar" in value &&
     typeof value.disconnectLinkedCalendar === "function" &&
     "reconcileLinkedCalendarProviderChanges" in value &&
@@ -1367,6 +1408,23 @@ export async function handleLifeOpsRoutes(
     return gateway;
   };
 
+  if (
+    ctx.pathname === "/api/lifeops/account-handoffs" ||
+    ctx.pathname.startsWith("/api/lifeops/account-handoffs/")
+  ) {
+    if (
+      rateLimitRequest(
+        ctx,
+        ctx.method === "GET"
+          ? "default"
+          : ctx.method === "POST" && ctx.pathname.endsWith("/advance")
+            ? "account_handoff_advance"
+            : "connector_write",
+      )
+    )
+      return true;
+    if (await handleAccountHandoffRoutes(ctx)) return true;
+  }
   if (await handleFamilyWorkflowRoutes(ctx)) return true;
 
   // Calendar routes are owned by @elizaos/plugin-calendar; the path -> service
@@ -1397,6 +1455,8 @@ export async function handleLifeOpsRoutes(
           mutationGateway().cancel(requestUrl, request),
         linkCalendar: (requestUrl, request) =>
           mutationGateway().linkCalendar(requestUrl, request),
+        updateLinkedCalendarControl: (requestUrl, request) =>
+          mutationGateway().updateLinkedCalendarControl(requestUrl, request),
         reconcileLinkedCalendar: (requestUrl, linkId, request) =>
           mutationGateway().reconcileLinkedCalendar(
             requestUrl,
@@ -1409,6 +1469,8 @@ export async function handleLifeOpsRoutes(
             linkId,
             request,
           ),
+        rebindLinkedCalendar: (requestUrl, linkId, request) =>
+          mutationGateway().rebindLinkedCalendar(requestUrl, linkId, request),
         disconnectLinkedCalendar: (requestUrl, linkId, request) =>
           mutationGateway().disconnectLinkedCalendar(
             requestUrl,

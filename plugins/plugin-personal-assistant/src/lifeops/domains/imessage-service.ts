@@ -4,11 +4,16 @@
  * into assistant connector DTOs. The connector plugin owns transport behavior;
  * this layer owns only the LifeOps projection and native plugin-load fallback.
  */
+
 import { basename } from "node:path";
 import type { Plugin } from "@elizaos/core";
 import { logger } from "@elizaos/core";
 import type { LifeOpsIMessageConnectorStatus } from "@elizaos/shared";
 import type { LifeOpsContext } from "../lifeops-context.js";
+import {
+  assertConnectorSenderIdentity,
+  ConnectorDeliveryEvidenceError,
+} from "../messaging/connector-delivery-evidence.js";
 import {
   readIMessagesWithRuntimeService,
   sendIMessageWithRuntimeService,
@@ -62,6 +67,7 @@ type RuntimeIMessageServiceLike = {
   ): Promise<{
     success: boolean;
     messageId?: string;
+    messageIds?: string[];
     chatId?: string;
     error?: string;
   }>;
@@ -86,6 +92,7 @@ export interface IMessageSendRequest {
   text: string;
   attachmentPaths?: string[];
   transport?: "auto" | "native";
+  expectedAccount?: { identityId: string; transport: string };
 }
 
 export interface IMessageRecord {
@@ -289,7 +296,7 @@ function runtimeStatusToLifeOps(
     connected,
     bridgeType: transport === "blooio" ? "blooio" : "native",
     hostPlatform: normalizeHostPlatform(),
-    accountHandle: null,
+    accountHandle: transport === "blooio" ? (status?.channelId ?? null) : null,
     sendMode:
       connected && transport === "blooio"
         ? "provider-api"
@@ -401,8 +408,8 @@ export class IMessageDomain {
 
   async sendIMessage(
     req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string }> {
-    if (req.transport !== "native") {
+  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }> {
+    if (req.transport !== "native" && !req.expectedAccount) {
       const delegated = await sendIMessageWithRuntimeService({
         runtime: this.ctx.runtime,
         to: req.to,
@@ -432,6 +439,20 @@ export class IMessageDomain {
     if (!nativeService) {
       fail(503, IMESSAGE_PLUGIN_SETUP_MESSAGE);
     }
+    if (req.expectedAccount) {
+      const current = runtimeStatusToLifeOps(
+        nativeService,
+        new Date().toISOString(),
+      );
+      const actual = current.accountHandle
+        ? `${current.bridgeType}:${current.sendMode}:${current.accountHandle}`
+        : null;
+      assertConnectorSenderIdentity(
+        "imessage",
+        `${req.expectedAccount.transport}:${req.expectedAccount.identityId}`,
+        actual,
+      );
+    }
     const result = await withNativeIMessageSendTimeout(
       nativeService.sendMessage(req.to, req.text, {
         ...(req.attachmentPaths?.[0]
@@ -440,9 +461,24 @@ export class IMessageDomain {
       }),
     );
     if (!result.success) {
+      if (result.messageIds?.length) {
+        throw new ConnectorDeliveryEvidenceError(
+          "iMessage accepted part of the send; reconcile before sending again.",
+          {
+            provider: "imessage",
+            channelId: req.to,
+            deliveryStatus: "partial",
+            messageIds: result.messageIds,
+          },
+        );
+      }
       fail(502, result.error ?? "iMessage runtime service send failed.");
     }
-    return { ok: true, messageId: result.messageId };
+    return {
+      ok: true,
+      messageId: result.messageId,
+      ...(result.messageIds ? { messageIds: result.messageIds } : {}),
+    };
   }
 
   async readIMessages(opts: {

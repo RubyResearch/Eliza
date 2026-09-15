@@ -345,6 +345,19 @@ export default defineConfig({
         find: /^@elizaos\/app-core\/platform\/native-library-policy$/,
         replacement: appCoreNativeLibraryPolicy,
       },
+      // Registered HTTP routes must exercise the real owner authentication
+      // boundary even when app-core's distribution has not been built.
+      {
+        find: /^@elizaos\/app-core\/api\/(auth|compat-route-shared)$/,
+        replacement: path.join(elizaRoot, "packages/app-core/src/api/$1.ts"),
+      },
+      {
+        find: /^@elizaos\/app-core\/services\/auth-store$/,
+        replacement: path.join(
+          elizaRoot,
+          "packages/app-core/src/services/auth-store.ts",
+        ),
+      },
       {
         find: /^@elizaos\/app-core\/services\/task-host-capabilities$/,
         replacement: appCoreTaskHostCapabilities,

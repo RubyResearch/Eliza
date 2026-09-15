@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "sourceAtomicSchemaVersion": 1,
-  "scannedFiles": 917,
+  "scannedFiles": 929,
   "canonicalContracts": [
     {
       "id": "auth-result-shell",
@@ -108,8 +108,126 @@
       "maintainedReferences": 2
     }
   ],
-  "eligibleComponents": 104,
+  "eligibleComponents": 110,
   "clusters": [
+    {
+      "archetype": "form",
+      "atomicDependencies": [
+        "button",
+        "input"
+      ],
+      "entries": [
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/components/pages/TriggerForm.tsx",
+          "line": 231,
+          "name": "TriggerForm",
+          "renderedTags": [
+            "AgentSelectField",
+            "Button",
+            "CronInputSection",
+            "DurationValueInput",
+            "EventInputSection",
+            "FieldLabel",
+            "FieldSwitch",
+            "FormSelect",
+            "FormSelectItem",
+            "Input",
+            "IntervalHostWarningBanner",
+            "PagePanel",
+            "PagePanel.Notice",
+            "SchedulePreview",
+            "ScheduledAtInput",
+            "TriggerKindSection",
+            "TriggerRunHistory",
+            "div",
+            "h2"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/components/ui/tag-editor.tsx",
+          "line": 29,
+          "name": "TagEditor",
+          "renderedTags": [
+            "Button",
+            "Input",
+            "Label",
+            "X",
+            "div",
+            "span"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "packages/ui/src/login/components/LoginForm.tsx",
+          "line": 180,
+          "name": "LoginForm",
+          "renderedTags": [
+            "Button",
+            "DiscordIcon",
+            "EVMPanel",
+            "EmailIcon",
+            "EthereumIcon",
+            "FarcasterIcon",
+            "GitHubIcon",
+            "GoogleIcon",
+            "Input",
+            "PasskeyIcon",
+            "SolanaPanel",
+            "TelegramIcon",
+            "XIcon",
+            "code",
+            "div",
+            "h2",
+            "p",
+            "span",
+            "strong"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input"
+          ],
+          "file": "plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx",
+          "line": 8,
+          "name": "MonthlyScheduleEditor",
+          "renderedTags": [
+            "Button",
+            "Input",
+            "div",
+            "fieldset",
+            "form",
+            "label",
+            "p"
+          ],
+          "archetype": "form"
+        }
+      ],
+      "signature": "form:button+input",
+      "disposition": "distinct-domain-compositions",
+      "rationale": "Workflow-trigger configuration, tag editing, login and monthly family timing share canonical Button and Input primitives. Login owns credential challenges and session handoff; tag editing emits string lists; TriggerForm owns workflow definitions, execution history and templates. MonthlyScheduleEditor edits the existing family ScheduledTask through its owner adapter, preserves timezone and lifecycle state, and focuses save failures. These forms have separate domain contracts.",
+      "memberComponentIds": [
+        "packages/ui/src/components/pages/TriggerForm.tsx:TriggerForm",
+        "packages/ui/src/components/ui/tag-editor.tsx:TagEditor",
+        "packages/ui/src/login/components/LoginForm.tsx:LoginForm",
+        "plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx:MonthlyScheduleEditor"
+      ],
+      "semanticFingerprint": "sha256:dabb8a0a48c8ffa8aa2ca60e407ccb9a3260d7951005a8b4824602a47d885519"
+    },
     {
       "archetype": "row",
       "atomicDependencies": [
@@ -251,7 +369,7 @@
             "dialog"
           ],
           "file": "plugins/plugin-calendar/src/components/EventEditorDrawer.tsx",
-          "line": 519,
+          "line": 527,
           "name": "EventEditorDrawer",
           "renderedTags": [
             "Button",
@@ -386,54 +504,29 @@
       "archetype": "form",
       "atomicDependencies": [
         "button",
-        "input"
+        "input",
+        "textarea"
       ],
       "entries": [
         {
           "atomicDependencies": [
             "button",
-            "input"
+            "input",
+            "textarea"
           ],
-          "file": "packages/ui/src/components/pages/TriggerForm.tsx",
-          "line": 231,
-          "name": "TriggerForm",
-          "renderedTags": [
-            "AgentSelectField",
-            "Button",
-            "CronInputSection",
-            "DurationValueInput",
-            "EventInputSection",
-            "FieldLabel",
-            "FieldSwitch",
-            "FormSelect",
-            "FormSelectItem",
-            "Input",
-            "IntervalHostWarningBanner",
-            "PagePanel",
-            "PagePanel.Notice",
-            "SchedulePreview",
-            "ScheduledAtInput",
-            "TriggerKindSection",
-            "TriggerRunHistory",
-            "div",
-            "h2"
-          ],
-          "archetype": "form"
-        },
-        {
-          "atomicDependencies": [
-            "button",
-            "input"
-          ],
-          "file": "packages/ui/src/components/ui/tag-editor.tsx",
-          "line": 29,
-          "name": "TagEditor",
+          "file": "packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx",
+          "line": 64,
+          "name": "CockpitNewSessionForm",
           "renderedTags": [
             "Button",
+            "CockpitModePicker",
             "Input",
-            "Label",
-            "X",
+            "Textarea",
+            "datalist",
             "div",
+            "form",
+            "label",
+            "option",
             "span"
           ],
           "archetype": "form"
@@ -441,44 +534,53 @@
         {
           "atomicDependencies": [
             "button",
-            "input"
+            "input",
+            "textarea"
           ],
-          "file": "packages/ui/src/login/components/LoginForm.tsx",
-          "line": 180,
-          "name": "LoginForm",
+          "file": "plugins/plugin-personal-assistant/src/components/family-operations/AgreementProposalEditor.tsx",
+          "line": 6,
+          "name": "AgreementProposalEditor",
           "renderedTags": [
             "Button",
-            "DiscordIcon",
-            "EVMPanel",
-            "EmailIcon",
-            "EthereumIcon",
-            "FarcasterIcon",
-            "GitHubIcon",
-            "GoogleIcon",
             "Input",
-            "PasskeyIcon",
-            "SolanaPanel",
-            "TelegramIcon",
-            "XIcon",
-            "code",
+            "Textarea",
             "div",
-            "h2",
+            "label",
             "p",
-            "span",
-            "strong"
+            "section"
+          ],
+          "archetype": "form"
+        },
+        {
+          "atomicDependencies": [
+            "button",
+            "input",
+            "textarea"
+          ],
+          "file": "plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx",
+          "line": 6,
+          "name": "PacketDraftEditor",
+          "renderedTags": [
+            "Button",
+            "Input",
+            "Textarea",
+            "div",
+            "fieldset",
+            "label",
+            "p"
           ],
           "archetype": "form"
         }
       ],
-      "signature": "form:button+input",
+      "signature": "form:button+input+textarea",
       "disposition": "distinct-domain-compositions",
-      "rationale": "Trigger configuration, tag editing and login share generic controls but not a domain lifecycle. Login performs provider discovery, credential challenges and session handoff; trigger configuration edits scheduling state; tag editing emits a list of strings. Each composes the canonical Button and Input primitives.",
+      "rationale": "Session creation owns model, mode, and initial prompt selection. Family email revision owns immutable draft versions and stale approval rejection. Agreement correction owns literal page citations, unapproved proposals, and recovery of a saved proposal without resubmitting it. These distinct domain transitions share canonical field and button atoms, not one form lifecycle.",
       "memberComponentIds": [
-        "packages/ui/src/components/pages/TriggerForm.tsx:TriggerForm",
-        "packages/ui/src/components/ui/tag-editor.tsx:TagEditor",
-        "packages/ui/src/login/components/LoginForm.tsx:LoginForm"
+        "packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx:CockpitNewSessionForm",
+        "plugins/plugin-personal-assistant/src/components/family-operations/AgreementProposalEditor.tsx:AgreementProposalEditor",
+        "plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx:PacketDraftEditor"
       ],
-      "semanticFingerprint": "sha256:fcf873875a506f36121cec3f220e955971468c53d28e938874b7b2890cdeccf6"
+      "semanticFingerprint": "sha256:37d6191bc5906dd75f77c0fa0c8b1a0db01057621e86408b9e2fef230f3962c4"
     },
     {
       "archetype": "list",
@@ -1023,67 +1125,6 @@
       "semanticFingerprint": "sha256:6691c91cff13e2f52c953d92dbc15729b0939294fd4a3bad4d7609b488acf564"
     },
     {
-      "archetype": "form",
-      "atomicDependencies": [
-        "button",
-        "input",
-        "textarea"
-      ],
-      "entries": [
-        {
-          "atomicDependencies": [
-            "button",
-            "input",
-            "textarea"
-          ],
-          "file": "packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx",
-          "line": 64,
-          "name": "CockpitNewSessionForm",
-          "renderedTags": [
-            "Button",
-            "CockpitModePicker",
-            "Input",
-            "Textarea",
-            "datalist",
-            "div",
-            "form",
-            "label",
-            "option",
-            "span"
-          ],
-          "archetype": "form"
-        },
-        {
-          "atomicDependencies": [
-            "button",
-            "input",
-            "textarea"
-          ],
-          "file": "plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx",
-          "line": 6,
-          "name": "PacketDraftEditor",
-          "renderedTags": [
-            "Button",
-            "Input",
-            "Textarea",
-            "div",
-            "fieldset",
-            "label",
-            "p"
-          ],
-          "archetype": "form"
-        }
-      ],
-      "signature": "form:button+input+textarea",
-      "disposition": "distinct-domain-compositions",
-      "rationale": "Session creation owns model, mode, and initial prompt selection. Family email revision owns immutable draft versions, stale approval rejection, and preservation of unsaved edits. Their shared field and button behavior remains in canonical atoms.",
-      "memberComponentIds": [
-        "packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx:CockpitNewSessionForm",
-        "plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx:PacketDraftEditor"
-      ],
-      "semanticFingerprint": "sha256:173f0f898a7384e9d1d418903e0385ae1fd1845d178512241aeed07f627e216f"
-    },
-    {
       "archetype": "row",
       "atomicDependencies": [
         "button",
@@ -1143,7 +1184,7 @@
   ],
   "summary": {
     "clusterCount": 12,
-    "clusteredComponents": 32,
+    "clusteredComponents": 34,
     "largestCluster": 4
   }
 }

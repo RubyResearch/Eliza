@@ -107,6 +107,10 @@ export interface BaseMetadata {
 export interface DocumentMetadata {
 	base?: BaseMetadata;
 	type?: "document";
+	/** Legacy agent-wide discovery pin, used only when pinTargets is absent. */
+	pinned?: boolean;
+	/** Discovery placement only; every reader must independently satisfy document access. */
+	pinTargets?: { agent: boolean; roomIds: UUID[] };
 	/** Read-only entity grants that remain valid independently of room membership. */
 	directGrantEntityIds?: UUID[];
 	/** Served original-bytes file (content-addressed) linked to this document. */

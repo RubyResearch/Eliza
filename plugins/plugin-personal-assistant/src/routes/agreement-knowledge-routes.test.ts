@@ -67,6 +67,64 @@ function context(input: {
 }
 
 describe("agreement knowledge routes", () => {
+  it.each([true, false])(
+    "returns an owner correction receipt with creation status %s",
+    async (created) => {
+      const proposal = {
+        title: "School",
+        obligationText: "Share notices",
+        citationText: "Share notices",
+        pageStart: 1,
+        pageEnd: 1,
+      };
+      const addOwnerReviewProposal = vi.fn(async () => ({
+        obligation: { id: "saved" },
+        created,
+      }));
+      const harness = context({
+        method: "POST",
+        pathname: "/api/lifeops/agreements/source/obligations",
+        body: { ...proposal, ownerEntityId: "untrusted" },
+        agreements: { addOwnerReviewProposal },
+      });
+      await handleAgreementKnowledgeRoutes(harness.ctx);
+      expect(addOwnerReviewProposal).toHaveBeenCalledWith({
+        artifactId: "source",
+        ownerEntityId: "self",
+        proposal,
+      });
+      expect(harness.responses).toEqual([
+        {
+          status: created ? 201 : 200,
+          data: { obligation: { id: "saved" }, created },
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    ["AGREEMENT_REVIEW_UNAVAILABLE", 503],
+    ["AGREEMENT_REVIEW_INVALID", 422],
+    ["AGREEMENT_REVIEW_CITATION_INVALID", 422],
+  ] as const)(
+    "preserves %s as an actionable review failure",
+    async (code, status) => {
+      const harness = context({
+        method: "POST",
+        pathname: "/api/lifeops/agreements/document/review",
+        agreements: {
+          prepareOwnerReview: async () => {
+            throw new ElizaError("Retry review", { code });
+          },
+        },
+      });
+      await handleAgreementKnowledgeRoutes(harness.ctx);
+      expect(harness.responses).toMatchObject([
+        { status, data: { error: { code, message: "Retry review" } } },
+      ]);
+    },
+  );
+
   it.each(["FAMILY_WORKSPACE_FENCED", "FAMILY_OPERATION_UNSETTLED"])(
     "returns %s upload admission failures as conflicts",
     async (code) => {

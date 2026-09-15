@@ -1,6 +1,6 @@
 # Molecular component duplicate inventory
 
-Scanned 917 maintained React files. 104 exported compositions have a recognized molecular role and at least two atomic dependencies.
+Scanned 929 maintained React files. 110 exported compositions have a recognized molecular role and at least two atomic dependencies.
 
 Clusters share both a role and an atomic dependency signature. Detection creates a review queue; this committed report contains only final dispositions based on product behavior, state ownership, and responsive layout.
 
@@ -20,20 +20,29 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 
 | Role | Atomic dependencies | Components | Decision |
 | --- | --- | ---: | --- |
+| form | button, input | 4 | distinct-domain-compositions |
 | row | button, card | 4 | distinct-domain-compositions |
 | dialog | button, dialog | 3 | distinct-domain-compositions |
 | dialog | button, dialog, input | 3 | distinct-domain-compositions |
-| form | button, input | 3 | distinct-domain-compositions |
+| form | button, input, textarea | 3 | distinct-domain-compositions |
 | list | badge, button, card | 3 | distinct-domain-compositions |
 | panel | button, card, input | 3 | distinct-domain-compositions |
 | panel | button, input | 3 | distinct-domain-compositions |
 | card | badge, button, card, checkbox, dialog, spinner | 2 | distinct-domain-compositions |
 | card | button, input | 2 | distinct-domain-compositions |
 | dialog | alert, button, card | 2 | distinct-domain-compositions |
-| form | button, input, textarea | 2 | distinct-domain-compositions |
 | row | button, card, statusDot | 2 | distinct-domain-compositions |
 
 ## Reviewed clusters
+
+### form: button + input
+
+- `TriggerForm` in `packages/ui/src/components/pages/TriggerForm.tsx:231`
+- `TagEditor` in `packages/ui/src/components/ui/tag-editor.tsx:29`
+- `LoginForm` in `packages/ui/src/login/components/LoginForm.tsx:180`
+- `MonthlyScheduleEditor` in `plugins/plugin-personal-assistant/src/components/family-operations/MonthlyScheduleEditor.tsx:8`
+- Fingerprint: `sha256:dabb8a0a48c8ffa8aa2ca60e407ccb9a3260d7951005a8b4824602a47d885519`
+- Decision: **distinct-domain-compositions**. Workflow-trigger configuration, tag editing, login and monthly family timing share canonical Button and Input primitives. Login owns credential challenges and session handoff; tag editing emits string lists; TriggerForm owns workflow definitions, execution history and templates. MonthlyScheduleEditor edits the existing family ScheduledTask through its owner adapter, preserves timezone and lifecycle state, and focuses save failures. These forms have separate domain contracts.
 
 ### row: button + card
 
@@ -48,7 +57,7 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 
 - `EditSkillModal` in `packages/ui/src/components/pages/skill-detail-panel.tsx:35`
 - `ConfirmDialog` in `packages/ui/src/components/ui/confirm-dialog.tsx:35`
-- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:519`
+- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:527`
 - Fingerprint: `sha256:20da2a24641576e0c73aca23d9042d1a865c4885e106f53a792be2624a8fe4d7`
 - Decision: **distinct-domain-compositions**. The skill editor owns source loading and saving; the confirmation dialog emits a caller-owned decision; the calendar editor owns provider mutations and timed or all-day date validation. Its timing fieldset does not introduce a shared dialog lifecycle.
 
@@ -60,13 +69,13 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 - Fingerprint: `sha256:baf8c850cab849f7ceb04e8ad6ff718d448b16337368fe64e9786a51414a8fa5`
 - Decision: **distinct-domain-compositions**. Command persistence, conversation renaming, and generic prompting have different validation, pending, error, and result contracts. Their stable shared behavior already belongs to Dialog, Input, and Button.
 
-### form: button + input
+### form: button + input + textarea
 
-- `TriggerForm` in `packages/ui/src/components/pages/TriggerForm.tsx:231`
-- `TagEditor` in `packages/ui/src/components/ui/tag-editor.tsx:29`
-- `LoginForm` in `packages/ui/src/login/components/LoginForm.tsx:180`
-- Fingerprint: `sha256:fcf873875a506f36121cec3f220e955971468c53d28e938874b7b2890cdeccf6`
-- Decision: **distinct-domain-compositions**. Trigger configuration, tag editing and login share generic controls but not a domain lifecycle. Login performs provider discovery, credential challenges and session handoff; trigger configuration edits scheduling state; tag editing emits a list of strings. Each composes the canonical Button and Input primitives.
+- `CockpitNewSessionForm` in `packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx:64`
+- `AgreementProposalEditor` in `plugins/plugin-personal-assistant/src/components/family-operations/AgreementProposalEditor.tsx:6`
+- `PacketDraftEditor` in `plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx:6`
+- Fingerprint: `sha256:37d6191bc5906dd75f77c0fa0c8b1a0db01057621e86408b9e2fef230f3962c4`
+- Decision: **distinct-domain-compositions**. Session creation owns model, mode, and initial prompt selection. Family email revision owns immutable draft versions and stale approval rejection. Agreement correction owns literal page citations, unapproved proposals, and recovery of a saved proposal without resubmitting it. These distinct domain transitions share canonical field and button atoms, not one form lifecycle.
 
 ### list: badge + button + card
 
@@ -112,13 +121,6 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 - `InviteMemberDialog` in `packages/ui/src/cloud/organization/invite-member-dialog.tsx:66`
 - Fingerprint: `sha256:6691c91cff13e2f52c953d92dbc15729b0939294fd4a3bad4d7609b488acf564`
 - Decision: **distinct-domain-compositions**. The dialogs share canonical feedback and surface atoms while retaining unrelated validation, confirmation, and completion lifecycles.
-
-### form: button + input + textarea
-
-- `CockpitNewSessionForm` in `packages/ui/src/components/cockpit/CockpitNewSessionForm.tsx:64`
-- `PacketDraftEditor` in `plugins/plugin-personal-assistant/src/components/family-operations/PacketDraftEditor.tsx:6`
-- Fingerprint: `sha256:173f0f898a7384e9d1d418903e0385ae1fd1845d178512241aeed07f627e216f`
-- Decision: **distinct-domain-compositions**. Session creation owns model, mode, and initial prompt selection. Family email revision owns immutable draft versions, stale approval rejection, and preservation of unsaved edits. Their shared field and button behavior remains in canonical atoms.
 
 ### row: button + card + statusDot
 

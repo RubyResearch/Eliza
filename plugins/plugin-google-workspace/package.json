@@ -58,6 +58,7 @@
     "@elizaos/plugin-sql": "workspace:*",
     "@types/node": "^25.6.0",
     "@typescript/native": "npm:typescript@^7.0.2",
+    "postal-mime": "2.7.5",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10"
   },

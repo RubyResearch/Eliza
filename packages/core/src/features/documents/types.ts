@@ -160,6 +160,10 @@ export interface AddDocumentOptions {
 	contentType: string;
 	originalFilename: string;
 	content: string;
+	/** Text defaults to literal UTF-8; binary formats default to Base64. Encoded text must declare Base64. */
+	contentEncoding?: "utf8" | "base64";
+	/** Chat uploads are visible only through the canonical room membership policy. */
+	audience?: "chat";
 	scope?: DocumentVisibilityScope;
 	scopedToEntityId?: UUID;
 	/** Read-only entity grants that remain valid independently of room membership. */

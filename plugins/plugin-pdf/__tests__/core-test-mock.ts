@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-vi.mock("@elizaos/core", () => {
+vi.mock("@elizaos/core", async () => {
 	const logger = {
 		debug: vi.fn(),
 		error: vi.fn(),
@@ -19,6 +19,7 @@ vi.mock("@elizaos/core", () => {
 	}
 
 	return {
+		ElizaError: (await import("../../../packages/core/src/errors.ts")).ElizaError,
 		ModelType: {
 			IMAGE_DESCRIPTION: "IMAGE_DESCRIPTION",
 		},

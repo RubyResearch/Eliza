@@ -3,11 +3,9 @@
  *
  * Drives the promoted `PgApprovalQueue` through the registered service's
  * `getQueue()` accessor against an in-memory fake of the `approval_requests`
- * table (the public-schema table owned by `@elizaos/plugin-sql`). The raw SQL
- * is unchanged from the LifeOps source, so this exercises the exact INSERT /
- * SELECT / UPDATE … RETURNING shapes the queue emits and asserts the
- * state-machine contract is preserved across the promotion to a runtime
- * service.
+ * table. The fake assumes dispatch admission is open; real PGlite integration
+ * tests own the pause/claim serialization boundary. This suite exercises
+ * service wiring, notifications, and approval state transitions.
  *
  * The drizzle `sql.raw` shim hands the store our raw SQL text directly; the
  * fake `adapter.db.execute` interprets it against an in-memory row map. We only
@@ -236,12 +234,26 @@ function createApprovalTableRuntime(
   const execute = (
     sqlText: string,
   ): { rows: Array<Record<string, unknown>> } => {
-    const trimmed = sqlText.trim();
+    let trimmed = sqlText.trim();
+    if (trimmed.startsWith("WITH approval_admission AS")) {
+      const mutation = trimmed.search(
+        /(?:INSERT INTO|UPDATE) approval_requests/,
+      );
+      if (mutation < 0) {
+        if (trimmed.endsWith("SELECT permitted FROM approval_permission"))
+          return { rows: [{ permitted: true }] };
+        throw new Error("Approval admission has no supported mutation");
+      }
+      trimmed = trimmed.slice(mutation);
+    }
+    if (/^SELECT[\s\S]+FROM approval_dispatch_controls/i.test(trimmed)) {
+      return { rows: [] };
+    }
 
     if (/^INSERT\s+INTO\s+approval_requests/i.test(trimmed)) {
-      const colsMatch = trimmed.match(/\(([\s\S]+?)\)\s*VALUES/i);
+      const colsMatch = trimmed.match(/\(([\s\S]+?)\)\s*SELECT/i);
       const valsMatch = trimmed.match(
-        /VALUES\s*\(([\s\S]+?)\)\s*(?:ON\s+CONFLICT[\s\S]+?)?RETURNING/i,
+        /\)\s*SELECT\s+([\s\S]+?)\s+FROM approval_admission/i,
       );
       if (!colsMatch || !valsMatch) throw new Error("bad INSERT in mock");
       const columns = colsMatch[1].split(",").map((s) => s.trim());

@@ -120,6 +120,9 @@ async function loadSnapshot(
 }
 
 export const defaultLifeOpsConnectionsAdapter: LifeOpsConnectionsAdapter = {
+  getLinkedCalendarControl: () => lifeOpsClient.getLinkedCalendarControl(),
+  updateLinkedCalendarControl: (request) =>
+    lifeOpsClient.updateLinkedCalendarControl(request),
   load: ({ forceSync = false } = {}) => loadSnapshot(forceSync),
   async connectGoogle(capabilities: LifeOpsGoogleCapability[]) {
     const result = await lifeOpsClient.startLifeOpsGoogleConnector({

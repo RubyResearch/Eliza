@@ -4,9 +4,11 @@
  * composition across user and agent-tenant boundaries.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { readDocumentMutationSnapshot } from "../../database/document-list-query.ts";
 import { setEntityRoleCas } from "../../roles.ts";
 import { filterByContextGate } from "../../runtime/context-gates.ts";
 import type { AgentRuntime } from "../../runtime.ts";
+import { selectV5PlannerStateProviderNames } from "../../services/message/provider-state.ts";
 import { createTestRuntime } from "../../testing/pglite-runtime.ts";
 import { runWithTrajectoryContext } from "../../trajectory-context.ts";
 import {
@@ -20,6 +22,7 @@ import {
 	type UUID,
 } from "../../types/index.ts";
 import { documentAction } from "./actions.ts";
+import { pinnedDocumentsProvider } from "./pinned-provider.ts";
 import { documentsProvider } from "./provider.ts";
 import { DocumentService } from "./service.ts";
 
@@ -121,10 +124,43 @@ function documentFragment(document: Memory, text: string, id: UUID): Memory {
 	};
 }
 
+async function privateConversation(entityId: UUID): Promise<UUID> {
+	const roomId = crypto.randomUUID() as UUID;
+	await runtime.ensureConnection({
+		entityId,
+		roomId,
+		worldId: WORLD_ID,
+		worldName: "Document authorization",
+		userName: "Private reader",
+		name: "Private document conversation",
+		source: "test",
+		type: ChannelType.DM,
+	});
+	return roomId;
+}
+
 beforeAll(async () => {
 	({ runtime, cleanup } = await createTestRuntime({
 		characterName: "DocumentAuthorizationTest",
 	}));
+	// Seed authority when the world is created; connection updates preserve roles.
+	await runtime.ensureWorldExists({
+		id: WORLD_ID,
+		name: "Document authorization",
+		agentId: runtime.agentId,
+		metadata: {
+			roles: {
+				[USER_ID]: "USER",
+				[OTHER_USER_ID]: "USER",
+				[ADMIN_ID]: "ADMIN",
+			},
+			roleSources: {
+				[USER_ID]: "manual",
+				[OTHER_USER_ID]: "manual",
+				[ADMIN_ID]: "manual",
+			},
+		},
+	});
 	await runtime.ensureConnection({
 		entityId: USER_ID,
 		roomId: ROOM_ID,
@@ -158,6 +194,7 @@ beforeAll(async () => {
 		source: "test",
 		type: ChannelType.DM,
 	});
+
 	// Role maps are protected authority state: legacy world upserts cannot
 	// grant access after ensureConnection has created the world.
 	for (const [entityId, role] of [
@@ -286,6 +323,11 @@ describe("DocumentService requester authorization", () => {
 				adminContext,
 			),
 		).resolves.toEqual([GRANTEE_ID]);
+		const reviewedAccess =
+			await service.getDocumentDirectGrantStateWithAccessContext(
+				grantDocumentId,
+				adminContext,
+			);
 
 		await expect(
 			runtime.adapter.getDocument({
@@ -319,7 +361,25 @@ describe("DocumentService requester authorization", () => {
 				offset: 0,
 				limit: 1,
 			}),
-		).resolves.toBeNull();
+		).resolves.toMatchObject({ text: "Private grantable body", total: 1 });
+		const guestContext = {
+			requesterEntityId: GRANTEE_ID,
+			role: "GUEST" as const,
+			isOwner: false,
+		};
+		await expect(
+			service.getDocumentByIdWithAccessContext(grantDocumentId, guestContext),
+		).resolves.toMatchObject({
+			id: grantDocumentId,
+			content: { text: "Private grantable body" },
+		});
+		await expect(
+			service.setDocumentDirectGrantsWithAccessContext(
+				grantDocumentId,
+				[],
+				guestContext,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_GRANT_MUTATION_FORBIDDEN" });
 		await expect(
 			service.setDocumentDirectGrantsWithAccessContext(grantDocumentId, [], {
 				requesterEntityId: GRANTEE_ID,
@@ -341,6 +401,30 @@ describe("DocumentService requester authorization", () => {
 			adminContext,
 		);
 		await expect(
+			service.setDocumentDirectGrantsWithAccessContext(
+				grantDocumentId,
+				[GRANTEE_ID],
+				adminContext,
+				reviewedAccess.accessRevision,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_GRANT_MUTATION_CONFLICT" });
+		await expect(
+			service.getDocumentByIdWithAccessContext(grantDocumentId, guestContext),
+		).resolves.toBeNull();
+		await expect(
+			runtime.adapter.readDocumentRange?.({
+				agentId: runtime.agentId,
+				documentId: grantDocumentId,
+				requesterEntityId: GRANTEE_ID,
+				requesterRoomIds: [],
+				requesterRole: "GUEST",
+				unit: "line",
+				offset: 0,
+				limit: 1,
+			}),
+		).resolves.toBeNull();
+
+		await expect(
 			runtime.adapter.readDocumentRange?.({
 				agentId: runtime.agentId,
 				documentId: grantDocumentId,
@@ -356,6 +440,12 @@ describe("DocumentService requester authorization", () => {
 			grantDocumentId,
 			[GRANTEE_ID],
 			adminContext,
+			(
+				await service.getDocumentDirectGrantStateWithAccessContext(
+					grantDocumentId,
+					adminContext,
+				)
+			).accessRevision,
 		);
 	});
 
@@ -505,6 +595,7 @@ describe("DocumentService requester authorization", () => {
 			...message(),
 			id: "f4300000-0000-4000-8000-000000000015" as UUID,
 			entityId: OTHER_USER_ID,
+			roomId: await privateConversation(OTHER_USER_ID),
 			content: {
 				text: "launch knowledge",
 				source: "test",
@@ -527,6 +618,479 @@ describe("DocumentService requester authorization", () => {
 		} finally {
 			getService.mockRestore();
 		}
+	});
+
+	it("composes only explicitly shared guest knowledge and removes it after revocation", async () => {
+		const service = new DocumentService(runtime);
+		const shared = userPrivateDocument(
+			"f4300000-0000-4000-8000-000000000040" as UUID,
+			"GUEST_SHARED_PIN_COMPLETE_BODY",
+		);
+		const hidden = userPrivateDocument(
+			"f4300000-0000-4000-8000-000000000041" as UUID,
+			"GUEST_HIDDEN_PIN_BODY",
+		);
+		shared.metadata = {
+			...shared.metadata,
+			type: MemoryType.DOCUMENT,
+			pinned: true,
+		};
+		hidden.metadata = {
+			...hidden.metadata,
+			type: MemoryType.DOCUMENT,
+			pinned: true,
+		};
+		await runtime.createMemories([
+			{ memory: shared, tableName: "documents" },
+			{ memory: hidden, tableName: "documents" },
+		]);
+		const request = {
+			...message(),
+			entityId: GRANTEE_ID,
+			roomId: await privateConversation(GRANTEE_ID),
+			content: { text: "What knowledge was shared with me?" },
+		};
+		const selected = filterByContextGate(
+			[documentsProvider],
+			["knowledge"],
+			["GUEST"],
+		);
+		expect(selected).toHaveLength(1);
+		const provider = selected[0];
+		const sharedId = shared.id;
+		if (!provider || !sharedId)
+			throw new Error("Guest provider fixture is incomplete");
+		const getService = vi.spyOn(runtime, "getService").mockReturnValue(service);
+		const admin = {
+			requesterEntityId: ADMIN_ID,
+			role: "ADMIN" as const,
+			isOwner: false,
+		};
+		try {
+			const before = await provider.get(runtime, request, {} as State);
+			expect(before.text).not.toContain("GUEST_SHARED_PIN_COMPLETE_BODY");
+			await service.setDocumentDirectGrantsWithAccessContext(
+				sharedId,
+				[GRANTEE_ID],
+				admin,
+			);
+			const after = await provider.get(runtime, request, {} as State);
+			expect(after.text).toContain("GUEST_SHARED_PIN_COMPLETE_BODY");
+			expect(after.text).not.toContain("GUEST_HIDDEN_PIN_BODY");
+			expect(after.values?.pinnedDocumentIds).toContain(shared.id);
+			await service.setDocumentDirectGrantsWithAccessContext(
+				sharedId,
+				[],
+				admin,
+			);
+			const revoked = await provider.get(runtime, request, {} as State);
+			expect(revoked.text).not.toContain("GUEST_SHARED_PIN_COMPLETE_BODY");
+			expect(revoked.text).not.toContain("GUEST_HIDDEN_PIN_BODY");
+			expect(revoked.values?.pinnedDocumentIds).not.toContain(shared.id);
+		} finally {
+			getService.mockRestore();
+		}
+	});
+
+	it("pins independently to chat and agent without changing readers or losing concurrent edits", async () => {
+		const service = new DocumentService(runtime);
+		const pinRoom = await privateConversation(USER_ID);
+		const id = "f4300000-0000-4000-8000-000000000050" as UUID;
+		const otherRoom = "f4300000-0000-4000-8000-000000000051" as UUID;
+		const missingRoom = "f4300000-0000-4000-8000-000000000052" as UUID;
+		await runtime.ensureConnection({
+			entityId: USER_ID,
+			roomId: otherRoom,
+			worldId: WORLD_ID,
+			worldName: "Document authorization",
+			userName: "Document owner",
+			name: "Second document chat",
+			source: "test",
+			type: ChannelType.DM,
+		});
+		const original = userPrivateDocument(id, "CHAT_PIN_COMPLETE_BODY");
+		await runtime.createMemories([
+			{ memory: original, tableName: "documents" },
+		]);
+		const owner = {
+			requesterEntityId: USER_ID,
+			role: "OWNER" as const,
+			isOwner: true,
+		};
+		const first = await service.getDocumentPinsWithAccessContext(id, owner);
+		const updated = await service.setDocumentPinsWithAccessContext(
+			id,
+			{ agent: false, roomIds: [pinRoom] },
+			owner,
+			first.pinRevision,
+		);
+		expect(updated.content).toEqual(original.content);
+		expect(updated.metadata).toMatchObject({
+			scope: "user-private",
+			scopedToEntityId: USER_ID,
+			documentRevision: 0,
+		});
+		const includes = async (request: Memory) =>
+			(await service.composeProviderDocuments(request)).pinnedDocuments.some(
+				(document) => document.id === id,
+			);
+		expect(await includes({ ...message(), roomId: pinRoom })).toBe(true);
+		expect(await includes({ ...message(), roomId: otherRoom })).toBe(false);
+		expect(await includes({ ...message(), entityId: OTHER_USER_ID })).toBe(
+			false,
+		);
+		await expect(
+			service.setDocumentPinsWithAccessContext(
+				id,
+				{ agent: true, roomIds: [] },
+				owner,
+				first.pinRevision,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_PIN_CONFLICT" });
+		const snapshot = readDocumentMutationSnapshot(original);
+		if (!snapshot) throw new Error("Invalid pin fixture");
+		await expect(
+			runtime.adapter.compareAndSwapDocument({
+				agentId: runtime.agentId,
+				requesterEntityId: USER_ID,
+				requesterRole: "OWNER",
+				requesterRoomIds: [],
+				documentId: id,
+				expected: snapshot,
+				replacement: original,
+			}),
+		).resolves.toEqual({ status: "conflict" });
+		const current = await service.getDocumentPinsWithAccessContext(id, owner);
+		await expect(
+			service.setDocumentPinsWithAccessContext(
+				id,
+				{ agent: false, roomIds: [missingRoom] },
+				owner,
+				current.pinRevision,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_PIN_ROOM_INVALID" });
+		await expect(
+			service.setDocumentPinsWithAccessContext(
+				id,
+				{ agent: false, roomIds: [pinRoom, pinRoom] },
+				owner,
+				current.pinRevision,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_PIN_TARGETS_INVALID" });
+		await expect(
+			service.setDocumentPinsWithAccessContext(
+				id,
+				{ agent: true, roomIds: [] },
+				{ requesterEntityId: GRANTEE_ID, role: "GUEST", isOwner: false },
+				current.pinRevision,
+			),
+		).rejects.toMatchObject({ code: "DOCUMENT_PIN_FORBIDDEN" });
+		await service.setDocumentPinsWithAccessContext(
+			id,
+			{ agent: true, roomIds: [] },
+			owner,
+			current.pinRevision,
+		);
+		expect(await includes({ ...message(), roomId: otherRoom })).toBe(true);
+		expect(await includes({ ...message(), entityId: OTHER_USER_ID })).toBe(
+			false,
+		);
+		await service.setDocumentPinsWithAccessContext(
+			id,
+			{ agent: false, roomIds: [] },
+			owner,
+			(await service.getDocumentPinsWithAccessContext(id, owner)).pinRevision,
+		);
+		expect(await includes({ ...message(), roomId: pinRoom })).toBe(false);
+	});
+
+	it("composes ordinary-conversation pins only for the complete chat audience and observes revocation", async () => {
+		const service = new DocumentService(runtime);
+		const roomId = "f4300000-0000-4000-8000-000000000060" as UUID;
+		const id = "f4300000-0000-4000-8000-000000000061" as UUID;
+		await runtime.ensureConnection({
+			entityId: USER_ID,
+			roomId,
+			worldId: WORLD_ID,
+			worldName: "Document authorization",
+			userName: "Document owner",
+			name: "Conversation pins",
+			source: "test",
+			type: ChannelType.GROUP,
+		});
+		const original = userPrivateDocument(
+			id,
+			"Hello COMPLETE_CONVERSATION_PIN\nAUDIENCE_SEARCH_FRAGMENT\nDo not lose the final line.",
+		);
+		original.metadata = {
+			...original.metadata,
+			type: MemoryType.DOCUMENT,
+			pinTargets: { agent: true, roomIds: [] },
+		};
+		await runtime.createMemories([
+			{ memory: original, tableName: "documents" },
+			{
+				memory: documentFragment(
+					original,
+					"Hello AUDIENCE_SEARCH_FRAGMENT",
+					crypto.randomUUID() as UUID,
+				),
+				tableName: "document_fragments",
+			},
+		]);
+		runtime.registerProvider(pinnedDocumentsProvider);
+		runtime.registerProvider(documentsProvider);
+		const getService = vi
+			.spyOn(runtime, "getService")
+			.mockImplementation((type) =>
+				type === DocumentService.serviceType ? service : null,
+			);
+		const request = {
+			...message(),
+			roomId,
+			content: {
+				text: "Hello",
+				source: "test",
+				channelType: ChannelType.GROUP,
+			},
+		};
+		const compose = async (context = "simple") => {
+			const turnRequest = { ...request, id: crypto.randomUUID() as UUID };
+			const names = selectV5PlannerStateProviderNames({
+				runtime,
+				message: turnRequest,
+				selectedContexts: [context],
+				userRoles: ["USER"],
+			});
+			return runtime.composeState(turnRequest, names, true);
+		};
+		try {
+			expect((await compose()).text).toContain(original.content.text);
+			expect(
+				(
+					await service.composeProviderDocuments(request)
+				).relevantFragments.some(
+					(fragment) =>
+						fragment.content.text === "Hello AUDIENCE_SEARCH_FRAGMENT",
+				),
+			).toBe(true);
+			expect((await compose("knowledge")).text).toContain(
+				original.content.text,
+			);
+			await runtime.ensureConnection({
+				entityId: GRANTEE_ID,
+				roomId,
+				worldId: WORLD_ID,
+				worldName: "Document authorization",
+				userName: "Guest",
+				name: "Guest",
+				source: "test",
+				type: ChannelType.GROUP,
+			});
+			expect((await compose()).text).not.toContain("COMPLETE_CONVERSATION_PIN");
+			expect(
+				(
+					await service.composeProviderDocuments(request)
+				).relevantFragments.some(
+					(fragment) =>
+						fragment.content.text === "Hello AUDIENCE_SEARCH_FRAGMENT",
+				),
+			).toBe(false);
+			expect((await compose("knowledge")).text).not.toContain(
+				"AUDIENCE_SEARCH_FRAGMENT",
+			);
+			expect((await compose("knowledge")).text).not.toContain(
+				"COMPLETE_CONVERSATION_PIN",
+			);
+			const owner = {
+				requesterEntityId: USER_ID,
+				role: "OWNER" as const,
+				isOwner: true,
+			};
+			await service.setDocumentDirectGrantsWithAccessContext(
+				id,
+				[GRANTEE_ID],
+				owner,
+			);
+			expect((await compose()).text).toContain(original.content.text);
+			expect(
+				(
+					await service.composeProviderDocuments(request)
+				).relevantFragments.some(
+					(fragment) =>
+						fragment.content.text === "Hello AUDIENCE_SEARCH_FRAGMENT",
+				),
+			).toBe(true);
+			expect((await compose("knowledge")).text).toContain(
+				original.content.text,
+			);
+			await service.setDocumentDirectGrantsWithAccessContext(id, [], owner);
+			expect((await compose()).text).not.toContain("COMPLETE_CONVERSATION_PIN");
+			expect(
+				(
+					await service.composeProviderDocuments(request)
+				).relevantFragments.some(
+					(fragment) =>
+						fragment.content.text === "Hello AUDIENCE_SEARCH_FRAGMENT",
+				),
+			).toBe(false);
+			expect((await compose("knowledge")).text).not.toContain(
+				"AUDIENCE_SEARCH_FRAGMENT",
+			);
+			expect((await compose("knowledge")).text).not.toContain(
+				"COMPLETE_CONVERSATION_PIN",
+			);
+			await service.setDocumentDirectGrantsWithAccessContext(
+				id,
+				[GRANTEE_ID],
+				owner,
+			);
+			const read = service.getDocumentById.bind(service);
+			let joined = false;
+			const duringRead = vi
+				.spyOn(service, "getDocumentById")
+				.mockImplementation(async (...args) => {
+					if (!joined) {
+						joined = true;
+						await runtime.ensureConnection({
+							entityId: OTHER_USER_ID,
+							roomId,
+							worldId: WORLD_ID,
+							worldName: "Document authorization",
+							userName: "New participant",
+							name: "New participant",
+							source: "test",
+							type: ChannelType.GROUP,
+						});
+					}
+					return read(...args);
+				});
+			try {
+				await expect(
+					service.listConversationPins(request),
+				).rejects.toMatchObject({ code: "DOCUMENT_PIN_CONTEXT_CHANGED" });
+				await runtime.removeParticipant(OTHER_USER_ID, roomId);
+				joined = false;
+				await expect(
+					service.composeProviderDocuments(request),
+				).rejects.toMatchObject({ code: "DOCUMENT_CONTEXT_CHANGED" });
+			} finally {
+				duringRead.mockRestore();
+			}
+			expect((await compose()).text).not.toContain("COMPLETE_CONVERSATION_PIN");
+			expect(
+				(
+					await service.composeProviderDocuments(request)
+				).relevantFragments.some(
+					(fragment) =>
+						fragment.content.text === "Hello AUDIENCE_SEARCH_FRAGMENT",
+				),
+			).toBe(false);
+			expect((await compose("knowledge")).text).not.toContain(
+				"AUDIENCE_SEARCH_FRAGMENT",
+			);
+			expect((await compose("knowledge")).text).not.toContain(
+				"COMPLETE_CONVERSATION_PIN",
+			);
+		} finally {
+			getService.mockRestore();
+		}
+	});
+
+	it("rejects search snippets from a revision replaced before audience inventory completes", async () => {
+		const service = new DocumentService(runtime);
+		const roomId = await privateConversation(USER_ID);
+		const id = crypto.randomUUID() as UUID;
+		const original = userPrivateDocument(id, "raceword old source");
+		await runtime.createMemories([
+			{ memory: original, tableName: "documents" },
+			{
+				memory: documentFragment(
+					original,
+					"raceword old source",
+					crypto.randomUUID() as UUID,
+				),
+				tableName: "document_fragments",
+			},
+		]);
+		const snapshot = readDocumentMutationSnapshot(original);
+		if (!snapshot) throw new Error("Revision race fixture is invalid");
+		const ready = Promise.withResolvers<void>();
+		const query = runtime.adapter.queryDocuments.bind(runtime.adapter);
+		const fragments = runtime.adapter.queryDocumentFragments.bind(
+			runtime.adapter,
+		);
+		const inventory = vi
+			.spyOn(runtime.adapter, "queryDocuments")
+			.mockImplementation(async (...args) => {
+				await ready.promise;
+				return query(...args);
+			});
+		let scans = 0;
+		const search = vi
+			.spyOn(runtime.adapter, "queryDocumentFragments")
+			.mockImplementation(async (...args) => {
+				const rows = await fragments(...args);
+				// Both complete scans and their empty continuation probes finish before the write.
+				if (++scans === 4) {
+					const replacement = {
+						...original,
+						content: { text: "raceword revised source" },
+						metadata: {
+							...original.metadata,
+							type: MemoryType.DOCUMENT,
+							documentRevision: 1,
+						},
+					};
+					const mutation = await runtime.adapter.replaceDocumentRevision({
+						agentId: runtime.agentId,
+						documentId: id,
+						requesterEntityId: USER_ID,
+						requesterRole: "USER",
+						requesterRoomIds: [ROOM_ID, roomId],
+						expected: snapshot,
+						replacement,
+						fragments: [
+							documentFragment(
+								replacement,
+								"raceword revised source",
+								crypto.randomUUID() as UUID,
+							),
+						],
+					});
+					expect(mutation.status).toBe("updated");
+					ready.resolve();
+				}
+				return rows;
+			});
+		try {
+			await expect(
+				service.composeProviderDocuments({
+					...message(),
+					roomId,
+					content: { text: "raceword" },
+				}),
+			).rejects.toMatchObject({ code: "DOCUMENT_CONTEXT_CHANGED" });
+		} finally {
+			ready.resolve();
+			inventory.mockRestore();
+			search.mockRestore();
+		}
+		const current = await service.composeProviderDocuments({
+			...message(),
+			roomId,
+			content: { text: "raceword" },
+		});
+		expect(
+			current.relevantFragments.some(
+				(fragment) => fragment.content.text === "raceword revised source",
+			),
+		).toBe(true);
+		expect(
+			current.relevantFragments.some(
+				(fragment) => fragment.content.text === "raceword old source",
+			),
+		).toBe(false);
 	});
 
 	it("keeps the complete old revision when replacement embedding fails", async () => {
@@ -646,6 +1210,53 @@ describe("DocumentService requester authorization", () => {
 		await expect(
 			runtime.adapter.getMemoryById(oldFragmentId),
 		).resolves.toBeNull();
+		if (!parent) throw new Error("Replacement parent was not readable");
+		const expected = readDocumentMutationSnapshot(parent);
+		if (!expected)
+			throw new Error("Replacement parent has no mutation snapshot");
+		const rejectedFragmentId = "f4300000-0000-4000-8000-000000000099" as UUID;
+		const oversized = "x".repeat(32 * 1024 * 1024);
+		await expect(
+			runtime.adapter.replaceDocumentRevision({
+				...context,
+				documentId: ATOMIC_UPDATE_DOCUMENT_ID,
+				expected,
+				replacement: {
+					...parent,
+					content: { text: oversized },
+					metadata: { ...parent.metadata, documentRevision: 2 },
+				},
+				fragments: [
+					{
+						...documentFragment(
+							parent,
+							"Unpublished fragment",
+							rejectedFragmentId,
+						),
+						metadata: {
+							...documentFragment(
+								parent,
+								"Unpublished fragment",
+								rejectedFragmentId,
+							).metadata,
+							documentRevision: 2,
+						},
+					},
+				],
+			}),
+		).rejects.toMatchObject({ code: "SQL_JSON_SANITIZE_UNBOUNDED" });
+		await expect(
+			runtime.adapter.getMemoryById(ATOMIC_UPDATE_DOCUMENT_ID),
+		).resolves.toMatchObject({
+			content: { text: "Atomic replacement body" },
+			metadata: { documentRevision: 1 },
+		});
+		await expect(
+			runtime.adapter.getMemoryById(rejectedFragmentId),
+		).resolves.toBeNull();
+		await expect(
+			runtime.adapter.getMemoryById(replacementFragments[0].id as UUID),
+		).resolves.toMatchObject({ content: { text: "Atomic replacement body" } });
 	});
 
 	it("denies same-turn update and delete after room membership is revoked", async () => {

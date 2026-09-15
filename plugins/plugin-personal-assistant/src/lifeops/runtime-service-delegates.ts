@@ -13,6 +13,10 @@ import {
   type TargetInfo,
 } from "@elizaos/core";
 import type { LifeOpsConnectorGrant } from "../contracts/index.js";
+import {
+  assertConnectorSenderIdentity,
+  dispatchWithDeliveryEvidence,
+} from "./messaging/connector-delivery-evidence.js";
 
 type WhatsAppSendRequest = {
   to: string;
@@ -767,20 +771,33 @@ export function searchDiscordMessagesWithRuntimeService(args: {
 
 export async function sendDiscordMessageWithRuntimeService(args: {
   runtime: IAgentRuntime;
+  expectedIdentityId?: string;
   grant?: ConnectorGrantAccountRef | null;
   accountId?: string | null;
   channelId: string;
   text: string;
-}): Promise<RuntimeServiceDelegationResult<{ ok: true }>> {
-  const service = getRuntimeService<ConnectorMessageRuntimeServiceLike>(
-    args.runtime,
-    ["discord"],
-  );
+}): Promise<
+  RuntimeServiceDelegationResult<{
+    ok: true;
+    delivery: ReturnType<typeof requireConfirmedSendHandlerDelivery>;
+  }>
+> {
+  const service = getRuntimeService<
+    ConnectorMessageRuntimeServiceLike & {
+      client?: { user?: { id?: string } | null } | null;
+    }
+  >(args.runtime, ["discord"]);
   if (typeof service?.handleSendMessage !== "function") {
     return unavailable(
       "Discord runtime service handleSendMessage is not registered.",
     );
   }
+  const handleSendMessage = service.handleSendMessage;
+  assertConnectorSenderIdentity(
+    "discord",
+    args.expectedIdentityId,
+    service.client?.user?.id ?? null,
+  );
   const accountId = resolveRuntimeConnectorAccountId(args);
   const target = connectorTarget({
     source: "discord",
@@ -788,14 +805,18 @@ export async function sendDiscordMessageWithRuntimeService(args: {
     channelId: args.channelId,
   });
   try {
-    requireConfirmedSendHandlerDelivery(
-      await service.handleSendMessage(args.runtime, target, {
-        text: args.text,
-        source: "lifeops",
-        metadata: { accountId },
-      } as Content),
-    );
-    return { status: "handled", accountId, value: { ok: true } };
+    const delivery = await dispatchWithDeliveryEvidence({
+      provider: "discord",
+      accountId,
+      channelId: args.channelId,
+      dispatch: () =>
+        handleSendMessage.call(service, args.runtime, target, {
+          text: args.text,
+          source: "lifeops",
+          metadata: { accountId },
+        } as Content),
+    });
+    return { status: "handled", accountId, value: { ok: true, delivery } };
   } catch (error) {
     // error-policy:J1 connector-service boundary refuses to translate an
     // unconfirmed structural outcome into `{ ok: true }`.
@@ -824,20 +845,35 @@ export function searchTelegramMessagesWithRuntimeService(args: {
 
 export async function sendTelegramMessageWithRuntimeService(args: {
   runtime: IAgentRuntime;
+  expectedIdentityId?: string;
   grant?: ConnectorGrantAccountRef | null;
   accountId?: string | null;
   target: string;
   message: string;
-}): Promise<RuntimeServiceDelegationResult<{ ok: true }>> {
-  const service = getRuntimeService<ConnectorMessageRuntimeServiceLike>(
-    args.runtime,
-    ["telegram"],
-  );
+}): Promise<
+  RuntimeServiceDelegationResult<{
+    ok: true;
+    delivery: ReturnType<typeof requireConfirmedSendHandlerDelivery>;
+  }>
+> {
+  const service = getRuntimeService<
+    ConnectorMessageRuntimeServiceLike & {
+      bot?: { botInfo?: { id?: string | number } | null } | null;
+    }
+  >(args.runtime, ["telegram"]);
   if (typeof service?.handleSendMessage !== "function") {
     return unavailable(
       "Telegram runtime service handleSendMessage is not registered.",
     );
   }
+  const handleSendMessage = service.handleSendMessage;
+  assertConnectorSenderIdentity(
+    "telegram",
+    args.expectedIdentityId,
+    service.bot?.botInfo?.id !== undefined
+      ? String(service.bot.botInfo.id)
+      : null,
+  );
   const accountId = resolveRuntimeConnectorAccountId(args);
   const target = connectorTarget({
     source: "telegram",
@@ -845,14 +881,18 @@ export async function sendTelegramMessageWithRuntimeService(args: {
     channelId: args.target,
   });
   try {
-    requireConfirmedSendHandlerDelivery(
-      await service.handleSendMessage(args.runtime, target, {
-        text: args.message,
-        source: "lifeops",
-        metadata: { accountId },
-      } as Content),
-    );
-    return { status: "handled", accountId, value: { ok: true } };
+    const delivery = await dispatchWithDeliveryEvidence({
+      provider: "telegram",
+      accountId,
+      channelId: args.target,
+      dispatch: () =>
+        handleSendMessage.call(service, args.runtime, target, {
+          text: args.message,
+          source: "lifeops",
+          metadata: { accountId },
+        } as Content),
+    });
+    return { status: "handled", accountId, value: { ok: true, delivery } };
   } catch (error) {
     // error-policy:J1 connector-service boundary refuses to translate an
     // unconfirmed structural outcome into `{ ok: true }`.

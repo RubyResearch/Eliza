@@ -611,6 +611,31 @@ declare module "./client-base" {
     ): Promise<DocumentFacetCountsResponse>;
     listDocuments(options?: DocumentListOptions): Promise<DocumentsResponse>;
     getDocument(documentId: string): Promise<{ document: DocumentDetail }>;
+    getDocumentAccess(documentId: string): Promise<{
+      documentId: string;
+      directGrantEntityIds: string[];
+      accessRevision: string;
+    }>;
+    getDocumentPins(documentId: string): Promise<{
+      documentId: string;
+      targets: { agent: boolean; roomIds: string[] };
+      pinRevision: string;
+    }>;
+    updateDocumentPins(
+      documentId: string,
+      data: { agent: boolean; roomIds: string[]; expectedPinRevision: string },
+    ): Promise<{ ok: true; documentId: string }>;
+    updateDocumentAccess(
+      documentId: string,
+      data: {
+        directGrantEntityIds: string[];
+        expectedAccessRevision: string;
+      },
+    ): Promise<{
+      ok: true;
+      documentId: string;
+      directGrantEntityIds: string[];
+    }>;
     updateDocument(
       documentId: string,
       data: { content: string },
@@ -1522,6 +1547,42 @@ ElizaClient.prototype.getDocument = async function (
   documentId,
 ) {
   return this.fetch(`/api/documents/${encodeURIComponent(documentId)}`);
+};
+
+ElizaClient.prototype.getDocumentAccess = async function (
+  this: ElizaClient,
+  documentId,
+) {
+  return this.fetch(`/api/documents/${encodeURIComponent(documentId)}/access`);
+};
+
+ElizaClient.prototype.getDocumentPins = async function (
+  this: ElizaClient,
+  documentId,
+) {
+  return this.fetch(`/api/documents/${encodeURIComponent(documentId)}/pins`);
+};
+
+ElizaClient.prototype.updateDocumentPins = async function (
+  this: ElizaClient,
+  documentId,
+  data,
+) {
+  return this.fetch(`/api/documents/${encodeURIComponent(documentId)}/pins`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+};
+
+ElizaClient.prototype.updateDocumentAccess = async function (
+  this: ElizaClient,
+  documentId,
+  data,
+) {
+  return this.fetch(`/api/documents/${encodeURIComponent(documentId)}/access`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
 };
 
 ElizaClient.prototype.updateDocument = async function (

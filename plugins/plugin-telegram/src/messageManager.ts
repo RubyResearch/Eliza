@@ -32,6 +32,8 @@ import {
   ModelType,
   type ResolvedAttachmentBytes,
   resolveAttachmentBytes,
+  type SendHandlerOutcome,
+  type SendHandlerReceipt,
   ServiceType,
   toWellFormedUnicode,
   truncateWellFormed,
@@ -367,10 +369,66 @@ function buildEmbedLaunchButton(url: string): InlineKeyboardButton {
   return { text: EMBED_LAUNCH_BUTTON_TEXT, web_app: { url } };
 }
 
-/**
- * Class representing a message manager.
- * @class
- */
+/** Carries observed provider acceptance without turning subsequent failure into permission to resend. */
+class TelegramOutboundEvidenceError extends ElizaError {
+  constructor(
+    readonly phase: "transport" | "persistence",
+    readonly acceptedMessages: readonly Message.TextMessage[],
+    readonly persistedMemories: readonly Memory[],
+    cause: unknown,
+    accountId: string,
+    chatId: string,
+  ) {
+    super("Telegram accepted messages before outbound processing failed", {
+      code:
+        phase === "transport"
+          ? "TELEGRAM_PARTIAL_DELIVERY"
+          : "TELEGRAM_OUTBOUND_PERSIST_FAILED",
+      cause,
+      context: {
+        accountId,
+        chatId,
+        providerMessageIds: acceptedMessages.map((message) =>
+          String(message.message_id),
+        ),
+      },
+    });
+  }
+}
+
+function telegramMemoryId(memory: Memory): UUID {
+  if (!memory.id)
+    throw new ElizaError("Persisted Telegram memory has no identifier", {
+      code: "TELEGRAM_MEMORY_ID_MISSING",
+    });
+  return memory.id;
+}
+
+function telegramReceipt(
+  messages: readonly Message.TextMessage[],
+  memories: readonly Memory[],
+): SendHandlerReceipt {
+  const [first, ...rest] = messages;
+  if (!first)
+    throw new ElizaError("Telegram delivery has no accepted provider message", {
+      code: "TELEGRAM_RECEIPT_MISSING",
+    });
+  return {
+    providerMessageIds: [
+      String(first.message_id),
+      ...rest.map((message) => String(message.message_id)),
+    ],
+    acceptedAt: messages.reduce(
+      (latest, message) => Math.max(latest, message.date * 1000),
+      first.date * 1000,
+    ),
+    persistence: {
+      status: "persisted",
+      memoryIds: memories.map(telegramMemoryId),
+    },
+  };
+}
+
 export class MessageManager {
   public bot: Telegraf<Context>;
   protected runtime: IAgentRuntime;
@@ -1202,21 +1260,39 @@ export class MessageManager {
             : {}),
           reply_markup: replyMarkup,
         };
-        const sentMessage = (await this.sendWithRetry(
-          () =>
-            ctx.telegram.sendMessage(chatId, chunk, {
-              ...sendOptions,
-              parse_mode: "MarkdownV2",
-            }),
-          // Fallback: Telegram rejected the MarkdownV2 entities. Send the
-          // ORIGINAL chunk (chunks[i]), not the MarkdownV2-escaped `chunk` —
-          // otherwise the user sees literal backslash escapes ("Sure\!"). Mirror
-          // the editMessage fallback, which sends cleanText(text).
-          () =>
-            ctx.telegram.sendMessage(chatId, cleanText(chunks[i]), sendOptions),
-        )) as Message.TextMessage;
+        try {
+          const sentMessage = (await this.sendWithRetry(
+            () =>
+              ctx.telegram.sendMessage(chatId, chunk, {
+                ...sendOptions,
+                parse_mode: "MarkdownV2",
+              }),
+            // Fallback: Telegram rejected the MarkdownV2 entities. Send the
+            // ORIGINAL chunk (chunks[i]), not the MarkdownV2-escaped `chunk` —
+            // otherwise the user sees literal backslash escapes ("Sure\!"). Mirror
+            // the editMessage fallback, which sends cleanText(text).
+            () =>
+              ctx.telegram.sendMessage(
+                chatId,
+                cleanText(chunks[i]),
+                sendOptions,
+              ),
+          )) as Message.TextMessage;
 
-        sentMessages.push(sentMessage);
+          sentMessages.push(sentMessage);
+        } catch (cause) {
+          // error-policy:J2 retain accepted chunks when a later provider operation fails.
+          if (sentMessages.length)
+            throw new TelegramOutboundEvidenceError(
+              "transport",
+              sentMessages,
+              [],
+              cause,
+              this.accountId,
+              String(chatId),
+            );
+          throw cause;
+        }
       }
 
       return sentMessages;
@@ -2527,6 +2603,110 @@ export class MessageManager {
     replyToMessageId?: number,
     messageThreadId?: number,
   ): Promise<Message.TextMessage[]> {
+    return (
+      await this.sendMessageWithEvidence(
+        chatId,
+        content,
+        replyToMessageId,
+        messageThreadId,
+      )
+    ).messages;
+  }
+
+  /** Returns complete text delivery evidence; legacy media dispatch remains unconfirmed. */
+  public async sendMessageWithReceipt(
+    chatId: number | string,
+    content: Content,
+    replyToMessageId?: number,
+    messageThreadId?: number,
+  ): Promise<SendHandlerOutcome | undefined> {
+    if (content.attachments?.length) {
+      await this.sendMessage(
+        chatId,
+        content,
+        replyToMessageId,
+        messageThreadId,
+      );
+      return undefined;
+    }
+    try {
+      const result = await this.sendMessageWithEvidence(
+        chatId,
+        content,
+        replyToMessageId,
+        messageThreadId,
+      );
+      if (!result.messages.length)
+        return {
+          kind: "not_delivered",
+          code: "TELEGRAM_EMPTY_MESSAGE",
+          message: "No text or interaction was supplied.",
+        };
+      return {
+        kind: "delivered",
+        receipt: telegramReceipt(result.messages, result.memories),
+        memories: result.memories,
+      };
+    } catch (error) {
+      // error-policy:J1 translate known provider acceptance into a structural outcome, preserving uncertainty otherwise.
+      if (!(error instanceof TelegramOutboundEvidenceError)) throw error;
+      const receipt = telegramReceipt(
+        error.acceptedMessages,
+        error.persistedMemories,
+      );
+      if (error.phase === "transport")
+        return {
+          kind: "partially_delivered",
+          receipt: {
+            ...receipt,
+            persistence: {
+              status: "not_attempted",
+              reason: "A later chunk failed before local persistence began.",
+            },
+          },
+          memories: error.persistedMemories,
+          code: error.code,
+          message: error.message,
+        };
+      const failures = error.acceptedMessages
+        .slice(error.persistedMemories.length)
+        .map((message) => ({
+          providerMessageId: String(message.message_id),
+          stage: "memory" as const,
+          code: error.code,
+          message: error.message,
+        }));
+      if (!failures.length)
+        failures.push({
+          providerMessageId:
+            receipt.providerMessageIds[receipt.providerMessageIds.length - 1],
+          stage: "memory",
+          code: error.code,
+          message: error.message,
+        });
+      return {
+        kind: "delivered",
+        receipt: {
+          ...receipt,
+          persistence: error.persistedMemories.length
+            ? {
+                status: "partial",
+                memoryIds: error.persistedMemories.map(telegramMemoryId),
+                failures,
+              }
+            : { status: "failed", failures },
+        },
+        memories: error.persistedMemories,
+      };
+    }
+  }
+
+  private async sendMessageWithEvidence(
+    chatId: number | string,
+    content: Content,
+    replyToMessageId?: number,
+    messageThreadId?: number,
+  ): Promise<{ messages: Message.TextMessage[]; memories: Memory[] }> {
     let sentMessages: Message.TextMessage[];
     try {
       // Create a context-like object for sending
@@ -2568,9 +2748,10 @@ export class MessageManager {
     }
 
     if (!sentMessages.length) {
-      return [];
+      return { messages: [], memories: [] };
     }
 
+    const memories: Memory[] = [];
     try {
       // Create group ID
       const roomKey = messageThreadId
@@ -2582,7 +2763,6 @@ export class MessageManager {
       );
 
       // Create memories for the sent messages
-      const memories: Memory[] = [];
       const contentMetadata =
         content.metadata &&
         typeof content.metadata === "object" &&
@@ -2678,7 +2858,7 @@ export class MessageManager {
         );
       }
 
-      return sentMessages;
+      return { messages: sentMessages, memories };
     } catch (error) {
       logger.error(
         {
@@ -2693,19 +2873,13 @@ export class MessageManager {
       // send. Returning [] would look like "nothing sent" and invite a retry
       // that duplicates the visible message; rethrow with the provider ids in
       // context so the connector boundary can fail without claiming silence.
-      throw new ElizaError(
-        "Telegram accepted the send but local delivery evidence failed",
-        {
-          code: "TELEGRAM_OUTBOUND_PERSIST_FAILED",
-          cause: error,
-          context: {
-            accountId: this.accountId,
-            chatId: String(chatId),
-            providerMessageIds: sentMessages.map((message) =>
-              message.message_id.toString(),
-            ),
-          },
-        },
+      throw new TelegramOutboundEvidenceError(
+        "persistence",
+        sentMessages,
+        memories,
+        error,
+        this.accountId,
+        String(chatId),
       );
     }
   }

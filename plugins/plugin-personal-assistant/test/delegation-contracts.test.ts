@@ -350,6 +350,10 @@ describe("delegation contract repository", () => {
     );
 
     const processed = await processDelegationInboundTurn({
+      resolveEmailSender: async () => ({
+        grantId: "reviewed-delegation-sender",
+        email: "owner@example.test",
+      }),
       agentId: runtime.agentId,
       repository: repo,
       approvalQueue: queue,
@@ -376,7 +380,8 @@ describe("delegation contract repository", () => {
       subjectUserId: "owner-1",
       action: "send_email",
       channel: "email",
-      reason: "SLA holding reply for delegated Board member holding reply",
+      reason:
+        "SLA holding reply for delegated Board member holding reply\nFrom: owner@example.test",
       payload: {
         action: "send_email",
         to: ["dana@board.example"],
@@ -393,6 +398,10 @@ describe("delegation contract repository", () => {
     expect(saved?.state?.holdingReplyQueuedAt).toBe("2026-07-06T18:05:00.000Z");
 
     const replayed = await processDelegationInboundTurn({
+      resolveEmailSender: async () => ({
+        grantId: "reviewed-delegation-sender",
+        email: "owner@example.test",
+      }),
       agentId: runtime.agentId,
       repository: repo,
       approvalQueue: queue,

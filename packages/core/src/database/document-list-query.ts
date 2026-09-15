@@ -363,7 +363,13 @@ export function readDocumentMutationSnapshot(
 	) {
 		return null;
 	}
+	const pinState =
+		metadata.pinned !== undefined || metadata.pinTargets !== undefined
+			? JSON.stringify([metadata.pinned ?? null, metadata.pinTargets ?? null])
+			: undefined;
+
 	return {
+		...(pinState !== undefined ? { pinState } : {}),
 		scope: scope as DocumentMutationSnapshot["scope"],
 		roomId: memory.roomId,
 		entityId: memory.entityId,
@@ -477,17 +483,17 @@ export function isDocumentVisibleToRequester(
 	if (documentRoleHasGlobalVisibility(params.requesterRole)) {
 		return true;
 	}
-	if (params.requesterRole === "GUEST") {
-		return (
-			params.requesterRoomIds.includes(snapshot.roomId) &&
-			snapshot.scope === "global"
-		);
-	}
 	if (
 		snapshot.scope !== "agent-private" &&
 		snapshot.directGrantEntityIds?.includes(params.requesterEntityId)
 	) {
 		return true;
+	}
+	if (params.requesterRole === "GUEST") {
+		return (
+			params.requesterRoomIds.includes(snapshot.roomId) &&
+			snapshot.scope === "global"
+		);
 	}
 	if (!params.requesterRoomIds.includes(snapshot.roomId)) return false;
 	if (snapshot.scope === "global") return true;
@@ -546,6 +552,7 @@ export function documentMutationSnapshotMatches(
 	return (
 		actual !== null &&
 		actual.scope === expected.scope &&
+		actual.pinState === expected.pinState &&
 		actual.roomId === expected.roomId &&
 		actual.entityId === expected.entityId &&
 		uuidArraysEqual(

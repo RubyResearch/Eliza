@@ -271,6 +271,17 @@ export const VIEW_OCR_POLICIES = {
       "December",
     ],
   }),
+  "plugin-family-interview-gui": expected({
+    requireAny: [
+      "Your update",
+      "Fill missing information",
+      "School and activities",
+    ],
+    forbid: [
+      "Sources are unavailable",
+      "Could not load selected correspondence",
+    ],
+  }),
   "plugin-family-operations-gui": expected({
     requireAny: ["Family Operations", "Private owner workspace"],
   }),

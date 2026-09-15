@@ -147,6 +147,8 @@ function isCalendarRouteService(
       "function" &&
     typeof (service as CalendarRouteService).listLinkedCalendarEvents ===
       "function" &&
+    typeof (service as CalendarRouteService).listLinkedCalendarEventViews ===
+      "function" &&
     typeof (service as CalendarRouteService).getLinkedCalendarEvent ===
       "function"
   );
@@ -326,6 +328,8 @@ function isCalendarOwnerMutationGateway(
   return (
     typeof value === "object" &&
     value !== null &&
+    typeof (value as CalendarOwnerMutationGateway)
+      .updateLinkedCalendarControl === "function" &&
     typeof (value as CalendarOwnerMutationGateway).create === "function" &&
     typeof (value as CalendarOwnerMutationGateway).update === "function" &&
     typeof (value as CalendarOwnerMutationGateway).cancel === "function" &&
@@ -335,6 +339,8 @@ function isCalendarOwnerMutationGateway(
       "function" &&
     typeof (value as CalendarOwnerMutationGateway)
       .resolveLinkedCalendarConflict === "function" &&
+    "rebindLinkedCalendar" in value &&
+    typeof value.rebindLinkedCalendar === "function" &&
     typeof (value as CalendarOwnerMutationGateway).disconnectLinkedCalendar ===
       "function" &&
     typeof (value as CalendarOwnerMutationGateway)
@@ -617,6 +623,11 @@ export function calendarRouteHandler(): LegacyRouteHandler {
       serviceError: (status, message) =>
         new CalendarServiceError(status, message),
       mutationGateway: {
+        async updateLinkedCalendarControl(requestUrl, request) {
+          const gateway =
+            await requireCalendarOwnerMutationGateway(agentRuntime);
+          return gateway.updateLinkedCalendarControl(requestUrl, request);
+        },
         async create(requestUrl, request) {
           const gateway =
             await requireCalendarOwnerMutationGateway(agentRuntime);
@@ -650,6 +661,11 @@ export function calendarRouteHandler(): LegacyRouteHandler {
             linkId,
             request,
           );
+        },
+        async rebindLinkedCalendar(requestUrl, linkId, request) {
+          const gateway =
+            await requireCalendarOwnerMutationGateway(agentRuntime);
+          return gateway.rebindLinkedCalendar(requestUrl, linkId, request);
         },
         async disconnectLinkedCalendar(requestUrl, linkId, request) {
           const gateway =

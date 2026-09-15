@@ -435,9 +435,12 @@ describe("PdfService", () => {
 
 		await expect(
 			service({ useModel }).extractCompleteDocument(validPdfBuffer()),
-		).rejects.toThrow(
-			"Complete PDF extraction failed on page 2 of 3: vision unavailable",
-		);
+		).rejects.toMatchObject({
+      code: "PDF_PAGE_TRANSCRIPTION_UNAVAILABLE",
+      context: { pageNumber: 2, pageCount: 3 },
+      cause: expect.objectContaining({ message: "vision unavailable" }),
+    });
+    expect(useModel).toHaveBeenCalledTimes(2);
 	});
 
 	it("preserves OCR text alongside native and vision page evidence", async () => {

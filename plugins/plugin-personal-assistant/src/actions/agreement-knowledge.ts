@@ -16,10 +16,13 @@ import {
   AgreementKnowledgeError,
   getAgreementKnowledgeService,
 } from "../lifeops/household/agreement-knowledge.js";
+import { isAgreementReviewError } from "../lifeops/household/agreement-review.js";
 
 type AgreementAction =
   | "list"
   | "read"
+  | "prepare_review"
+  | "add_proposal"
   | "approve"
   | "reject"
   | "pin"
@@ -46,7 +49,10 @@ function text(input: Record<string, unknown>, key: string): string {
 }
 
 function failure(error: unknown): ActionResult {
-  if (error instanceof AgreementKnowledgeError) {
+  if (
+    error instanceof AgreementKnowledgeError ||
+    isAgreementReviewError(error)
+  ) {
     return {
       success: false,
       text: error.message,
@@ -65,7 +71,7 @@ export const ownerAgreementKnowledgeAction: Action = {
     "REVIEW_PARENTING_OBLIGATION",
   ],
   description:
-    "Owner parenting-agreement review and access management. Ops: list|read|approve|reject|pin|unpin|preview_guest_grant. Upload PDF bytes through the authenticated agreement API/document picker.",
+    "Owner parenting-agreement review and access management. Ops: list|read|prepare_review|add_proposal|approve|reject|pin|unpin|preview_guest_grant. prepare_review generates cited unapproved proposals from the complete saved PDF, preserving earlier decisions on retry. add_proposal records an owner correction with a literal source citation, without approving it. Upload PDF bytes through the authenticated agreement API/document picker.",
   descriptionCompressed:
     "owner parenting agreement: list/read/review/pin/unpin/preview guest access",
   routingHint:
@@ -78,13 +84,15 @@ export const ownerAgreementKnowledgeAction: Action = {
     {
       name: "action",
       description:
-        "Agreement op: list|read|approve|reject|pin|unpin|preview_guest_grant.",
+        "Agreement op: list|read|prepare_review|add_proposal|approve|reject|pin|unpin|preview_guest_grant.",
       required: true,
       schema: {
         type: "string" as const,
         enum: [
           "list",
           "read",
+          "prepare_review",
+          "add_proposal",
           "approve",
           "reject",
           "pin",
@@ -98,6 +106,19 @@ export const ownerAgreementKnowledgeAction: Action = {
       description: "Immutable agreement artifact identifier.",
       schema: { type: "string" as const },
     },
+    ...["title", "obligationText", "citationText"].map((name) => ({
+      name,
+      description:
+        name === "citationText"
+          ? "Exact quote from the saved source pages for add_proposal."
+          : `Owner correction ${name} for add_proposal.`,
+      schema: { type: "string" as const },
+    })),
+    ...["pageStart", "pageEnd"].map((name) => ({
+      name,
+      description: `Inclusive source ${name} for add_proposal; use the same page twice for one page.`,
+      schema: { type: "integer" as const, minimum: 1 },
+    })),
     {
       name: "obligationId",
       description: "Proposed obligation identifier to approve or reject.",
@@ -159,6 +180,33 @@ export const ownerAgreementKnowledgeAction: Action = {
             principalEntityId: SELF_ENTITY_ID,
           });
           break;
+        case "prepare_review":
+          result = await service.prepareOwnerReview({
+            artifactId: text(input, "artifactId"),
+            ownerEntityId: SELF_ENTITY_ID,
+          });
+          break;
+        case "add_proposal": {
+          const pageStart = input.pageStart;
+          const pageEnd = input.pageEnd;
+          if (typeof pageStart !== "number" || typeof pageEnd !== "number")
+            throw new AgreementKnowledgeError(
+              "Source pageStart and pageEnd are required",
+              "AGREEMENT_INVALID_CONTRACT",
+            );
+          result = await service.addOwnerReviewProposal({
+            artifactId: text(input, "artifactId"),
+            ownerEntityId: SELF_ENTITY_ID,
+            proposal: {
+              title: text(input, "title"),
+              obligationText: text(input, "obligationText"),
+              citationText: text(input, "citationText"),
+              pageStart,
+              pageEnd,
+            },
+          });
+          break;
+        }
         case "approve":
         case "reject":
           result = await service.decideObligation({

@@ -956,6 +956,9 @@ export interface IGoogleCalendarService extends Service {
   getEvent(
     params: GoogleAccountRef & { calendarId?: string; eventId: string; timeZone?: string }
   ): Promise<GoogleCalendarEvent>;
+  findEventByIdempotencyKey(
+    params: GoogleAccountRef & { calendarId: string; idempotencyKey: string; timeZone?: string }
+  ): Promise<GoogleCalendarEvent | null>;
   createEvent(params: GoogleCalendarEventInput): Promise<GoogleCalendarEvent>;
   updateEvent(params: GoogleCalendarEventPatchInput): Promise<GoogleCalendarEvent>;
   deleteEvent(params: GoogleCalendarEventDeleteInput): Promise<void>;

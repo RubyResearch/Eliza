@@ -13,6 +13,18 @@ Telegram connector for elizaOS. Gives an Eliza agent the ability to send and rec
 - Supports multiple bot accounts per agent via `character.settings.telegram.accounts`.
 - Preserves complete outbound text across Telegram's field limits: long messages are split losslessly, and media captions over 1024 UTF-16 units are delivered as follow-up text instead of clipped.
 
+## Account connection status
+
+Account inventory reports a bot connected only while its configured credential
+has a healthy polling claim for the same agent and account. Saved account rows
+and replacement credentials do not override that live state. Personal account
+configuration alone remains pending until an identity-bound live session can be
+verified. Connection status does not establish owner pairing or message delivery.
+
+## Delivery evidence
+
+Text and interactive text sends return ordered provider IDs and local memory receipts. A later chunk failure retains earlier accepted IDs; a database failure after delivery is reported separately. Legacy attachment sends do not yet return a complete receipt and must not be treated as confirmed delivery by approval callers.
+
 ## Prerequisites
 
 Create a bot via [@BotFather](https://t.me/BotFather) and copy the token it provides.
@@ -78,6 +90,8 @@ The plugin auto-enables when the `telegram` connector key is present in the agen
 
 ## Setup UI routes
 
+Bot setup reports `paired` only when the saved credential has a connected poller for this agent and the default account. A constructed service, another account, or the previous token does not establish readiness. Vault-backed credentials are resolved through the existing credential store; an unavailable credential returns an explicit error without exposing secret-store details. This status does not prove owner pairing or message delivery.
+
 The plugin mounts these HTTP routes (no plugin-name prefix) for the dashboard setup wizard:
 
 | Method | Path | Purpose |
@@ -115,7 +129,7 @@ The plugin registers a `/eliza_pair <code>` bot command that lets the Telegram u
 
 ## 409 Conflict errors
 
-The Telegram Bot API permits only one active long-poll connection per token. If two agent processes share the same token simultaneously, Telegram rejects the second with a 409 error. Full and standalone pollers share a process-local lock keyed by a fingerprint of the token; a live, starting, retrying, or merely quiet owner remains a hard launch failure. The lock becomes reclaimable only after that poller reaches an explicit terminal state. Across separate processes, operators must still ensure that only one process uses a given token at a time.
+The Telegram Bot API permits only one active long-poll connection per token. If two agent processes share the same token simultaneously, Telegram rejects the second with a 409 error. Full and standalone pollers share a process-local lock keyed by a fingerprint of the token; a live, starting, retrying, or merely quiet owner remains a hard launch failure. The lock becomes reclaimable only after that poller reaches an explicit terminal state. Across separate processes, operators must still ensure that only one process uses a given token at a time. Stopping the full service also fences queued failure retries so they cannot restart the old poller or reclaim its token.
 
 ## Development
 

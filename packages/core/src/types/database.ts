@@ -152,6 +152,8 @@ export interface DocumentFragmentQueryParams extends DocumentRequesterContext {
  * adapters compare them in the same statement that writes or deletes.
  */
 export interface DocumentMutationSnapshot {
+	/** Exact persisted pin state fences metadata edits independently of content revisions. */
+	pinState?: string;
 	scope: DocumentListScope;
 	roomId: UUID;
 	entityId: UUID;

@@ -47,6 +47,19 @@ export type DocumentAddedFrom =
 export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
 export interface DocumentsServiceLike {
+  getDocumentPinsWithAccessContext?(
+    documentId: UUID,
+    accessContext: AccessContext,
+  ): Promise<{
+    targets: { agent: boolean; roomIds: UUID[] };
+    pinRevision: string;
+  }>;
+  setDocumentPinsWithAccessContext?(
+    documentId: UUID,
+    targets: { agent: boolean; roomIds: UUID[] },
+    accessContext: AccessContext,
+    expectedPinRevision: string,
+  ): Promise<Memory>;
   addDocument(options: {
     agentId?: UUID;
     worldId: UUID;
@@ -57,6 +70,7 @@ export interface DocumentsServiceLike {
     originalFilename: string;
     content: string;
     metadata?: Record<string, unknown>;
+    audience?: "chat";
     scope?: DocumentVisibilityScope;
     scopedToEntityId?: UUID;
     addedBy?: UUID;
@@ -102,7 +116,12 @@ export interface DocumentsServiceLike {
     documentId: UUID,
     directGrantEntityIds: UUID[],
     accessContext: AccessContext,
+    expectedAccessRevision?: string,
   ): Promise<Memory>;
+  getDocumentDirectGrantStateWithAccessContext?(
+    documentId: UUID,
+    accessContext: AccessContext,
+  ): Promise<{ directGrantEntityIds: UUID[]; accessRevision: string }>;
   getDocumentDirectGrantsWithAccessContext?(
     documentId: UUID,
     accessContext: AccessContext,

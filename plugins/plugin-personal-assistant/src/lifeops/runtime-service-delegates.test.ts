@@ -18,6 +18,7 @@ import {
   searchTelegramMessagesWithRuntimeService,
   sendDiscordMessageWithRuntimeService,
   sendIMessageWithRuntimeService,
+  sendTelegramMessageWithRuntimeService,
   sendWhatsAppMessageWithRuntimeService,
   sendXDirectMessageWithRuntimeService,
 } from "./runtime-service-delegates.js";
@@ -314,6 +315,33 @@ describe("runtime service delegates", () => {
     );
   });
 
+  it("preserves every provider message receipt for multi-part Discord delivery", async () => {
+    const receipt = {
+      providerMessageIds: ["discord-part-1", "discord-part-2"] as const,
+      acceptedAt: 1_780_000_000_000,
+      persistence: { status: "persisted" as const, memoryIds: [] },
+    };
+    const runtime = runtimeWithServices({
+      discord: {
+        handleSendMessage: async () => ({
+          kind: "delivered",
+          receipt,
+          memories: [],
+        }),
+      },
+    });
+    const result = await sendDiscordMessageWithRuntimeService({
+      runtime,
+      grant: grant({ provider: "discord" }),
+      channelId: "1234567890",
+      text: "Multi-part calendar review",
+    });
+    expect(result.status).toBe("handled");
+    if (result.status !== "handled") throw new Error(result.reason);
+    expect(result.value.delivery.receipt).toEqual(receipt);
+    expect(result.value.delivery.providerMessageId).toBe("discord-part-2");
+  });
+
   it("does not report a Discord send as handled without delivery evidence", async () => {
     const runtime = runtimeWithServices({
       discord: { handleSendMessage: vi.fn(async () => undefined) },
@@ -330,6 +358,34 @@ describe("runtime service delegates", () => {
       status: "unavailable",
       reason: expect.stringContaining("handleSendMessage failed"),
     });
+  });
+
+  it("preserves provider evidence from a split Telegram send", async () => {
+    const receipt = {
+      providerMessageIds: ["telegram-part-1", "telegram-part-2"] as const,
+      acceptedAt: 1_780_000_000_000,
+      persistence: { status: "persisted" as const, memoryIds: [] },
+    };
+    const runtime = runtimeWithServices({
+      telegram: {
+        handleSendMessage: async () => ({
+          kind: "delivered",
+          receipt,
+          memories: [],
+        }),
+      },
+    });
+    const result = await sendTelegramMessageWithRuntimeService({
+      runtime,
+      grant: grant({ provider: "telegram" }),
+      target: "chat-1",
+      message: "Synthetic calendar review",
+    });
+    expect(result.status).toBe("handled");
+    if (result.status !== "handled")
+      throw new Error("Telegram did not deliver");
+    expect(result.value.delivery.receipt).toEqual(receipt);
+    expect(result.value.delivery.providerMessageId).toBe("telegram-part-2");
   });
 
   it("delegates Telegram searches with accountId-first context and params", async () => {

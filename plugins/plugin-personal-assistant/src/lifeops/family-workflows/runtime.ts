@@ -12,8 +12,11 @@ import {
   CALENDAR_OWNER_MUTATION_GATEWAY_SERVICE,
   CalendarService,
 } from "@elizaos/plugin-calendar";
-import { getScheduledTaskRunner } from "@elizaos/plugin-scheduling";
-import { type LifeOpsCalendarEvent, SELF_ENTITY_ID } from "@elizaos/shared";
+import {
+  getScheduledTaskRunner,
+  type ScheduledTask,
+} from "@elizaos/plugin-scheduling";
+import { SELF_ENTITY_ID } from "@elizaos/shared";
 import { createApprovalQueue } from "../approval-queue.js";
 import type { ApprovalRequest } from "../approval-queue.types.js";
 import { CalendarCardAccessStore } from "../calendar-card.js";
@@ -25,6 +28,9 @@ import {
   type MonthlyFamilyPacket,
   MonthlyFamilyPacketService,
 } from "../family-coordination/index.js";
+import { familyIntakeClaim } from "../family-coordination/intake-claims.js";
+import { FamilyIntakeReviewStore } from "../family-coordination/intake-review.js";
+import { getFamilyIntakeService } from "../family-coordination/intake-service.js";
 import {
   getAgreementKnowledgeService,
   HOUSEHOLD_AGREEMENT_KNOWLEDGE_SERVICE,
@@ -46,17 +52,55 @@ import {
 import type { SourceFact } from "../school/types.js";
 import { LifeOpsService } from "../service.js";
 import { executeRawSql, parseJsonValue, sqlQuote, toText } from "../sql.js";
+import { collectCalendarClaims } from "./calendar-claims.js";
 import {
   familyPacketCalendarWindow,
   nextFamilyPacketPeriod,
 } from "./period.js";
 import { ensureFamilyWorkflowRunStore } from "./run-store.js";
 
+export interface FamilyMonthlyScheduleView {
+  taskId: string;
+  status: ScheduledTask["state"]["status"];
+  trigger: ScheduledTask["trigger"];
+  lastFiredAt: string | null;
+}
+
+export interface FamilySchoolWorkflowStatus
+  extends SchoolCalendarWorkflowStatus {
+  monthlySchedule: FamilyMonthlyScheduleView | null;
+}
+
 export const FAMILY_WORKFLOW_RUNTIME_SERVICE = "lifeops_family_workflows";
 export interface FamilyEmailOptions {
   accounts: Array<{ grantId: string; label: string }>;
   recipients: Array<{ entityId: string; name: string; address: string }>;
 }
+export interface FamilyDraftApprovalStatus {
+  id: string;
+  state: ApprovalRequest["state"];
+  providerAccepted: boolean | null;
+  providerMessageId: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+
+function draftApprovalStatus(
+  approval: ApprovalRequest,
+): FamilyDraftApprovalStatus {
+  const receipt = approval.execution?.providerReceipt;
+  return {
+    id: approval.id,
+    state: approval.state,
+    providerAccepted:
+      typeof receipt?.accepted === "boolean" ? receipt.accepted : null,
+    providerMessageId:
+      typeof receipt?.messageId === "string" ? receipt.messageId : null,
+    error: approval.execution?.error ?? null,
+    updatedAt: approval.updatedAt.toISOString(),
+  };
+}
+
 export const FAMILY_MONTHLY_SYSTEM_OPERATION =
   "family.monthlyCoordination" as const;
 
@@ -64,29 +108,6 @@ const RUN_LEASE_MS = 10 * 60_000;
 
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function calendarClaim(event: LifeOpsCalendarEvent): FamilyPacketClaim {
-  return {
-    claimId: `calendar:${event.provider}:${event.calendarId}:${event.externalId}`,
-    stableKey: `calendar:${event.provider}:${event.calendarId}:${event.externalId}`,
-    section: "custody_calendar",
-    statement: event.title,
-    visibility: "owner_only",
-    provenance: [
-      {
-        source: "calendar",
-        sourceId: event.id,
-        observedAt: event.updatedAt,
-        contentSha256: hash(event),
-      },
-    ],
-    dates: [`${event.startAt} through ${event.endAt}`],
-    requests: [],
-    urgency: null,
-    commitments: [],
-    accountability: [],
-  };
 }
 
 function schoolClaim(fact: SourceFact): FamilyPacketClaim {
@@ -208,11 +229,35 @@ export class FamilyWorkflowRuntimeService extends Service {
     return this.school.configure(config);
   }
 
-  schoolStatus(): Promise<SchoolCalendarWorkflowStatus> {
-    return this.school.status();
+  async schoolStatus(): Promise<FamilySchoolWorkflowStatus> {
+    const { FAMILY_COORDINATION_RECORD_IDS } = await import(
+      "../../default-packs/family-coordination.js"
+    );
+    const runner = getScheduledTaskRunner(this.runtime, {
+      agentId: this.runtime.agentId,
+    });
+    const [status, tasks] = await Promise.all([
+      this.school.status(),
+      runner.list(),
+    ]);
+    const task = tasks.find(
+      (candidate) =>
+        candidate.idempotencyKey === FAMILY_COORDINATION_RECORD_IDS.monthly,
+    );
+    return {
+      ...status,
+      monthlySchedule: task
+        ? {
+            taskId: task.taskId,
+            status: task.state.status,
+            trigger: task.trigger,
+            lastFiredAt: task.state.firedAt ?? null,
+          }
+        : null,
+    };
   }
 
-  async ensureMonthlySchedule(): Promise<void> {
+  async ensureMonthlySchedule(): Promise<ScheduledTask> {
     const { familyCoordinationPack } = await import(
       "../../default-packs/family-coordination.js"
     );
@@ -229,10 +274,11 @@ export class FamilyWorkflowRuntimeService extends Service {
       toSpineTaskInput(definition, familyCoordinationPack.key),
     );
     if (!task.ownerVisible || task.kind !== definition.kind)
-      await runner.apply(task.taskId, "edit", {
+      return runner.apply(task.taskId, "edit", {
         ownerVisible: true,
         kind: definition.kind,
       });
+    return task;
   }
 
   reviewSchool(runId: string) {
@@ -292,7 +338,13 @@ export class FamilyWorkflowRuntimeService extends Service {
         new URL("http://localhost/api/lifeops/calendar/feed"),
         familyPacketCalendarWindow(period),
       );
-      claims.push(...feed.events.map(calendarClaim));
+      claims.push(
+        ...collectCalendarClaims(
+          feed,
+          await calendar.listLinkedCalendarEvents(),
+          await this.school.listImportedEvents(),
+        ),
+      );
     }
     const school = getSchoolSourceFactRuntimeService(this.runtime);
     if (school) claims.push(...(await school.listFacts()).map(schoolClaim));
@@ -366,6 +418,15 @@ export class FamilyWorkflowRuntimeService extends Service {
         accountability: [],
       });
     }
+    const intakeReviews = await new FamilyIntakeReviewStore(
+      this.runtime,
+    ).listThrough(period.key);
+    if (intakeReviews.some((review) => review.status === "reviewed")) {
+      const intake = getFamilyIntakeService(this.runtime);
+      claims.push(
+        ...(await intake.reviewedFacts(period.key)).map(familyIntakeClaim),
+      );
+    }
     return claims;
   }
 
@@ -381,6 +442,7 @@ export class FamilyWorkflowRuntimeService extends Service {
   async createDraft(
     packetId: string,
     input: {
+      expectedPacketVersion: number;
       recipient: string;
       recipientEntityId: string;
       calendarPrivacyMode: "full" | "times_only" | "busy_only";
@@ -389,6 +451,19 @@ export class FamilyWorkflowRuntimeService extends Service {
   ): Promise<MonthlyFamilyDraft> {
     const packet = await this.packets.read(packetId);
     if (!packet) throw new Error("[FamilyWorkflowRuntime] packet not found");
+    if (packet.version !== input.expectedPacketVersion) {
+      throw new ElizaError(
+        "The packet changed. Refresh and review its latest version before creating a draft.",
+        {
+          code: "FAMILY_PACKET_VERSION_STALE",
+          context: {
+            packetId,
+            expectedVersion: input.expectedPacketVersion,
+            currentVersion: packet.version,
+          },
+        },
+      );
+    }
     const recipient = input.recipient.trim();
     await this.validateRecipientIdentity({ ...input, recipient });
     if (input.email) {
@@ -471,6 +546,23 @@ export class FamilyWorkflowRuntimeService extends Service {
     };
   }
 
+  async confirmEmailRecipient(input: {
+    entityId: string | null;
+    name: string;
+    address: string;
+    confirmedBy: string;
+  }): Promise<{ entityId: string; name: string; address: string }> {
+    const graph = resolveKnowledgeGraphService(this.runtime);
+    if (!graph)
+      throw new ElizaError(
+        "The contact graph is unavailable. Retry recipient setup when it is ready.",
+        { code: "FAMILY_RECIPIENT_GRAPH_UNAVAILABLE" },
+      );
+    return graph
+      .getEntityStore(this.runtime.agentId)
+      .confirmEmailRecipient(input);
+  }
+
   async validateRecipientIdentity(input: {
     recipientEntityId: string;
     recipient: string;
@@ -518,6 +610,82 @@ export class FamilyWorkflowRuntimeService extends Service {
         agentId: this.runtime.agentId,
       }),
     });
+  }
+
+  async readDraftApprovalStatus(
+    packetId: string,
+    draftVersion: number,
+    ownerUserId: string,
+  ): Promise<FamilyDraftApprovalStatus | null> {
+    const id = await this.packets.readDraftApprovalId(packetId, draftVersion);
+    if (!id) return null;
+    const queue = createApprovalQueue(this.runtime, {
+      agentId: this.runtime.agentId,
+    });
+    const approval = await queue.byId(id, ownerUserId);
+    if (!approval)
+      throw new ElizaError(
+        "The saved approval status is unavailable. Check delivery before retrying.",
+        { code: "FAMILY_PACKET_APPROVAL_UNAVAILABLE" },
+      );
+    return draftApprovalStatus(approval);
+  }
+
+  async decideDraftApproval(input: {
+    packetId: string;
+    draftVersion: number;
+    approvalId: string;
+    bodySha256: string;
+    decision: "approve" | "reject";
+    ownerUserId: string;
+  }) {
+    const draft = await this.packets.readDraft(
+      input.packetId,
+      input.draftVersion,
+    );
+    const approvalId = await this.packets.readDraftApprovalId(
+      input.packetId,
+      input.draftVersion,
+    );
+    const queue = createApprovalQueue(this.runtime, {
+      agentId: this.runtime.agentId,
+    });
+    const approval = await queue.byId(input.approvalId, input.ownerUserId);
+    if (
+      !draft?.email ||
+      draft.bodySha256 !== input.bodySha256 ||
+      approvalId !== input.approvalId ||
+      !approval ||
+      approval.subjectUserId !== input.ownerUserId ||
+      approval.action !== "send_email"
+    )
+      throw new ElizaError(
+        "The reviewed email approval could not be verified. Reload the draft.",
+        { code: "FAMILY_PACKET_APPROVAL_INVALID" },
+      );
+    if (
+      input.decision === "approve" &&
+      ["pending", "approved", "retryable"].includes(approval.state)
+    ) {
+      await this.packets.validateDraftForDecision(approval);
+      await this.validateRecipientIdentity(draft);
+    }
+    const { resolveExplicitOwnerApproval } = await import(
+      "../../actions/resolve-request.js"
+    );
+    const result = await resolveExplicitOwnerApproval(this.runtime, {
+      subjectUserId: input.ownerUserId,
+      requestId: approval.id,
+      decision: input.decision,
+      reason: "Owner reviewed the exact family email in Family Operations.",
+    });
+    const persisted = await queue.byId(approval.id, input.ownerUserId);
+    if (!persisted)
+      throw new ElizaError(
+        "Approval result could not be read. Check delivery before retrying.",
+        { code: "FAMILY_PACKET_APPROVAL_UNAVAILABLE" },
+      );
+    return { result, approval: draftApprovalStatus(persisted) };
   }
 
   async runMonthly(

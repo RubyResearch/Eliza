@@ -13,6 +13,8 @@ import {
 import {
   type IAgentRuntime,
   type IFileStorageService,
+  isBlockedHostname,
+  isPrivateIpAddress,
   ServiceType,
   stableStringify,
 } from "@elizaos/core";
@@ -21,9 +23,44 @@ import type {
   ApprovalPayload,
   CalendarCardApprovalCorrelation,
 } from "./approval-queue.types.js";
+import type { CalendarCardSenderBinding } from "./calendar-card-sender.js";
 import { executeRawSql, sqlQuote, toText } from "./sql.js";
 
 export type CalendarCardPrivacyMode = "full" | "times_only" | "busy_only";
+export type CalendarCardChannel = "imessage" | "telegram" | "discord";
+
+/** Shared links use operator configuration, never a tunnel address or request header. */
+export function resolveCalendarCardOrigin(
+  runtime: IAgentRuntime,
+):
+  | { status: "configured"; origin: string }
+  | { status: "unavailable"; reason: "missing" | "invalid" } {
+  const configured = runtime.getSetting("ELIZA_EXTERNAL_BASE_URL");
+  if (configured === undefined || configured === null || configured === "") {
+    return { status: "unavailable", reason: "missing" };
+  }
+  if (typeof configured !== "string")
+    return { status: "unavailable", reason: "invalid" };
+  try {
+    const url = new URL(configured);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.pathname !== "" && url.pathname !== "/") ||
+      isBlockedHostname(url.hostname) ||
+      isPrivateIpAddress(url.hostname)
+    ) {
+      return { status: "unavailable", reason: "invalid" };
+    }
+    return { status: "configured", origin: url.origin };
+  } catch {
+    // error-policy:J3 Invalid operator configuration cannot produce a shared link.
+    return { status: "unavailable", reason: "invalid" };
+  }
+}
 
 const CALENDAR_CARD_PRIVACY_MODES: ReadonlySet<string> = new Set([
   "full",
@@ -33,6 +70,7 @@ const CALENDAR_CARD_PRIVACY_MODES: ReadonlySet<string> = new Set([
 
 /** Owner request to issue a private daily calendar card, after validation. */
 export interface CalendarCardRequest {
+  readonly channel: CalendarCardChannel;
   readonly date: string;
   readonly timeZone: string;
   readonly privacyMode: CalendarCardPrivacyMode;
@@ -119,6 +157,17 @@ export function parseCalendarCardRequest(
   if (!isRecord(body)) {
     return { ok: false, error: "Calendar card request must be an object" };
   }
+  const channel = body.channel === undefined ? "imessage" : body.channel;
+  if (
+    channel !== "imessage" &&
+    channel !== "telegram" &&
+    channel !== "discord"
+  ) {
+    return {
+      ok: false,
+      error: "channel must be imessage, telegram, or discord",
+    };
+  }
   const date = typeof body.date === "string" ? body.date.trim() : "";
   if (!isCalendarDay(date)) {
     return {
@@ -187,6 +236,7 @@ export function parseCalendarCardRequest(
   return {
     ok: true,
     request: {
+      channel,
       date,
       timeZone,
       privacyMode,
@@ -394,11 +444,16 @@ export function composeDailyCalendarCard(args: {
 }
 
 export function calendarCardApprovalPayload(args: {
+  channel?: CalendarCardChannel;
+  ownerEntityId?: string;
+  sender?: CalendarCardSenderBinding;
   recipient: string;
   recipientEntityId: string;
   cardId: string;
   composition: CalendarCardComposition;
 }): Extract<ApprovalPayload, { action: "send_message" }> {
+  const channel = args.channel ?? "imessage";
+  const ownerEntityId = args.ownerEntityId ?? args.recipientEntityId;
   return {
     action: "send_message",
     recipient: args.recipient,
@@ -406,7 +461,21 @@ export function calendarCardApprovalPayload(args: {
     replyToMessageId: null,
     calendarCard: {
       kind: "calendar_card",
-      version: 1,
+      ...(args.sender
+        ? { version: 4 as const, sender: args.sender }
+        : { version: 3 as const }),
+      ownerEntityId,
+      channel,
+      recipient: args.recipient,
+      deliverySha256: calendarCardOwnerDeliverySha256({
+        ...(args.sender ? { sender: args.sender } : {}),
+        ownerEntityId,
+        channel,
+        recipient: args.recipient,
+        recipientEntityId: args.recipientEntityId,
+        cardId: args.cardId,
+        envelopeSha256: args.composition.envelopeSha256,
+      }),
       cardId: args.cardId,
       recipientEntityId: args.recipientEntityId,
       date: args.composition.date,
@@ -417,6 +486,28 @@ export function calendarCardApprovalPayload(args: {
       envelopeSha256: args.composition.envelopeSha256,
     },
   };
+}
+
+function calendarCardDeliverySha256(input: {
+  channel: CalendarCardChannel;
+  recipient: string;
+  recipientEntityId: string;
+  cardId: string;
+  envelopeSha256: string;
+}): string {
+  return sha256(stableStringify({ version: 2, ...input }));
+}
+
+function calendarCardOwnerDeliverySha256(input: {
+  sender?: CalendarCardSenderBinding;
+  ownerEntityId: string;
+  channel: CalendarCardChannel;
+  recipient: string;
+  recipientEntityId: string;
+  cardId: string;
+  envelopeSha256: string;
+}): string {
+  return sha256(stableStringify({ version: input.sender ? 4 : 3, ...input }));
 }
 
 export function verifyCalendarCardApproval(payload: ApprovalPayload): {
@@ -433,10 +524,44 @@ export function verifyCalendarCardApproval(payload: ApprovalPayload): {
     htmlSha256: payload.calendarCard.htmlSha256,
     textSha256: actualTextSha256,
   });
+  const deliveryMatches =
+    payload.calendarCard.version === 1 ||
+    (payload.calendarCard.version === 2 &&
+      payload.recipient === payload.calendarCard.recipient &&
+      equalDigest(
+        payload.calendarCard.deliverySha256,
+        calendarCardDeliverySha256({
+          channel: payload.calendarCard.channel,
+          recipient: payload.recipient,
+          recipientEntityId: payload.calendarCard.recipientEntityId,
+          cardId: payload.calendarCard.cardId,
+          envelopeSha256: actualEnvelopeSha256,
+        }),
+      )) ||
+    ((payload.calendarCard.version === 3 ||
+      payload.calendarCard.version === 4) &&
+      (payload.calendarCard.version !== 4 ||
+        payload.calendarCard.sender.channel === payload.calendarCard.channel) &&
+      payload.recipient === payload.calendarCard.recipient &&
+      equalDigest(
+        payload.calendarCard.deliverySha256,
+        calendarCardOwnerDeliverySha256({
+          ...(payload.calendarCard.version === 4
+            ? { sender: payload.calendarCard.sender }
+            : {}),
+          ownerEntityId: payload.calendarCard.ownerEntityId,
+          channel: payload.calendarCard.channel,
+          recipient: payload.recipient,
+          recipientEntityId: payload.calendarCard.recipientEntityId,
+          cardId: payload.calendarCard.cardId,
+          envelopeSha256: actualEnvelopeSha256,
+        }),
+      ));
   return {
     correlation: payload.calendarCard,
     actualTextSha256,
     matches:
+      deliveryMatches &&
       actualTextSha256 === payload.calendarCard.textSha256 &&
       actualEnvelopeSha256 === payload.calendarCard.envelopeSha256,
   };

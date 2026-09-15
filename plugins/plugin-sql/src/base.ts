@@ -102,7 +102,7 @@ import {
   type WorldMetadataMutationResult,
   worldMetadataValueEquals,
 } from "@elizaos/core";
-import { sanitizeJsonObject, serializeJsonb } from "./sanitize-json";
+import { sanitizeJsonObject, serializeDocumentJsonb, serializeJsonb } from "./sanitize-json";
 import { worldRoleAuditTable } from "./schema/worldRoleAudit";
 import {
   readTaskDueAt,
@@ -385,7 +385,6 @@ function documentDirectGrantCondition(
 ): SQL {
   if (
     params.requesterRole === "UNRESOLVED" ||
-    params.requesterRole === "GUEST" ||
     documentRoleHasGlobalVisibility(params.requesterRole)
   ) {
     return sql`false`;
@@ -436,7 +435,10 @@ function documentVisibilityCondition(
   if (params.requesterRole === "GUEST") {
     return sql`(
       ${validAuthorizationMetadata}
-      AND ${metadata}->>'scope' = 'global'
+      AND (
+        ${metadata}->>'scope' = 'global'
+        OR ${documentDirectGrantCondition(params, metadata)}
+      )
     )`;
   }
   return sql`(
@@ -568,7 +570,10 @@ import {
   taskTable,
   worldTable,
 } from "./schema/index";
-import { documentSearchTokensExpression } from "./schema/memory";
+import {
+  documentSearchQueryTokensExpression,
+  documentSearchTokensExpression,
+} from "./schema/memory";
 
 type AgentRow = typeof agentTable.$inferSelect;
 type AgentMessageExamples = NonNullable<Agent["messageExamples"]>;
@@ -1998,16 +2003,12 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
       const normalizedQuery = params.query?.trim();
       let queryCondition: SQL = sql`true`;
       if (normalizedQuery) {
-        queryCondition = sql`${documentSearchTokensExpression(
-          memoryTable.content,
-          memoryTable.metadata
-        )} @> regexp_split_to_array(
-          translate(
-            trim(${normalizedQuery}),
-            'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-            'abcdefghijklmnopqrstuvwxyz'
-          ),
-          E'[ \\t\\r\\n\\f]+'
+        queryCondition = sql`(
+          ${documentSearchTokensExpression(memoryTable.content, memoryTable.metadata, true)}
+          @> ${documentSearchQueryTokensExpression(sql`${normalizedQuery}`, true)}
+        ) AND (
+          ${documentSearchTokensExpression(memoryTable.content, memoryTable.metadata)}
+          @> ${documentSearchQueryTokensExpression(sql`${normalizedQuery}`)}
         )`;
       }
 
@@ -2581,15 +2582,17 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
       }
       if (!canRequesterMutateDocument(existing, params)) return { status: "forbidden" };
       const replacement = params.replacement;
+      const content = serializeDocumentJsonb(replacement.content);
+      const metadata = serializeJsonb(replacement.metadata ?? {});
       const updated = await tx
         .update(memoryTable)
         .set({
-          content: replacement.content,
+          content: sql`${content}::jsonb`,
           entityId: replacement.entityId,
           roomId: replacement.roomId,
           worldId: replacement.worldId,
           unique: replacement.unique ?? row.unique,
-          metadata: replacement.metadata ?? {},
+          metadata: sql`${metadata}::jsonb`,
         })
         .where(eq(memoryTable.id, params.documentId))
         .returning();
@@ -2619,6 +2622,22 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
       }
       if (!canRequesterManageDocumentDirectGrants(existing, params)) {
         return { status: "forbidden" };
+      }
+      if (params.requesterRole === "ADMIN") {
+        // Serialize against membership removal before granting durable access.
+        const [membership] = await tx
+          .select({ id: participantTable.id })
+          .from(participantTable)
+          .where(
+            and(
+              eq(participantTable.agentId, params.agentId),
+              eq(participantTable.roomId, existing.roomId),
+              eq(participantTable.entityId, params.requesterEntityId)
+            )
+          )
+          .for("share")
+          .limit(1);
+        if (!membership) return { status: "forbidden" };
       }
       if (directGrantEntityIds.length > 0) {
         const grantees = await tx
@@ -2726,15 +2745,17 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
         );
       }
       const replacement = params.replacement;
+      const content = serializeDocumentJsonb(replacement.content);
+      const metadata = serializeJsonb(replacement.metadata ?? {});
       const updated = await tx
         .update(memoryTable)
         .set({
-          content: replacement.content,
+          content: sql`${content}::jsonb`,
           entityId: replacement.entityId,
           roomId: replacement.roomId,
           worldId: replacement.worldId,
           unique: replacement.unique ?? row.unique,
-          metadata: replacement.metadata ?? {},
+          metadata: sql`${metadata}::jsonb`,
         })
         .where(eq(memoryTable.id, params.documentId))
         .returning();
@@ -4107,9 +4128,12 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
   ): Promise<void> {
     // Ensure we always pass a JSON string to the SQL bind parameter; if we pass an
     // object directly PG sees `[object Object]` and fails the `::jsonb` cast.
-    const contentToInsert = serializeJsonb(memory.content, {
-      documentText: tableName === "documents",
-    });
+    const contentToInsert =
+      tableName === "documents"
+        ? serializeJsonb(memory.content, { documentText: true })
+        : tableName === "document_fragments"
+          ? serializeDocumentJsonb(memory.content)
+          : serializeJsonb(memory.content);
 
     const metadataToInsert = serializeJsonb(memory.metadata ?? {});
 
@@ -4192,17 +4216,17 @@ export abstract class BaseDrizzleAdapter extends DatabaseAdapter<DrizzleDatabase
         await this.db.transaction(async (tx) => {
           // Update memory content if provided
           if (memory.content) {
-            // The stored row owns its content policy; caller-supplied metadata
-            // cannot turn ordinary memories into unbounded document sources.
-            // Lock the row so its identity/type stays fixed through this write.
-            const [existing] = await tx
+            const [stored] = await tx
               .select({ type: memoryTable.type })
               .from(memoryTable)
               .where(eq(memoryTable.id, memory.id))
               .for("update");
-            const contentToUpdate = serializeJsonb(memory.content, {
-              documentText: existing?.type === "documents",
-            });
+            const contentToUpdate =
+              stored?.type === "documents"
+                ? serializeJsonb(memory.content, { documentText: true })
+                : stored?.type === "document_fragments"
+                  ? serializeDocumentJsonb(memory.content)
+                  : serializeJsonb(memory.content);
 
             const metadataToUpdate = serializeJsonb(memory.metadata ?? {});
 

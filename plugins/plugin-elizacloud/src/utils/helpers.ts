@@ -1,3 +1,7 @@
+/**
+ * Adapts Cloud model payloads for JSON repair, audio detection, and image results.
+ * Image metadata is derived without removing any of the model's transcription.
+ */
 import { logger } from "@elizaos/core";
 import { JSONParseError } from "ai";
 import type { ImageDescriptionResult } from "../types";
@@ -99,9 +103,8 @@ export async function webStreamToNodeStream(webStream: ReadableStream<Uint8Array
 }
 
 export function parseImageDescriptionResponse(responseText: string): ImageDescriptionResult {
-  const titleMatch = responseText.match(/title[:\s]+(.+?)(?:\n|$)/i);
+  const titleMatch = responseText.match(/^Title:[ \t]*([^\r\n]+)/i);
   const title = titleMatch?.[1]?.trim() || "Image Analysis";
-  const description = responseText.replace(/title[:\s]+(.+?)(?:\n|$)/i, "").trim();
 
-  return { title, description };
+  return { title, description: responseText };
 }

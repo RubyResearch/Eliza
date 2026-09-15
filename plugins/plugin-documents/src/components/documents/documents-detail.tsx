@@ -40,6 +40,8 @@ import {
   Share2,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
+import { DocumentAccessPanel } from "./document-access-panel";
+import { DocumentPinsPanel } from "./document-pins-panel";
 import { getDocumentSourceLabel } from "./documents-detail.helpers";
 import { knowledgeReaderKind } from "./knowledge-media-format";
 
@@ -642,6 +644,9 @@ export function DocumentViewer({
                 </div>
               ) : null}
             </SettingsGroup>
+
+            <DocumentAccessPanel documentId={doc.id} />
+            <DocumentPinsPanel documentId={doc.id} />
 
             {mediaBlock ? (
               <SettingsGroup

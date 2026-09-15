@@ -7,6 +7,7 @@
 import {
   logger,
   requireConfirmedSendHandlerDelivery,
+  type SendHandlerReceipt,
   type TargetInfo,
 } from "@elizaos/core";
 import type {
@@ -49,6 +50,10 @@ import type {
 import { asRecord, LIFEOPS_DISCORD_CAPABILITIES } from "@elizaos/shared";
 import type { CreateLifeOpsBrowserSessionRequest } from "../../contracts/index.js";
 import type { LifeOpsContext } from "../lifeops-context.js";
+import {
+  ConnectorDeliveryEvidenceError,
+  ConnectorSenderChangedError,
+} from "../messaging/connector-delivery-evidence.js";
 import { createLifeOpsConnectorGrant } from "../repository.js";
 import {
   searchDiscordMessagesWithRuntimeService,
@@ -106,6 +111,8 @@ export type DiscordSendMessageResult = {
   side: LifeOpsConnectorSide;
   ok: true;
   deliveryStatus: "sent" | "sending" | "failed" | "unknown";
+  providerMessageId: string | null;
+  receipt: SendHandlerReceipt | null;
 } & ({ channelId: string } | { userId: string });
 
 export type DiscordConnectorVerification = {
@@ -1594,6 +1601,7 @@ export class DiscordDomain {
 
   async sendDiscordMessage(request: {
     side?: LifeOpsConnectorSide;
+    expectedIdentityId?: string;
     channelId?: string;
     /**
      * Discord user id target. Mutually exclusive with `channelId`; the
@@ -1606,6 +1614,16 @@ export class DiscordDomain {
   }): Promise<DiscordSendMessageResult> {
     const normalizedSide =
       normalizeOptionalConnectorSide(request.side, "side") ?? "owner";
+    if (
+      request.expectedIdentityId !== undefined &&
+      (normalizedSide !== "agent" || request.userId)
+    ) {
+      throw new ConnectorSenderChangedError(
+        "discord",
+        request.expectedIdentityId,
+        null,
+      );
+    }
     const text = request.text.trim();
     if (!text) {
       fail(400, "text is required");
@@ -1642,7 +1660,7 @@ export class DiscordDomain {
         accountId,
         entityId: userId,
       } as TargetInfo;
-      requireConfirmedSendHandlerDelivery(
+      const delivery = requireConfirmedSendHandlerDelivery(
         await this.ctx.runtime.sendMessageToTarget(target, {
           text,
           source: "lifeops",
@@ -1657,6 +1675,8 @@ export class DiscordDomain {
         // Confirmed-delivered disposition from the send handler; the CDP tab
         // capture below observes the owner's client, not the bot DM.
         deliveryStatus: "sent",
+        providerMessageId: delivery.providerMessageId ?? null,
+        receipt: delivery.receipt ?? null,
       };
     }
 
@@ -1681,6 +1701,9 @@ export class DiscordDomain {
     const useDiscordDesktopCdp =
       status.grant?.executionTarget === "local" &&
       (grantMetadata.source === "discord_desktop" || !status.tabId);
+    let confirmedDelivery: ReturnType<
+      typeof requireConfirmedSendHandlerDelivery
+    > | null = null;
     if (useDiscordDesktopCdp) {
       const result = await sendDiscordViaDesktopCdp({ channelId, text });
       if (!result.ok) {
@@ -1689,11 +1712,17 @@ export class DiscordDomain {
     } else {
       const delegated = await sendDiscordMessageWithRuntimeService({
         runtime: this.ctx.runtime,
+        expectedIdentityId: request.expectedIdentityId,
         grant: status.grant,
         channelId,
         text,
       });
       if (delegated.status !== "handled") {
+        if (
+          delegated.error instanceof ConnectorDeliveryEvidenceError ||
+          delegated.error instanceof ConnectorSenderChangedError
+        )
+          throw delegated.error;
         if (delegated.error) {
           this.ctx.logLifeOpsWarn(
             "runtime_service_delegation_unavailable",
@@ -1715,17 +1744,20 @@ export class DiscordDomain {
           fail(503, "Discord send handler is not available.");
         }
         const accountId = status.grant?.connectorAccountId ?? "default";
-        requireConfirmedSendHandlerDelivery(
+        confirmedDelivery = requireConfirmedSendHandlerDelivery(
           await this.ctx.runtime.sendMessageToTarget(
             { source: "discord", accountId, channelId },
             { text, source: "lifeops", metadata: { accountId } },
           ),
         );
+      } else {
+        confirmedDelivery = delegated.value.delivery;
       }
     }
 
-    let deliveryStatus: "sent" | "sending" | "failed" | "unknown" = "unknown";
-    if (status.tabId) {
+    let deliveryStatus: "sent" | "sending" | "failed" | "unknown" =
+      confirmedDelivery ? "sent" : "unknown";
+    if (!confirmedDelivery && status.tabId) {
       await sleep(DISCORD_SEND_SETTLE_MS);
       const delivery = await captureDiscordDeliveryStatus({
         tabId: status.tabId,
@@ -1740,6 +1772,8 @@ export class DiscordDomain {
       channelId,
       ok: true,
       deliveryStatus,
+      providerMessageId: confirmedDelivery?.providerMessageId ?? null,
+      receipt: confirmedDelivery?.receipt ?? null,
     };
   }
 

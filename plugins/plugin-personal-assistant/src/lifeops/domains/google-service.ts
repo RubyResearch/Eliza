@@ -345,11 +345,17 @@ export class GoogleDomain {
   }
 
   public async deleteCalendarReminderPlansForEvents(
-    _eventIds: string[],
+    eventIds: string[],
   ): Promise<void> {
-    // Implemented by withCalendar; this no-op fallback keeps withGoogle
-    // independently usable in unit tests that compose only connector status
-    // methods.
+    if (eventIds.length === 0) return;
+    const plans = await this.ctx.repository.listReminderPlansForOwners(
+      this.ctx.agentId(),
+      "calendar_event",
+      eventIds,
+    );
+    for (const plan of plans) {
+      await this.ctx.repository.deleteReminderPlan(this.ctx.agentId(), plan.id);
+    }
   }
 
   public async requireGoogleCalendarGrant(
@@ -393,7 +399,7 @@ export class GoogleDomain {
     return grant;
   }
 
-  public async requireGoogleGmailGrant(
+  private async requireGoogleGmailConnection(
     requestUrl: URL,
     requestedMode?: LifeOpsConnectorMode,
     requestedSide?: LifeOpsConnectorSide,
@@ -410,6 +416,21 @@ export class GoogleDomain {
     if (!status.connected || !grant) {
       fail(409, "Google Gmail is not connected.");
     }
+    return grant;
+  }
+
+  public async requireGoogleGmailGrant(
+    requestUrl: URL,
+    requestedMode?: LifeOpsConnectorMode,
+    requestedSide?: LifeOpsConnectorSide,
+    grantId?: string,
+  ): Promise<LifeOpsConnectorGrant> {
+    const grant = await this.requireGoogleGmailConnection(
+      requestUrl,
+      requestedMode,
+      requestedSide,
+      grantId,
+    );
     if (!grant.capabilities.includes("google.gmail.triage")) {
       fail(403, "Google Gmail triage access has not been granted.");
     }
@@ -422,7 +443,7 @@ export class GoogleDomain {
     requestedSide?: LifeOpsConnectorSide,
     grantId?: string,
   ): Promise<LifeOpsConnectorGrant> {
-    const grant = await this.requireGoogleGmailGrant(
+    const grant = await this.requireGoogleGmailConnection(
       requestUrl,
       requestedMode,
       requestedSide,

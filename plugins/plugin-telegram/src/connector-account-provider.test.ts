@@ -12,6 +12,13 @@ import type {
 import { describe, expect, it, vi } from "vitest";
 import { createTelegramConnectorAccountProvider } from "./connector-account-provider";
 
+import {
+  claimTelegramPollerToken,
+  markTelegramPollerConnected,
+  markTelegramPollerError,
+  releaseTelegramPollerToken,
+} from "./poller-lock";
+
 type TelegramConfig = Record<string, unknown>;
 
 function runtimeWith(telegram: TelegramConfig): IAgentRuntime {
@@ -93,4 +100,120 @@ describe("Telegram connector account roles (agent bot vs personal user)", () => 
     });
     expect(credless.some((a) => a.role === "OWNER")).toBe(false);
   });
+});
+
+describe("Telegram account liveness", () => {
+  it("requires the exact configured token, account and runtime before reporting connected", async () => {
+    const token = "123:inventory-health";
+    const config = { botToken: token };
+    const runtime = runtimeWith(config);
+    const provider = createTelegramConnectorAccountProvider(runtime);
+    const bot = { stop: vi.fn() } as never;
+    const read = () => provider.listAccounts?.(emptyManager());
+    expect((await read())?.[0].status).toBe("pending");
+    try {
+      claimTelegramPollerToken(token, {
+        bot,
+        mode: "full",
+        accountId: "default",
+        ownerId: "agent-1",
+      });
+      expect((await read())?.[0].status).toBe("pending");
+      markTelegramPollerConnected(token, bot);
+      expect((await read())?.[0].status).toBe("connected");
+      markTelegramPollerError(
+        token,
+        bot,
+        new Error("Synthetic network failure"),
+      );
+      expect((await read())?.[0].status).toBe("error");
+      markTelegramPollerConnected(token, bot);
+      config.botToken = "456:replacement-not-running";
+      expect((await read())?.[0].status).toBe("pending");
+      config.botToken = token;
+      releaseTelegramPollerToken(token, bot);
+      claimTelegramPollerToken(token, {
+        bot,
+        mode: "full",
+        accountId: "different-account",
+        ownerId: "agent-1",
+      });
+      markTelegramPollerConnected(token, bot);
+      expect((await read())?.[0].status).toBe("pending");
+      releaseTelegramPollerToken(token, bot);
+      claimTelegramPollerToken(token, {
+        bot,
+        mode: "full",
+        accountId: "default",
+        ownerId: "another-agent",
+      });
+      markTelegramPollerConnected(token, bot);
+      expect((await read())?.[0].status).toBe("pending");
+    } finally {
+      releaseTelegramPollerToken(token, bot);
+    }
+    expect((await read())?.[0].status).toBe("pending");
+  });
+
+  it("does not let a persisted connected row hide a stopped poller or configuration-only personal identity", async () => {
+    const configured = await list({ botToken: "789:persisted" });
+    const stored = { ...configured[0], status: "connected" as const };
+    const manager = {
+      getStorage: () => ({ listAccounts: async () => [stored] }),
+    } as unknown as ConnectorAccountManager;
+    const provider = createTelegramConnectorAccountProvider(
+      runtimeWith({ botToken: "789:persisted" }),
+    );
+    expect((await provider.listAccounts?.(manager))?.[0].status).toBe(
+      "pending",
+    );
+    const personal = await list({
+      accounts: { me: { personal: { phone: "+15551234567", enabled: true } } },
+    });
+    expect(personal[0].status).toBe("pending");
+  });
+});
+
+it("resolves vault-backed inventory credentials and keeps secret read failures private", async () => {
+  const token = "456:vault-inventory";
+  const config = {
+    botToken: "vault://connector.agent-1.telegram.default.bot-token",
+  };
+  const runtime = runtimeWith(config);
+  let fail = false;
+  const get = vi.fn(async () => {
+    if (fail) throw new Error("synthetic-private-store-detail");
+    return token;
+  });
+  runtime.getService = vi.fn(() => ({ get })) as never;
+  const provider = createTelegramConnectorAccountProvider(runtime);
+  const bot = { stop: vi.fn() } as never;
+  try {
+    claimTelegramPollerToken(token, {
+      bot,
+      mode: "full",
+      accountId: "default",
+      ownerId: "agent-1",
+    });
+    markTelegramPollerConnected(token, bot);
+    expect((await provider.listAccounts?.(emptyManager()))?.[0].status).toBe(
+      "connected",
+    );
+    fail = true;
+    await expect(provider.listAccounts?.(emptyManager())).rejects.toThrow(
+      "The configured Telegram credential is unavailable.",
+    );
+    get.mockClear();
+    config.botToken =
+      "vault://connector.another-agent.telegram.default.bot-token";
+    await expect(provider.listAccounts?.(emptyManager())).rejects.toThrow(
+      "The configured Telegram credential is unavailable.",
+    );
+    expect(get).not.toHaveBeenCalled();
+  } finally {
+    releaseTelegramPollerToken(token, bot);
+  }
+  expect((await list({ botToken: token, enabled: false }))[0].status).toBe(
+    "disabled",
+  );
 });

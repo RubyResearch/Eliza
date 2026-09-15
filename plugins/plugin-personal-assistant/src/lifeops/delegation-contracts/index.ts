@@ -8,6 +8,7 @@
  * embedding policy decisions in transport adapters.
  */
 
+import { ElizaError } from "@elizaos/core";
 import type {
   ApprovalQueue,
   ApprovalRequest,
@@ -103,7 +104,13 @@ export interface LifeOpsDelegationContractRecord extends DelegationContract {
   readonly updatedAt: string;
 }
 
+export interface DelegationEmailSender {
+  readonly grantId: string;
+  readonly email: string;
+}
+
 export interface DelegationInboundTurn {
+  readonly replyConnectorAccountId?: string;
   readonly channel: DelegationChannel;
   readonly threadId: string;
   readonly sender: string;
@@ -124,6 +131,7 @@ export interface DelegationDraftIntent {
   readonly subjectUserId: string;
   readonly reason: string;
   readonly payload: {
+    readonly grantId?: string;
     readonly action: "send_email";
     readonly to: readonly string[];
     readonly cc: readonly string[];
@@ -525,6 +533,9 @@ export async function processDelegationInboundTurn(input: {
   readonly nowIso: string;
   readonly repository: DelegationContractRepository;
   readonly approvalQueue: ApprovalQueue;
+  readonly resolveEmailSender: (
+    ownerUserId: string,
+  ) => Promise<DelegationEmailSender>;
   readonly approvalExpiresAt?: Date;
 }): Promise<DelegationInboundProcessingResult> {
   const contracts = await input.repository.listDelegationContracts(
@@ -537,13 +548,32 @@ export async function processDelegationInboundTurn(input: {
   const evaluations: DelegationEvaluation[] = [];
   const enqueuedApprovals: ApprovalRequest[] = [];
   for (const contract of contracts) {
-    const evaluation = evaluateDelegationContract({
+    let evaluation = evaluateDelegationContract({
       contract,
       turn: input.turn,
       nowIso: input.nowIso,
     });
     if (evaluation.outcome === "out_of_scope") {
       continue;
+    }
+    if (evaluation.draftIntent) {
+      const sender = await input.resolveEmailSender(contract.ownerUserId);
+      if (!sender.grantId.trim() || !sender.email.trim())
+        throw new ElizaError(
+          "Reconnect the receiving email account before reviewing a holding reply.",
+          {
+            code: "DELEGATION_REPLY_SENDER_UNAVAILABLE",
+          },
+        );
+      const draft = evaluation.draftIntent;
+      evaluation = {
+        ...evaluation,
+        draftIntent: {
+          ...draft,
+          payload: { ...draft.payload, grantId: sender.grantId },
+          reason: `${draft.reason}\nFrom: ${sender.email}`,
+        },
+      };
     }
     evaluations.push(evaluation);
     if (evaluation.draftIntent) {

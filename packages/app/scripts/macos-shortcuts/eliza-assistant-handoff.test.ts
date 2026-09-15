@@ -86,10 +86,23 @@ describe("macOS Shortcuts assistant handoff", () => {
       path.join(os.tmpdir(), "eliza-shortcuts-"),
     );
 
+    const probePath = path.join(tempDir, "native-inventory-called");
+    const toolsDir = path.join(tempDir, "tools");
+    await fs.mkdir(toolsDir);
+    await fs.writeFile(
+      path.join(toolsDir, "shortcuts"),
+      '#!/bin/sh\nprintf called > "$ELIZA_TEST_SHORTCUT_PROBE"\nexit 99\n',
+      { mode: 0o755 },
+    );
+    const helperEnv = {
+      ...process.env,
+      PATH: `${toolsDir}${path.delimiter}${process.env.PATH}`,
+      ELIZA_TEST_SHORTCUT_PROBE: probePath,
+    };
     try {
       const { stdout } = await execFileAsync("sh", [installScript], {
         env: {
-          ...process.env,
+          ...helperEnv,
           ELIZA_SHORTCUT_INSTALL_DIR: tempDir,
         },
       });
@@ -102,12 +115,32 @@ describe("macOS Shortcuts assistant handoff", () => {
         "PASS multiline stdin and punctuation are percent-encoded",
       );
 
-      const { stdout: verifyStdout } = await execFileAsync("sh", [
-        verifyScript,
-        "--helper",
-        path.join(tempDir, "eliza-assistant-handoff.sh"),
-        "--no-shortcuts-warning",
-      ]);
+      const { stdout: verifyStdout } = await execFileAsync(
+        "sh",
+        [
+          verifyScript,
+          "--helper",
+          path.join(tempDir, "eliza-assistant-handoff.sh"),
+          "--helper-only",
+        ],
+        { env: helperEnv },
+      );
+      await expect(fs.access(probePath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        execFileAsync(
+          "sh",
+          [
+            verifyScript,
+            "--helper",
+            path.join(tempDir, "eliza-assistant-handoff.sh"),
+            "--helper-only",
+            "--require-shortcut",
+          ],
+          { env: helperEnv },
+        ),
+      ).rejects.toMatchObject({ code: 2 });
 
       expect(verifyStdout).toContain("PASS helper builds assistant deep links");
       expect(verifyStdout).toContain(

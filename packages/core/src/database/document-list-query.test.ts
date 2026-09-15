@@ -245,10 +245,15 @@ describe("document-list capability contract", () => {
 
 		expect(isDocumentVisibleToRequester(granted, userParams)).toBe(true);
 		expect(isDocumentVisibleToRequester(agentOnly, userParams)).toBe(false);
+		const guest = { ...userParams, requesterRole: "GUEST" as const };
+		expect(isDocumentVisibleToRequester(granted, guest)).toBe(true);
+		expect(isDocumentVisibleToRequester(agentOnly, guest)).toBe(false);
+		expect(canRequesterMutateDocument(granted, guest)).toBe(false);
+		expect(canRequesterManageDocumentDirectGrants(granted, guest)).toBe(false);
 		expect(
 			isDocumentVisibleToRequester(granted, {
-				...userParams,
-				requesterRole: "GUEST",
+				...guest,
+				requesterRole: "UNRESOLVED",
 			}),
 		).toBe(false);
 		expect(canRequesterMutateDocument(granted, userParams)).toBe(false);
@@ -547,4 +552,61 @@ describe("document-list capability contract", () => {
 			).documents.map((memory) => memory.id),
 		).toEqual([ready.id]);
 	});
+});
+
+it("rechecks current in-memory membership for grants while preserving owner authority", async () => {
+	const adapter = new InMemoryDatabaseAdapter();
+	const source = document(900);
+	const grantee = "00000000-0000-0000-0000-00000000c0df" as UUID;
+	await adapter.createEntities([
+		{ id: grantee, agentId: AGENT_ID, names: ["Grantee"] },
+	]);
+	await adapter.createMemories([{ memory: source, tableName: "documents" }]);
+	await adapter.createRoomParticipants([REQUESTER_ID], ROOM_ID);
+	const expected = readDocumentMutationSnapshot(source);
+	if (!expected || !source.id) throw new Error("Document fixture is invalid");
+	const request = {
+		agentId: AGENT_ID,
+		documentId: source.id,
+		requesterEntityId: REQUESTER_ID,
+		requesterRole: "ADMIN" as const,
+		requesterRoomIds: [ROOM_ID],
+		expected,
+		directGrantEntityIds: [grantee],
+	};
+	const first = await adapter.updateDocumentDirectGrants(request);
+	expect(first.status).toBe("updated");
+	if (first.status !== "updated") throw new Error("Initial grant failed");
+	const reviewed = readDocumentMutationSnapshot(first.document);
+	if (!reviewed) throw new Error("Updated document is invalid");
+	await adapter.deleteParticipants([
+		{ entityId: REQUESTER_ID, roomId: ROOM_ID },
+	]);
+	await expect(
+		adapter.updateDocumentDirectGrants({
+			...request,
+			expected: reviewed,
+			directGrantEntityIds: [],
+		}),
+	).resolves.toEqual({ status: "forbidden" });
+	const reader = {
+		agentId: AGENT_ID,
+		documentId: source.id,
+		requesterEntityId: grantee,
+		requesterRoomIds: [],
+		requesterRole: "USER" as const,
+	};
+	await expect(adapter.getDocument(reader)).resolves.toMatchObject({
+		content: source.content,
+	});
+	await expect(
+		adapter.updateDocumentDirectGrants({
+			...request,
+			requesterRole: "OWNER",
+			requesterRoomIds: [],
+			expected: reviewed,
+			directGrantEntityIds: [],
+		}),
+	).resolves.toMatchObject({ status: "updated" });
+	await expect(adapter.getDocument(reader)).resolves.toBeNull();
 });

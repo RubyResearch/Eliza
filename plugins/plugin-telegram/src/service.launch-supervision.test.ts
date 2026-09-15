@@ -191,6 +191,43 @@ describe("TelegramService.launchPollerSupervised", () => {
     );
   });
 
+  it.each(["before failure", "during backoff"])(
+    "does not restart a stopped service %s",
+    async (stopTiming) => {
+      const { bot, calls } = makeBot();
+      const { service } = makeService();
+      const token = `tok-stopped-${stopTiming}`;
+      Object.assign(service, { bot, botToken: token });
+      const launched = callLaunch(service, bot, token, "acct");
+      calls[0].onLaunch();
+      await exposeStoppablePoller(bot);
+      await launched;
+
+      if (stopTiming === "before failure") await service.stop();
+      calls[0].reject(new Error(CONFLICT));
+      await flushMicrotasks();
+      if (stopTiming === "during backoff") await service.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(bot.launch).toHaveBeenCalledTimes(1);
+      expect(getTelegramPollerClaim(token)).toBeUndefined();
+      const replacement = makeBot();
+      const { service: replacementService } = makeService();
+      const replacementStarted = callLaunch(
+        replacementService,
+        replacement.bot,
+        token,
+        "replacement",
+      );
+      replacement.calls[0].onLaunch();
+      await exposeStoppablePoller(replacement.bot);
+      await replacementStarted;
+      expect(getTelegramPollerClaim(token)?.bot).toBe(replacement.bot);
+      replacement.calls[0].resolve();
+      await flushMicrotasks();
+    },
+  );
+
   it("fails loudly instead of replacing a poller that already owns the token", async () => {
     const first = makeBot();
     const second = makeBot();

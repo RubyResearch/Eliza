@@ -1,7 +1,8 @@
 /**
  * Eliza Cloud image generation and description handlers. Requests preserve
  * caller output-budget intent and reject malformed operator limits before any
- * provider dispatch.
+ * provider dispatch. Descriptions preserve the entire response and require a
+ * complete finish reason before downstream extraction can use it.
  */
 
 import type { IAgentRuntime, ImageDescriptionParams, ImageGenerationParams } from "@elizaos/core";
@@ -299,7 +300,7 @@ export async function handleImageDescription(
     type OpenAIResponseType = {
       choices?: Array<{
         message?: { content?: string };
-        finish_reason?: string;
+        finish_reason?: string | null;
       }>;
       usage?: {
         prompt_tokens: number;
@@ -324,6 +325,17 @@ export async function handleImageDescription(
       );
     }
 
+    const finishReason = typedResult.choices?.[0]?.finish_reason;
+    if (finishReason !== "stop") {
+      throw new ElizaError(
+        "Eliza Cloud did not complete the image description; retry with a model capable of returning the complete page",
+        {
+          code: "MODEL_INCOMPLETE_OUTPUT",
+          context: { provider: "elizacloud", finishReason },
+        }
+      );
+    }
+
     if (!content) {
       throw new Error(
         "ElizaOS Cloud image description returned an empty completion"
@@ -332,11 +344,7 @@ export async function handleImageDescription(
 
     return parseImageDescriptionResponse(content);
   } catch (error) {
-    // Fail closed: never fabricate a `{ description: "Error: ..." }` object.
-    // The caller (describeImageCached) catches this and returns null, so the
-    // agent honestly reports the image as undescribed instead of caching the
-    // error string under the image hash and leaking it into LLM context —
-    // the same contract plugin-openai / plugin-google-genai already uphold.
+    // error-policy:J2 Preserve typed provider failures for the caller's boundary.
     const message = error instanceof Error ? error.message : String(error);
     logger.warn(`Error analyzing image (failing closed): ${message}`);
     throw error instanceof Error ? error : new Error(message);

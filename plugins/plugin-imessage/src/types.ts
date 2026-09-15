@@ -134,7 +134,10 @@ export interface IMessageSendOptions {
  */
 export interface IMessageSendResult {
   success: boolean;
+  /** Last observed provider receipt, never a locally generated identifier. */
   messageId?: string;
+  /** Ordered provider receipts, including accepted chunks before a later failure. */
+  messageIds?: string[];
   chatId?: string;
   error?: string;
 }

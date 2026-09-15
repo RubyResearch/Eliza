@@ -101,6 +101,7 @@ export * from "./components/ui/grid.tsx";
 export * from "./components/ui/hover-card.tsx";
 export { Input } from "./components/ui/input.tsx";
 export * from "./components/ui/label.tsx";
+export * from "./components/ui/native-select.tsx";
 export * from "./components/ui/popover.tsx";
 export * from "./components/ui/progress.tsx";
 export * from "./components/ui/radio-group.tsx";

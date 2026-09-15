@@ -49,10 +49,12 @@ export interface OwnerCalendarMutationGatewayDeps {
   readonly calendar?: Pick<
     CalendarService,
     | "getConditionalCalendarMutationTarget"
+    | "executeLinkedCalendarControl"
     | "executeLinkedCalendarLink"
     | "executeLinkedCalendarReconciliation"
     | "executeLinkedCalendarConflictResolution"
     | "executeLinkedCalendarDisconnect"
+    | "executeLinkedCalendarRebind"
     | "executeLinkedCalendarProviderChanges"
   >;
   readonly port?: CalendarMutationPort;
@@ -411,10 +413,12 @@ export class OwnerCalendarMutationGatewayService
   private calendar(): Pick<
     CalendarService,
     | "getConditionalCalendarMutationTarget"
+    | "executeLinkedCalendarControl"
     | "executeLinkedCalendarLink"
     | "executeLinkedCalendarReconciliation"
     | "executeLinkedCalendarConflictResolution"
     | "executeLinkedCalendarDisconnect"
+    | "executeLinkedCalendarRebind"
     | "executeLinkedCalendarProviderChanges"
   > {
     if (this.deps.calendar) return this.deps.calendar;
@@ -694,6 +698,16 @@ export class OwnerCalendarMutationGatewayService
     return this.calendar().executeLinkedCalendarLink(request);
   }
 
+  async updateLinkedCalendarControl(
+    requestUrl: URL,
+    request: Parameters<
+      CalendarOwnerMutationGateway["updateLinkedCalendarControl"]
+    >[1],
+  ) {
+    requireOperationKey(request.idempotencyKey);
+    return this.calendar().executeLinkedCalendarControl(requestUrl, request);
+  }
+
   async reconcileLinkedCalendar(
     _requestUrl: URL,
     linkId: string,
@@ -717,6 +731,21 @@ export class OwnerCalendarMutationGatewayService
   ) {
     requireOperationKey(request.idempotencyKey);
     return this.calendar().executeLinkedCalendarConflictResolution(
+      requireOperationKey(linkId),
+      request,
+    );
+  }
+
+  async rebindLinkedCalendar(
+    requestUrl: URL,
+    linkId: string,
+    request: Parameters<
+      CalendarOwnerMutationGateway["rebindLinkedCalendar"]
+    >[2],
+  ) {
+    requireOperationKey(request.idempotencyKey);
+    return this.calendar().executeLinkedCalendarRebind(
+      requestUrl,
       requireOperationKey(linkId),
       request,
     );

@@ -341,6 +341,40 @@ describe("EventEditorDrawer", () => {
     cleanup();
   });
 
+  it("shows local save separately from pending Google delivery and clears it after sync", () => {
+    const saved: LifeOpsCalendarEvent = {
+      ...editEvent,
+      provider: "eliza",
+      grantId: "eliza-calendar",
+      calendarId: "primary",
+      metadata: {
+        etag: '"eliza-2"',
+        version: 2,
+        deduplication: {
+          pendingUpdate: { linkId: "reviewed-link", snapshots: [editEvent] },
+        },
+      },
+    };
+    const view = render(
+      <EventEditorDrawer open mode="edit" event={saved} onClose={vi.fn()} />,
+    );
+    expect(screen.getByRole("status").textContent).toContain(
+      "Google calendar update pending",
+    );
+    expect(screen.getByText("Save", { selector: "span.sr-only" })).toBeTruthy();
+    view.rerender(
+      <EventEditorDrawer
+        open
+        mode="edit"
+        event={{ ...saved, metadata: { etag: '"eliza-2"', version: 2 } }}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(uiClient.updateLifeOpsCalendarEvent).not.toHaveBeenCalled();
+    expect(uiClient.createLifeOpsCalendarEvent).not.toHaveBeenCalled();
+  });
+
   // ----- create mode --------------------------------------------------------
 
   it.each([

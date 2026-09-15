@@ -1,11 +1,8 @@
 /**
- * Regression coverage for all-day event rescheduling. Exercises the real
- * GoogleCalendarClient.updateEvent over a mock client factory whose events.get
- * returns an all-day (date-only) event and whose events.patch echoes the
- * request body. When only one bound of an all-day event is patched, the derived
- * counterpart must stay a date-only {date} value so the patch body does not mix
- * an all-day date with a timed dateTime — the exact shape Google Calendar's
- * events.patch rejects with HTTP 400 ("Cannot combine date and dateTime").
+ * Exercises real Google calendar update serialization against a deterministic
+ * provider boundary that merges nested patch fields. Covers one-bound
+ * rescheduling and conversions between timed and all-day events; incompatible
+ * retained date/dateTime fields are rejected as they are by Google.
  */
 import type { calendar_v3 } from "googleapis";
 import { describe, expect, it, vi } from "vitest";
@@ -18,9 +15,14 @@ function updateEventCapture(existing: calendar_v3.Schema$Event): {
   client: GoogleCalendarClient;
   patch: PatchMock;
 } {
-  const patch = vi.fn(async (params: calendar_v3.Params$Resource$Events$Patch) => ({
-    data: { id: params.eventId, ...params.requestBody },
-  }));
+  const patch = vi.fn(async (params: calendar_v3.Params$Resource$Events$Patch) => {
+    const start = { ...existing.start, ...params.requestBody?.start };
+    const end = { ...existing.end, ...params.requestBody?.end };
+    if ((start.date && start.dateTime) || (end.date && end.dateTime)) {
+      throw Object.assign(new Error("Cannot combine date and dateTime"), { status: 400 });
+    }
+    return { data: { ...existing, id: params.eventId, ...params.requestBody, start, end } };
+  });
   const events = {
     get: vi.fn(async () => ({ data: existing })),
     patch,
@@ -37,6 +39,28 @@ function patchedBody(patch: PatchMock): calendar_v3.Schema$Event {
 }
 
 describe("GoogleCalendarClient all-day reschedule patch", () => {
+  it.each([true, false])(
+    "converts existing date representation with patch semantics (all-day=%s)",
+    async (allDay) => {
+      const { client } = updateEventCapture({
+        id: "convert-1",
+        start: allDay ? { dateTime: "2026-11-01T00:00:00.000Z" } : { date: "2026-11-01" },
+        end: allDay ? { dateTime: "2026-11-03T00:00:00.000Z" } : { date: "2026-11-03" },
+      });
+      const result = await client.updateEvent({
+        accountId: "acct-1",
+        eventId: "convert-1",
+        timeZone: "America/New_York",
+        start: allDay ? "2026-11-01" : "2026-11-01T14:00:00.000Z",
+        end: allDay ? "2026-11-03" : "2026-11-01T15:00:00.000Z",
+        expectedEtag: '"v1"',
+      });
+      expect(result.isAllDay).toBe(allDay);
+      expect(result.start).toBe(allDay ? "2026-11-01T00:00:00.000Z" : "2026-11-01T14:00:00.000Z");
+      expect(result.end).toBe(allDay ? "2026-11-03T00:00:00.000Z" : "2026-11-01T15:00:00.000Z");
+    }
+  );
+
   it("keeps the derived end date-only when only the start of an all-day event is patched", async () => {
     const { client, patch } = updateEventCapture({
       id: "allday-1",
@@ -50,8 +74,8 @@ describe("GoogleCalendarClient all-day reschedule patch", () => {
     // Existing span is 2 whole days (Jun 1 -> Jun 3), preserved from the new start.
     expect(body.start?.date).toBe("2026-06-05");
     expect(body.end?.date).toBe("2026-06-07");
-    expect(body.start?.dateTime).toBeUndefined();
-    expect(body.end?.dateTime).toBeUndefined();
+    expect(body.start?.dateTime).toBeNull();
+    expect(body.end?.dateTime).toBeNull();
   });
 
   it("keeps the derived start date-only when only the end of an all-day event is patched", async () => {
@@ -66,8 +90,8 @@ describe("GoogleCalendarClient all-day reschedule patch", () => {
     const body = patchedBody(patch);
     expect(body.end?.date).toBe("2026-06-10");
     expect(body.start?.date).toBe("2026-06-08");
-    expect(body.start?.dateTime).toBeUndefined();
-    expect(body.end?.dateTime).toBeUndefined();
+    expect(body.start?.dateTime).toBeNull();
+    expect(body.end?.dateTime).toBeNull();
   });
 
   it("defaults to a one-day span when the existing all-day duration is unknown", async () => {
@@ -82,7 +106,7 @@ describe("GoogleCalendarClient all-day reschedule patch", () => {
     const body = patchedBody(patch);
     expect(body.start?.date).toBe("2026-06-05");
     expect(body.end?.date).toBe("2026-06-06");
-    expect(body.end?.dateTime).toBeUndefined();
+    expect(body.end?.dateTime).toBeNull();
   });
 
   it("still derives a timed dateTime end for timed events (unchanged behavior)", async () => {
@@ -101,7 +125,7 @@ describe("GoogleCalendarClient all-day reschedule patch", () => {
     const body = patchedBody(patch);
     expect(body.start?.dateTime).toBe("2026-06-05T09:00:00.000Z");
     expect(body.end?.dateTime).toBe("2026-06-05T10:00:00.000Z");
-    expect(body.start?.date).toBeUndefined();
-    expect(body.end?.date).toBeUndefined();
+    expect(body.start?.date).toBeNull();
+    expect(body.end?.date).toBeNull();
   });
 });

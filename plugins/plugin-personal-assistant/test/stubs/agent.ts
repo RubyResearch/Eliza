@@ -15,7 +15,9 @@ import type { GroundedActionReply } from "@elizaos/core";
 export { checkRateLimit } from "../../../../packages/agent/src/api/rate-limiter.ts";
 export {
   APPROVAL_SERVICE,
+  ApprovalDispatchControlStore,
   ApprovalService,
+  approvalDispatchAdmissionCte,
   resolveApprovalService,
 } from "../../../../packages/agent/src/services/approval/index.ts";
 export {

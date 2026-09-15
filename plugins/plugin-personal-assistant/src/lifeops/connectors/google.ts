@@ -35,6 +35,7 @@ export interface GoogleSendPayload {
   /** Optional structured metadata (subject, htmlBody, threadId, …). */
   metadata?: {
     subject?: string;
+    grantId?: string;
     side?: "owner" | "agent";
     htmlBody?: string;
     cc?: readonly string[];
@@ -93,9 +94,17 @@ export function createGoogleConnectorContribution(
     async send(payload: unknown): Promise<DispatchResult> {
       if (!isConnectorSendPayload(payload)) return rejectInvalidPayload();
       const meta = (payload as GoogleSendPayload).metadata ?? {};
+      if (
+        meta.grantId !== undefined &&
+        (typeof meta.grantId !== "string" ||
+          !meta.grantId.trim() ||
+          meta.grantId !== meta.grantId.trim())
+      )
+        return rejectInvalidPayload();
       try {
         const result = await service.sendGmailMessage(INTERNAL_URL, {
           mode: "local",
+          grantId: meta.grantId,
           side: meta.side ?? "owner",
           to: payload.target
             .split(",")

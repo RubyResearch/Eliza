@@ -31,6 +31,7 @@ describe("Google connector scheduling envelope", () => {
       idempotencyKey: "scheduling-message:v1:abc",
       metadata: {
         subject: "Scheduling: school conference",
+        grantId: "reviewed-sender",
         cc: ["caregiver@example.com"],
         bcc: ["archive@example.com"],
       },
@@ -38,6 +39,7 @@ describe("Google connector scheduling envelope", () => {
 
     expect(send).toHaveBeenCalledWith(INTERNAL_URL, {
       mode: "local",
+      grantId: "reviewed-sender",
       side: "owner",
       to: ["parent@example.com", "school@example.com"],
       cc: ["caregiver@example.com"],
@@ -58,3 +60,20 @@ describe("Google connector scheduling envelope", () => {
     });
   });
 });
+
+it.each(["", " ", " sender ", 42])(
+  "rejects an invalid sender binding before provider dispatch: %s",
+  async (grantId) => {
+    const send = vi.spyOn(LifeOpsService.prototype, "sendGmailMessage");
+    const connector = createGoogleConnectorContribution({
+      agentId: "sender-validation",
+    } as IAgentRuntime);
+    const result = await connector.send?.({
+      target: "synthetic@example.test",
+      message: "Synthetic",
+      metadata: { grantId },
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(send).not.toHaveBeenCalled();
+  },
+);

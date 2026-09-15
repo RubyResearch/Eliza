@@ -8,7 +8,9 @@ import type {
   LifeOpsGmailSyncHealth,
   LifeOpsGoogleCapability,
   LifeOpsGoogleConnectorStatus,
+  LifeOpsLinkedCalendarControl,
   PermissionState,
+  UpdateLifeOpsLinkedCalendarControlRequest,
 } from "@elizaos/shared";
 
 export type LifeOpsSeedRangeDays = 7 | 30 | 90;
@@ -51,6 +53,10 @@ export interface LifeOpsPurgeReceipt {
 }
 
 export interface LifeOpsConnectionsAdapter {
+  getLinkedCalendarControl(): Promise<LifeOpsLinkedCalendarControl>;
+  updateLinkedCalendarControl(
+    request: UpdateLifeOpsLinkedCalendarControlRequest,
+  ): Promise<LifeOpsLinkedCalendarControl>;
   load(options?: { forceSync?: boolean }): Promise<LifeOpsConnectionsSnapshot>;
   connectGoogle(capabilities: LifeOpsGoogleCapability[]): Promise<void>;
   disconnectGoogle(grantId: string): Promise<void>;

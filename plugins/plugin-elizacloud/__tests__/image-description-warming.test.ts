@@ -53,14 +53,58 @@ function warming503(): Response {
 }
 
 function ok(description: string): Response {
-  return new Response(JSON.stringify({ choices: [{ message: { content: description } }] }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content: description }, finish_reason: "stop" }] }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
 }
 
 describe("handleImageDescription warming-503 retry", () => {
   afterEach(() => postRaw.mockReset());
+
+  it.each([
+    "Non-text visual information: a white page with a centered orange title and a black footer.",
+    "Title: Parenting agreement\n\nPreserve this visible document heading and every clause.\n",
+    "  Transcription:\nFirst page.\n\nSecond page: ORANGE-ORCHARD-SECOND-PAGE.  \n",
+  ])("preserves the complete provider transcription: %s", async (description) => {
+    postRaw.mockResolvedValueOnce(ok(description));
+    const result = await handleImageDescription(runtime(), {
+      imageUrl: "https://example.com/agreement-page.png",
+      prompt: "Transcribe every visible word and describe non-text information.",
+    });
+    expect(result.description).toBe(description);
+  });
+
+  it.each(["length", "content_filter", "tool_calls", "function_call", null, "", undefined])(
+    "rejects a partial transcription ending with %s",
+    async (finishReason) => {
+      postRaw.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { content: "The agreement requires pickup at" },
+                finish_reason: finishReason,
+              },
+            ],
+          }),
+          { status: 200 }
+        )
+      );
+      await expect(
+        handleImageDescription(runtime(), {
+          imageUrl: "https://example.com/agreement-page.png",
+          prompt: "Transcribe the complete page.",
+        })
+      ).rejects.toMatchObject({
+        code: "MODEL_INCOMPLETE_OUTPUT",
+        context: { finishReason },
+      });
+    }
+  );
 
   it("rides through a cold-cache warming 503 and returns the description", async () => {
     postRaw.mockResolvedValueOnce(warming503()).mockResolvedValueOnce(ok("A red square."));

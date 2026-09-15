@@ -2196,6 +2196,39 @@ test.describe("all-views aesthetic audit (#8796)", () => {
         await seedAppStorage(page);
         await seedStewardSession(page, { jwt: true });
         await installDefaultAppRoutes(page);
+        if (view.fixtureState === "family-interview") {
+          // Capture the real renderer's private answer form against explicit read-only empty inventories.
+          await page.route(
+            "**/api/lifeops/family-workflows/intake?*",
+            async (route) => {
+              if (route.request().method() !== "GET") {
+                await route.fallback();
+                return;
+              }
+              await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({ reviews: [], sources: [] }),
+              });
+            },
+          );
+          await page.route(
+            "**/api/lifeops/family-workflows/email-options",
+            async (route) => {
+              if (route.request().method() !== "GET") {
+                await route.fallback();
+                return;
+              }
+              await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({
+                  options: { accounts: [], recipients: [] },
+                }),
+              });
+            },
+          );
+        }
         const remoteBundleProof = await forceRemoteBundleAuditRoute(page, view);
         await openAppPath(page, remoteBundleProof?.auditPath ?? view.path);
         const bundleResponse = remoteBundleProof
@@ -2213,6 +2246,50 @@ test.describe("all-views aesthetic audit (#8796)", () => {
             remoteBundleProof.componentExport,
           );
           expect(bundleResponse.headers()["x-eliza-view-id"]).toBe(view.id);
+        }
+
+        if (view.fixtureState === "family-interview") {
+          await page
+            .getByRole("button", { name: "Monthly packet", exact: true })
+            .click();
+          await page
+            .getByText("Fill missing information", { exact: true })
+            .click();
+          const interview = page.getByRole("form", { name: "Owner interview" });
+          await interview.getByLabel("Topic").selectOption("school");
+          await interview
+            .getByRole("radio", { name: "I have an update", exact: true })
+            .check();
+          await interview
+            .getByLabel("Your update")
+            .fill("Please confirm who will handle school pickup on Friday.");
+          await interview
+            .getByRole("checkbox", { name: "This update needs an answer" })
+            .check();
+          const saveAnswer = interview.getByRole("button", {
+            name: "Save private answer",
+          });
+          await expect(saveAnswer).toBeEnabled();
+          // Exercise the actual shell hit target without persisting fixture data.
+          // A floating composer must not prevent the owner reaching the action.
+          await saveAnswer.click({ trial: true });
+          const discardAnswer = interview.getByRole("button", {
+            name: "Discard answer",
+          });
+          await discardAnswer.focus();
+          await page.keyboard.press("Enter");
+          await expect(interview.getByLabel("Your update")).toHaveCount(0);
+          await expect(saveAnswer).toBeDisabled();
+          await interview
+            .getByRole("radio", { name: "I have an update", exact: true })
+            .check();
+          await interview
+            .getByLabel("Your update")
+            .fill("Please confirm who will handle school pickup on Friday.");
+          await interview
+            .getByRole("checkbox", { name: "This update needs an answer" })
+            .check();
+          await saveAnswer.click({ trial: true });
         }
 
         // The shell and composer paint before lazy views settle, so readiness is

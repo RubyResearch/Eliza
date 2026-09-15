@@ -14,9 +14,17 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KnowledgeGraphService, knowledgeGraphSchema } from "@elizaos/agent";
+import {
+  ApprovalDispatchControlStore,
+  KnowledgeGraphService,
+  knowledgeGraphSchema,
+} from "@elizaos/agent";
 import type { AgentRuntime, Plugin } from "@elizaos/core";
-import { AgentEventService, parseInteractionBlocks } from "@elizaos/core";
+import {
+  AgentEventService,
+  getConnectorAccountManager,
+  parseInteractionBlocks,
+} from "@elizaos/core";
 import {
   type DispatchResult,
   schedulingPlugin,
@@ -199,6 +207,10 @@ async function createOpeningApproval(args: {
   if (!request) {
     throw new Error("scheduling handler did not persist its approval request");
   }
+  if (request.payload.action === "send_email") {
+    expect(request.payload.grantId).toMatch(/^connector-account:/);
+    expect(request.reason).toContain("From: sender@example.test");
+  }
   return { request, negotiationId: data.negotiation.id };
 }
 
@@ -239,6 +251,26 @@ beforeAll(async () => {
     await runtime.registerService(AgentEventService);
     await runtime.getServiceLoadPromise(AgentEventService.serviceType);
   }
+  const accounts = getConnectorAccountManager(runtime);
+  if (!accounts.getProvider("google"))
+    accounts.registerProvider({ provider: "google" });
+  await accounts.upsertAccount("google", {
+    id: "scheduling-owner",
+    provider: "google",
+    role: "OWNER",
+    purpose: ["reading", "messaging"],
+    accessGate: "owner_binding",
+    status: "connected",
+    displayHandle: "sender@example.test",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    metadata: {
+      grantedScopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+      ],
+    },
+  });
   queue = createApprovalQueue(runtime, { agentId: runtime.agentId });
 }, 180_000);
 
@@ -249,6 +281,265 @@ afterAll(async () => {
 });
 
 describe("ApprovalQueue integration (real PGlite)", () => {
+  it("persists an owner pause, rejects stale resumes, and admits claims only after release", async () => {
+    const subjectUserId = "handoff-owner-pause";
+    const control = new ApprovalDispatchControlStore(runtime);
+    const request = await queue.enqueue(messageInput({ subjectUserId }));
+    await queue.approve(request.id, subjectUserId, {
+      resolvedBy: subjectUserId,
+      resolutionReason: "reviewed before handoff",
+    });
+    const claim = {
+      requestId: request.id,
+      subjectUserId,
+      provider: "synthetic-account",
+      providerIdempotencyKey: request.id,
+    };
+    const mutation = {
+      subjectUserId,
+      operationId: "handoff-pause-1",
+      expectedRevision: 0,
+    };
+    const paused = await control.pause(mutation);
+    expect(await control.pause(mutation)).toEqual(paused);
+    const reopened = new ApprovalDispatchControlStore(runtime);
+    expect(await reopened.read(subjectUserId)).toEqual(paused);
+    await expect(queue.claimExecution(claim)).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_PAUSED",
+    });
+    expect((await queue.byId(request.id, subjectUserId))?.state).toBe(
+      "approved",
+    );
+    await expect(
+      reopened.resume({
+        ...mutation,
+        expectedRevision: paused.revision,
+        operationId: "another-handoff",
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_DISPATCH_CONTROL_CONFLICT" });
+    await expect(reopened.resume(mutation)).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_CONTROL_CONFLICT",
+    });
+    const release = { ...mutation, expectedRevision: paused.revision };
+    const resumed = await reopened.resume(release);
+    expect(await reopened.resume(release)).toEqual(resumed);
+    await expect(reopened.pause(mutation)).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_CONTROL_CONFLICT",
+    });
+    const pausedAgain = await reopened.pause({
+      ...mutation,
+      operationId: "handoff-pause-2",
+      expectedRevision: resumed.revision,
+    });
+    await expect(queue.claimExecution(claim)).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_PAUSED",
+    });
+    await reopened.resume({
+      subjectUserId,
+      operationId: "handoff-pause-2",
+      expectedRevision: pausedAgain.revision,
+    });
+    expect((await queue.claimExecution(claim)).state).toBe("executing");
+  }, 60_000);
+
+  it("blocks handoff resume until in-flight and uncertain delivery is reconciled", async () => {
+    const subjectUserId = "handoff-owner-uncertain";
+    const control = new ApprovalDispatchControlStore(runtime);
+    const request = await queue.enqueue(messageInput({ subjectUserId }));
+    await queue.approve(request.id, subjectUserId, {
+      resolvedBy: subjectUserId,
+      resolutionReason: "reviewed before handoff",
+    });
+    const executing = await queue.claimExecution({
+      requestId: request.id,
+      subjectUserId,
+      provider: "synthetic-account",
+      providerIdempotencyKey: request.id,
+    });
+    if (!executing.execution) throw new Error("Execution was not persisted");
+    const attempt = {
+      requestId: request.id,
+      subjectUserId,
+      attemptId: executing.execution.attemptId,
+    };
+    const paused = await control.pause({
+      subjectUserId,
+      operationId: "handoff-in-flight",
+      expectedRevision: 0,
+    });
+    const release = {
+      subjectUserId,
+      operationId: "handoff-in-flight",
+      expectedRevision: paused.revision,
+    };
+    await expect(control.resume(release)).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_DRAIN_REQUIRED",
+    });
+    await queue.markDispatchStarted(attempt);
+    await queue.markReconciliationRequired({
+      ...attempt,
+      error: "Provider response lost",
+    });
+    await expect(
+      new ApprovalDispatchControlStore(runtime).resume(release),
+    ).rejects.toMatchObject({
+      code: "APPROVAL_DISPATCH_DRAIN_REQUIRED",
+      context: {
+        requests: [{ id: request.id, state: "reconciliation_required" }],
+      },
+    });
+    await queue.reconcileExecution({
+      ...attempt,
+      outcome: "not_delivered",
+      reconciledBy: subjectUserId,
+      reconciliationReason: "Provider confirmed no delivery",
+    });
+    await queue.markExpired(request.id, subjectUserId);
+    expect((await control.resume(release)).paused).toBe(false);
+  }, 60_000);
+
+  it("serializes a racing pause and claim without pausing another owner", async () => {
+    const control = new ApprovalDispatchControlStore(runtime);
+    const subjectUserId = "handoff-owner-race";
+    const request = await queue.enqueue(messageInput({ subjectUserId }));
+    await queue.approve(request.id, subjectUserId, {
+      resolvedBy: subjectUserId,
+      resolutionReason: "reviewed before handoff",
+    });
+    const claim = {
+      requestId: request.id,
+      subjectUserId,
+      provider: "synthetic-account",
+      providerIdempotencyKey: request.id,
+    };
+    const [pause, execution] = await Promise.allSettled([
+      control.pause({
+        subjectUserId,
+        operationId: "handoff-race",
+        expectedRevision: 0,
+      }),
+      queue.claimExecution(claim),
+    ]);
+    expect(pause.status).toBe("fulfilled");
+    expect((await control.read(subjectUserId)).paused).toBe(true);
+    if (execution.status === "fulfilled") {
+      await expect(
+        control.resume({
+          subjectUserId,
+          operationId: "handoff-race",
+          expectedRevision: 1,
+        }),
+      ).rejects.toMatchObject({ code: "APPROVAL_DISPATCH_DRAIN_REQUIRED" });
+    } else {
+      expect(execution.reason).toMatchObject({
+        code: "APPROVAL_DISPATCH_PAUSED",
+      });
+      expect((await queue.byId(request.id, subjectUserId))?.state).toBe(
+        "approved",
+      );
+    }
+    const other = await queue.enqueue(
+      messageInput({ subjectUserId: "handoff-unrelated-owner" }),
+    );
+    await queue.approve(other.id, other.subjectUserId, {
+      resolvedBy: other.subjectUserId,
+      resolutionReason: "unrelated account",
+    });
+    expect(
+      (
+        await queue.claimExecution({
+          ...claim,
+          requestId: other.id,
+          subjectUserId: other.subjectUserId,
+        })
+      ).state,
+    ).toBe("executing");
+  }, 60_000);
+
+  it("retires a known-undelivered approval without permitting another send", async () => {
+    const request = await queue.enqueue(messageInput());
+    const claim = {
+      requestId: request.id,
+      subjectUserId: request.subjectUserId,
+      provider: "retired-test-account",
+      providerIdempotencyKey: `retirement:${request.id}`,
+    };
+    await queue.approve(request.id, request.subjectUserId, {
+      resolvedBy: request.subjectUserId,
+      resolutionReason: "Synthetic account handoff test",
+    });
+    const executing = await queue.claimExecution(claim);
+    if (!executing.execution) throw new Error("Execution was not persisted");
+    const mutation = { ...claim, attemptId: executing.execution.attemptId };
+    await queue.markDispatchStarted(mutation);
+    const failed = await queue.markRetryableFailure({
+      ...mutation,
+      error: "Provider confirmed non-delivery before account retirement",
+      providerReceipt: { delivered: false },
+    });
+    await expect(
+      queue.markExpired(request.id, "another-owner"),
+    ).rejects.toBeInstanceOf(ApprovalNotFoundError);
+    const retired = await queue.markExpired(request.id, request.subjectUserId);
+    expect(retired.execution).toEqual(failed.execution);
+    const reopened = createApprovalQueue(runtime, { agentId: runtime.agentId });
+    await expect(reopened.claimExecution(claim)).rejects.toBeInstanceOf(
+      ApprovalStateTransitionError,
+    );
+    expect(
+      (await reopened.byId(request.id, request.subjectUserId))?.state,
+    ).toBe("expired");
+  }, 60_000);
+
+  it("keeps an uncertain delivery unresolved until reconciliation permits retirement", async () => {
+    const request = await queue.enqueue(messageInput());
+    await queue.approve(request.id, request.subjectUserId, {
+      resolvedBy: request.subjectUserId,
+      resolutionReason: "Synthetic account handoff test",
+    });
+    const executing = await queue.claimExecution({
+      requestId: request.id,
+      subjectUserId: request.subjectUserId,
+      provider: "retired-test-account",
+      providerIdempotencyKey: `retirement:${request.id}`,
+    });
+    if (!executing.execution) throw new Error("Execution was not persisted");
+    const mutation = {
+      requestId: request.id,
+      subjectUserId: request.subjectUserId,
+      attemptId: executing.execution.attemptId,
+    };
+    await queue.markDispatchStarted(mutation);
+    await expect(
+      queue.markExpired(request.id, request.subjectUserId),
+    ).rejects.toBeInstanceOf(ApprovalStateTransitionError);
+    const uncertain = await queue.markReconciliationRequired({
+      ...mutation,
+      error: "Connection lost after dispatch",
+    });
+    await expect(
+      queue.markExpired(request.id, request.subjectUserId),
+    ).rejects.toBeInstanceOf(ApprovalStateTransitionError);
+    expect(await queue.byId(request.id, request.subjectUserId)).toEqual(
+      uncertain,
+    );
+    await queue.reconcileExecution({
+      ...mutation,
+      outcome: "not_delivered",
+      reconciledBy: request.subjectUserId,
+      reconciliationReason: "Provider lookup confirmed no delivery",
+    });
+    await queue.markExpired(request.id, request.subjectUserId);
+    await expect(
+      queue.claimExecution({
+        requestId: request.id,
+        subjectUserId: request.subjectUserId,
+        provider: "replacement-account",
+        providerIdempotencyKey: `replacement:${request.id}`,
+      }),
+    ).rejects.toBeInstanceOf(ApprovalStateTransitionError);
+  }, 60_000);
+
   it("enqueue → approve → durable execution → receipt happy path", async () => {
     const enqueued = await queue.enqueue(messageInput());
     expect(enqueued.state).toBe("pending");
@@ -796,6 +1087,72 @@ describe("ApprovalQueue integration (real PGlite)", () => {
     expect(sendEmail).not.toHaveBeenCalled();
   }, 60_000);
 
+  it("keeps scheduling delivery unclaimed during a handoff pause and sends once after resume", async () => {
+    const { request } = await createOpeningApproval({
+      suffix: "handoff-pause",
+    });
+    const approved = await queue.approve(request.id, request.subjectUserId, {
+      resolvedBy: String(runtime.agentId),
+      resolutionReason: "Synthetic owner approval",
+    });
+    const controls = new ApprovalDispatchControlStore(runtime);
+    const before = await controls.read(request.subjectUserId);
+    const paused = await controls.pause({
+      subjectUserId: request.subjectUserId,
+      operationId: "scheduling-handoff-pause",
+      expectedRevision: before.revision,
+    });
+    const email = getChannelRegistry(runtime)?.get("email");
+    if (!email) throw new Error("Email fixture missing");
+    const original = email.send;
+    const send = vi.fn(async (payload: Parameters<typeof original>[0]) =>
+      receiptResult(payload, "scheduling-after-resume"),
+    );
+    email.send = send;
+    try {
+      const result = await executeApprovedRequest({
+        runtime,
+        queue,
+        request: approved,
+      });
+      expect(result).toMatchObject({
+        success: false,
+        data: {
+          error: "APPROVAL_DISPATCH_PAUSED",
+          sent: false,
+          state: "approved",
+        },
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect((await queue.byId(request.id, request.subjectUserId))?.state).toBe(
+        "approved",
+      );
+      expect(
+        await new SchedulingDeliveryStore(runtime).byApprovalRequestId(
+          request.id,
+        ),
+      ).toMatchObject({ state: "awaiting_approval", attemptCount: 0 });
+      await controls.resume({
+        subjectUserId: request.subjectUserId,
+        operationId: "scheduling-handoff-pause",
+        expectedRevision: paused.revision,
+      });
+      expect(
+        await executeApprovedRequest({ runtime, queue, request: approved }),
+      ).toMatchObject({ success: true });
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      email.send = original;
+      const current = await controls.read(request.subjectUserId);
+      if (current.paused)
+        await controls.resume({
+          subjectUserId: request.subjectUserId,
+          operationId: "scheduling-handoff-pause",
+          expectedRevision: current.revision,
+        });
+    }
+  }, 60_000);
+
   it("suppresses a concurrent duplicate send and completes only with one durable provider receipt", async () => {
     const { request } = await createOpeningApproval({
       suffix: "concurrent-1001",
@@ -826,6 +1183,15 @@ describe("ApprovalQueue integration (real PGlite)", () => {
         data: { error: "SCHEDULING_DELIVERY_IN_FLIGHT", sent: false },
       });
       expect(send).toHaveBeenCalledTimes(1);
+      if (approved.payload.action !== "send_email")
+        throw new Error("Expected email fixture");
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            grantId: approved.payload.grantId,
+          }),
+        }),
+      );
       // A fresh queue/store instance models a worker restart with no in-memory
       // execution state. The persisted receipt remains the dedupe authority.
       const restartedQueue = new PgApprovalQueue(runtime, {

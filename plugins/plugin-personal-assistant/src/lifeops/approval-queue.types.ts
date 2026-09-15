@@ -1,4 +1,5 @@
 /** Types for the owner-approval queue: request states, action kinds, and payload shapes. */
+
 import {
   APPROVAL_EXECUTION_CAPABILITY,
   APPROVAL_EXECUTION_PROTOCOL_VERSION,
@@ -6,6 +7,7 @@ import {
   ApprovalNotFoundError as RuntimeApprovalNotFoundError,
   ApprovalStateTransitionError as RuntimeApprovalStateTransitionError,
 } from "@elizaos/agent";
+import type { CalendarCardSenderBinding } from "./calendar-card-sender.js";
 import type { TransactionalDb } from "./sql.js";
 import type { TravelBookingPayloadFields } from "./travel-booking.types.js";
 
@@ -48,9 +50,8 @@ export interface SchedulingApprovalCorrelation {
 }
 
 /** Immutable bytes and capability identity approved for one calendar card. */
-export interface CalendarCardApprovalCorrelation {
+interface CalendarCardApprovalContent {
   readonly kind: "calendar_card";
-  readonly version: 1;
   readonly cardId: string;
   readonly recipientEntityId: string;
   readonly date: string;
@@ -60,6 +61,33 @@ export interface CalendarCardApprovalCorrelation {
   readonly htmlSha256: string;
   readonly envelopeSha256: string;
 }
+
+/** Legacy cards remain iMessage-only; new reviews bind the transport and destination. */
+export type CalendarCardApprovalCorrelation = CalendarCardApprovalContent &
+  (
+    | { readonly version: 1 }
+    | {
+        readonly version: 2;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly deliverySha256: string;
+      }
+    | {
+        readonly version: 3;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly ownerEntityId: string;
+        readonly deliverySha256: string;
+      }
+    | {
+        readonly version: 4;
+        readonly channel: "imessage" | "telegram" | "discord";
+        readonly recipient: string;
+        readonly ownerEntityId: string;
+        readonly deliverySha256: string;
+        readonly sender: CalendarCardSenderBinding;
+      }
+  );
 
 export type ApprovalRequestState =
   | "pending"
@@ -531,7 +559,10 @@ export interface ApprovalExecutionCapability {
   reconcileExecution(
     reconciliation: ApprovalExecutionReconciliation,
   ): Promise<ApprovalRequest>;
-  /** Terminally invalidate a pending or approved request without dispatch. */
+  /**
+   * Retire pending, approved, or confirmed-undelivered retryable requests.
+   * Executing and uncertain deliveries require reconciliation, not expiry.
+   */
   markExpired(id: string, subjectUserId: string): Promise<ApprovalRequest>;
   removePending(id: string, subjectUserId: string): Promise<void>;
   purgeExpired(now: Date): Promise<ReadonlyArray<string>>;

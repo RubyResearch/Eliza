@@ -22,6 +22,7 @@ import type {
   LifeOpsConnectorSide,
   ListLifeOpsCalendarsRequest,
   PurgeLifeOpsCalendarImportedDataRequest,
+  RebindLifeOpsLinkedCalendarRequest,
   ResolveLifeOpsLinkedCalendarConflictRequest,
   RunLifeOpsLinkedCalendarReconciliationRequest,
   SeedLifeOpsCalendarRequest,
@@ -101,6 +102,12 @@ export interface CalendarRouteService {
     request: SeedLifeOpsCalendarRequest,
   ): Promise<unknown>;
   listLinkedCalendarEvents(): Promise<unknown>;
+  listLinkedCalendarEventViews(): Promise<
+    import("@elizaos/shared").LifeOpsLinkedCalendarEventView[]
+  >;
+  getLinkedCalendarControl(): Promise<
+    import("@elizaos/shared").LifeOpsLinkedCalendarControl
+  >;
   getLinkedCalendarEvent(linkId: string): Promise<unknown>;
 }
 
@@ -142,10 +149,37 @@ export async function handleCalendarRoutes(
   const { method, pathname, url } = deps;
   const q = url.searchParams;
 
+  if (pathname === "/api/lifeops/calendar/sync-control") {
+    if (method === "GET") {
+      if (deps.rateLimit("calendar_link_read")) return true;
+      return deps.runRoute(async (service) => {
+        deps.json(await service.getLinkedCalendarControl());
+      });
+    }
+    if (method === "POST") {
+      if (deps.rateLimit("calendar_link_write")) return true;
+      const body =
+        await deps.readJsonBody<
+          import("@elizaos/shared").UpdateLifeOpsLinkedCalendarControlRequest
+        >();
+      if (!body) return true;
+      return deps.runRoute(async () => {
+        deps.json(
+          await deps.mutationGateway.updateLinkedCalendarControl(url, body),
+        );
+      });
+    }
+  }
+
   if (method === "GET" && pathname === "/api/lifeops/calendar/links") {
     if (deps.rateLimit("calendar_link_read")) return true;
     return deps.runRoute(async (service) => {
-      deps.json({ links: await service.listLinkedCalendarEvents() });
+      deps.json({
+        links:
+          url.searchParams.get("view") === "events"
+            ? await service.listLinkedCalendarEventViews()
+            : await service.listLinkedCalendarEvents(),
+      });
     });
   }
 
@@ -160,7 +194,7 @@ export async function handleCalendarRoutes(
   }
 
   const linkedActionMatch = pathname.match(
-    /^\/api\/lifeops\/calendar\/links\/([^/]+)(?:\/(reconcile|resolve|disconnect))?$/,
+    /^\/api\/lifeops\/calendar\/links\/([^/]+)(?:\/(reconcile|resolve|disconnect|rebind))?$/,
   );
   if (linkedActionMatch) {
     const linkId = deps.decodePathComponent(linkedActionMatch[1], "link id");
@@ -199,6 +233,16 @@ export async function handleCalendarRoutes(
               linkId,
               body,
             ),
+          );
+        });
+      }
+      if (action === "rebind") {
+        const body =
+          await deps.readJsonBody<RebindLifeOpsLinkedCalendarRequest>();
+        if (!body) return true;
+        return deps.runRoute(async () => {
+          deps.json(
+            await deps.mutationGateway.rebindLinkedCalendar(url, linkId, body),
           );
         });
       }

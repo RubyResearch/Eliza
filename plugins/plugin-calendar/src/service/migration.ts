@@ -332,6 +332,38 @@ export async function ensureCalendarFeedPreferenceTable(
     $calendar_feed_preference_version$`);
 }
 
+/** Bootstraps the agent's explicit calendar destination and pause decision. */
+export async function ensureLinkedCalendarControlTable(
+  exec: SqlExecutor,
+): Promise<void> {
+  await exec(`CREATE TABLE IF NOT EXISTS ${TARGET_SCHEMA}.linked_calendar_control (
+    agent_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 0 CONSTRAINT linked_calendar_control_revision_valid CHECK (revision >= 0),
+    paused BOOLEAN NOT NULL DEFAULT TRUE,
+    connector_account_id TEXT,
+    provider_calendar_id TEXT,
+    dispatch_token TEXT,
+    dispatch_link_id TEXT,
+    CONSTRAINT linked_calendar_control_dispatch_valid CHECK (
+      (dispatch_token IS NULL AND dispatch_link_id IS NULL) OR
+      (dispatch_token IS NOT NULL AND length(dispatch_token) > 0
+        AND dispatch_link_id IS NOT NULL AND length(dispatch_link_id) > 0
+        AND connector_account_id IS NOT NULL)),
+    CONSTRAINT linked_calendar_control_destination_valid CHECK ((connector_account_id IS NULL AND provider_calendar_id IS NULL AND paused)
+      OR (connector_account_id IS NOT NULL AND length(trim(connector_account_id)) > 0
+        AND provider_calendar_id IS NOT NULL AND length(trim(provider_calendar_id)) > 0))
+  )`);
+  await exec(`CREATE TABLE IF NOT EXISTS ${TARGET_SCHEMA}.linked_calendar_control_mutations (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    snapshot JSONB NOT NULL,
+    committed_at TEXT NOT NULL,
+    CONSTRAINT linked_calendar_control_mutations_operation_unique UNIQUE (agent_id, operation_key)
+  )`);
+}
+
 /**
  * Linked events are calendar-native and never copied from the legacy LifeOps
  * schema. This bootstrap keeps upgrades safe when Drizzle schema registration
@@ -365,10 +397,14 @@ export async function ensureLinkedCalendarEventTable(
           agent_id, connector_account_id, provider_calendar_id, provider_event_id
         ),
       CONSTRAINT linked_calendar_events_state_valid
-        CHECK (state IN ('clean', 'dirty', 'conflicted', 'quarantined', 'paused')),
+        CHECK (state IN ('clean', 'dirty', 'conflicted', 'quarantined', 'paused', 'local_only')),
       CONSTRAINT linked_calendar_events_operation_valid
         CHECK (pending_operation IS NULL OR pending_operation IN ('create', 'update', 'delete'))
     )`);
+  await exec(`ALTER TABLE ${TARGET_SCHEMA}.linked_calendar_events
+    DROP CONSTRAINT IF EXISTS linked_calendar_events_state_valid,
+    ADD CONSTRAINT linked_calendar_events_state_valid
+    CHECK (state IN ('clean', 'dirty', 'conflicted', 'quarantined', 'paused', 'local_only'))`);
   await exec(`
     CREATE INDEX IF NOT EXISTS linked_calendar_events_reconcile_idx
       ON ${TARGET_SCHEMA}.linked_calendar_events (agent_id, state, updated_at)`);
@@ -573,6 +609,7 @@ export async function migrateCalendarTables(
   await ensureCalendarFeedPreferenceTable(exec);
   await ensureGoogleCalendarWatchChannelTable(exec);
   await ensureLinkedCalendarEventTable(exec);
+  await ensureLinkedCalendarControlTable(exec);
   const results: TableMigrationResult[] = [];
   for (const table of MIGRATED_CALENDAR_TABLES) {
     const receipt = await runCarveOutMigration(database, {

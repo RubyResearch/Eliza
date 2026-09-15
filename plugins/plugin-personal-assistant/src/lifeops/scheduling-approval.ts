@@ -241,6 +241,7 @@ function canonicalSchedulingEnvelope(
       scheduling: schedulingIdentity,
       delivery: {
         action: payload.action,
+        ...(payload.grantId === undefined ? {} : { grantId: payload.grantId }),
         to: [...payload.to],
         cc: [...payload.cc],
         bcc: [...payload.bcc],
@@ -303,6 +304,7 @@ export function attachSchedulingApprovalCorrelation<
 
 export function schedulingApprovalPayloadForDraft(
   draft: SchedulingMessageDraft,
+  senderGrantId?: string,
 ): SchedulingSendPayload {
   const seed = {
     kind: "scheduling_message" as const,
@@ -319,6 +321,7 @@ export function schedulingApprovalPayloadForDraft(
     return attachSchedulingApprovalCorrelation(
       {
         action: "send_email",
+        ...(senderGrantId === undefined ? {} : { grantId: senderGrantId }),
         to: [draft.recipient],
         cc: [],
         bcc: [],

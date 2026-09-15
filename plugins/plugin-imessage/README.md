@@ -15,9 +15,9 @@ Native mode requires macOS. Blooio mode supports Linux servers.
 - **Blooio Webhook**: Receive signed events at `/api/imessage/webhook/blooio`
 - **Channel Isolation**: Dispatch only the configured Blooio channel
 
-## Requirements
+## Native transport requirements
 
-- **macOS**: This plugin only works on macOS
+- **macOS**: The native transport only works on macOS
 - **Messages App Access**: Full Disk Access is required for reads; Automation permission is required for sends
 - **No Relay Required**: BlueBubbles, local servers, auxiliary CLIs, and external services are not used
 
@@ -30,6 +30,10 @@ npm install @elizaos/plugin-imessage
 # bun
 bun add @elizaos/plugin-imessage
 ```
+
+## Delivery receipts
+
+Hosted sends retain every accepted provider message ID in order, including IDs from chunks accepted before a later failure. Native AppleScript acceptance does not supply a provider receipt; the connector leaves the message ID absent instead of inventing one. Callers must reconcile uncertain results before retrying.
 
 ## Configuration
 
@@ -75,8 +79,13 @@ channel-scoped Blooio webhook for the configured channel pointing to:
 https://YOUR_AGENT_HOST/api/imessage/webhook/blooio
 ```
 
-Subscribe to `message.received`. The route verifies `X-Blooio-Signature`
+Blooio v4 subscriptions deliver all event types. The route handles only
+`message.received` and verifies `X-Blooio-Signature`
 against the unmodified request body and silently ignores other channel IDs.
+
+Startup and the existing recurring heartbeat verify API access and that the sender
+number resolves to the configured channel. This check does not prove webhook or
+message delivery; complete an inbound and outbound test before client handoff.
 
 ### Permissions
 

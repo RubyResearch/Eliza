@@ -81,8 +81,21 @@ const CREATE_APPROVAL_REQUESTS_TABLE = `CREATE TABLE approval_requests (
   reconciliation_resolved_by text,
   reconciliation_reason text,
   agent_id uuid NOT NULL,
+  admission_revision integer,
   created_at timestamp with time zone NOT NULL,
   updated_at timestamp with time zone NOT NULL
+)`;
+
+const CREATE_DISPATCH_CONTROL_TABLE = `CREATE TABLE IF NOT EXISTS approval_dispatch_controls (
+  agent_id uuid NOT NULL,
+  subject_user_id text NOT NULL,
+  revision integer NOT NULL DEFAULT 0,
+  paused boolean NOT NULL DEFAULT false,
+  operation_id text,
+  google_binding_required boolean NOT NULL DEFAULT false,
+  retired_google_grants jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  PRIMARY KEY (agent_id, subject_user_id)
 )`;
 
 const CREATE_APPROVAL_IDEMPOTENCY_INDEX = `CREATE UNIQUE INDEX approval_requests_agent_idempotency_uidx
@@ -133,6 +146,7 @@ beforeAll(async () => {
   pg = new PGlite();
   const db = drizzle(pg);
   await db.execute(sql.raw(CREATE_APPROVAL_REQUESTS_TABLE));
+  await db.execute(sql.raw(CREATE_DISPATCH_CONTROL_TABLE));
   await db.execute(sql.raw(CREATE_APPROVAL_IDEMPOTENCY_INDEX));
   // Minimal recording stand-in for the scheduled-task runner side-channel:
   // enqueue surfaces every approval as a ScheduledTask and rolls the row back
@@ -277,6 +291,7 @@ describe("pendingApprovals provider (real PGlite queue)", () => {
     } finally {
       const db = drizzle(pg);
       await db.execute(sql.raw(CREATE_APPROVAL_REQUESTS_TABLE));
+      await db.execute(sql.raw(CREATE_DISPATCH_CONTROL_TABLE));
       await db.execute(sql.raw(CREATE_APPROVAL_IDEMPOTENCY_INDEX));
     }
   });

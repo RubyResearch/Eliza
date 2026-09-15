@@ -1395,40 +1395,40 @@
           "type": "string",
           "required": false,
           "sensitive": false,
-          "default": "gemma-4-31b",
+          "default": "qwen-3.8-27b",
           "label": "Cloud Small Model",
-          "help": "Small/fast model for quick tasks (overrides SMALL_MODEL). Default: gemma-4-31b",
-          "placeholder": "gemma-4-31b",
+          "help": "Small/fast model for quick tasks (overrides SMALL_MODEL). Default: qwen-3.8-27b",
+          "placeholder": "qwen-3.8-27b",
           "advanced": false
         },
         "SMALL_MODEL": {
           "type": "string",
           "required": false,
           "sensitive": false,
-          "default": "gemma-4-31b",
+          "default": "qwen-3.8-27b",
           "label": "Model",
           "help": "Fallback identifier for the small language model if ELIZAOS_CLOUD_SMALL_MODEL is not set.",
-          "placeholder": "gemma-4-31b",
+          "placeholder": "qwen-3.8-27b",
           "advanced": false
         },
         "ELIZAOS_CLOUD_LARGE_MODEL": {
           "type": "string",
           "required": false,
           "sensitive": false,
-          "default": "gemma-4-31b",
+          "default": "qwen-3.8-27b",
           "label": "Cloud Large Model",
-          "help": "Large/powerful model for complex tasks (overrides LARGE_MODEL). Default: gemma-4-31b",
-          "placeholder": "gemma-4-31b",
+          "help": "Large/powerful model for complex tasks (overrides LARGE_MODEL). Default: qwen-3.8-27b",
+          "placeholder": "qwen-3.8-27b",
           "advanced": false
         },
         "LARGE_MODEL": {
           "type": "string",
           "required": false,
           "sensitive": false,
-          "default": "gemma-4-31b",
+          "default": "qwen-3.8-27b",
           "label": "Model",
           "help": "Fallback identifier for the large language model if ELIZAOS_CLOUD_LARGE_MODEL is not set.",
-          "placeholder": "gemma-4-31b",
+          "placeholder": "qwen-3.8-27b",
           "advanced": false
         },
         "ELIZAOS_CLOUD_EMBEDDING_MODEL": {
@@ -1480,9 +1480,8 @@
           "type": "secret",
           "required": false,
           "sensitive": true,
-          "default": "8192",
           "label": "Cloud Image Description Max Tokens",
-          "help": "Maximum number of tokens allowed in the image-description model response.",
+          "help": "Optional positive-integer image-description output limit; unset sends no provider cap.",
           "advanced": false
         },
         "ELIZAOS_CLOUD_TTS_MODEL": {

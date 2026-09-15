@@ -4,6 +4,7 @@
  * auto-migrate all of them at startup.
  */
 export { agentTable } from "./agent";
+export { approvalDispatchControlTable } from "./approvalDispatchControl";
 export { approvalRequestTable } from "./approvalRequests";
 export type { AuthAuditOutcome } from "./authAuditEvent";
 export { authAuditEventTable } from "./authAuditEvent";

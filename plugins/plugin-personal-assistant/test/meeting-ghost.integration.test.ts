@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRuntime } from "@elizaos/core";
-import { AgentEventService } from "@elizaos/core";
+import { AgentEventService, getConnectorAccountManager } from "@elizaos/core";
 import { schedulingPlugin } from "@elizaos/plugin-scheduling";
 import type { TranscriptSegment } from "@elizaos/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -31,6 +31,8 @@ let cleanup: () => Promise<void>;
 let queue: ApprovalQueue;
 let isolatedStateDir: string;
 let isolatedConfigPath: string;
+let senderGrantId: string;
+let senderAccountId: string;
 
 const isolatedEnvKeys = [
   "ELIZA_STATE_DIR",
@@ -106,7 +108,65 @@ afterAll(async () => {
 });
 
 describe("meeting-ghost consumer (real approval queue)", () => {
+  it("leaves approvals and commitments untouched when no email sender is connected", async () => {
+    await expect(
+      runMeetingGhostForTranscript(runtime, {
+        agentId: runtime.agentId,
+        owner: {
+          ownerUserId: "owner-mtg-unconnected",
+          ownerDisplayName: "Synthetic owner",
+          requestedBy: "meeting-ghost",
+          careAbouts: [],
+          approvalExpiresAt: new Date(Date.now() + 86_400_000),
+        },
+        transcript: {
+          meetingId: "unconnected-meeting",
+          title: "Synthetic planning",
+          startedAt: "2026-09-11T16:00:00.000Z",
+          attendees: [{ name: "Ava", email: "ava@example.test" }],
+          segments: [
+            seg("Mira", 0, "Ava will send the school schedule by 2026-09-15."),
+          ],
+        },
+      }),
+    ).rejects.toThrow();
+    expect(
+      await queue.list({
+        subjectUserId: "owner-mtg-unconnected",
+        state: null,
+        action: null,
+      }),
+    ).toEqual([]);
+    const records = await new LifeOpsRepository(
+      runtime,
+    ).listCommitmentLedgerRecords(runtime.agentId, { source: "transcript" });
+    expect(
+      records.filter((record) =>
+        record.sourceKey.startsWith("unconnected-meeting:"),
+      ),
+    ).toEqual([]);
+  }, 60_000);
+
   it("enqueues follow-up + calendar approvals from a diarized transcript, resolvable by the owner", async () => {
+    const manager = getConnectorAccountManager(runtime);
+    if (!manager.getProvider("google"))
+      manager.registerProvider({ provider: "google" });
+    const sender = await manager.upsertAccount("google", {
+      id: "meeting-owner",
+      provider: "google",
+      role: "OWNER",
+      purpose: ["messaging"],
+      accessGate: "owner_binding",
+      status: "connected",
+      displayHandle: "meeting-owner@example.test",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      metadata: {
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.send"],
+      },
+    });
+    senderAccountId = sender.id;
+    senderGrantId = `connector-account:${sender.id}`;
     const approvalExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const result = await runMeetingGhostForTranscript(runtime, {
       agentId: runtime.agentId,
@@ -263,5 +323,58 @@ describe("meeting-ghost consumer (real approval queue)", () => {
       throw new Error("expected send_email payload");
     }
     expect(approved.payload.to).toEqual(["ava@example.com"]);
+    expect(approved.payload.grantId).toBe(senderGrantId);
+    expect(approved.reason).toContain("From: meeting-owner@example.test");
+    for (const approval of result.analysis.followUpApprovals) {
+      expect(approval.payload).toMatchObject({ grantId: senderGrantId });
+      expect(approval.reason).toContain("From: meeting-owner@example.test");
+    }
+  }, 60_000);
+  it("rejects revoked send permission before creating follow-ups and preserves existing sender bindings", async () => {
+    const manager = getConnectorAccountManager(runtime);
+    const sender = await manager.getAccount("google", senderAccountId);
+    if (!sender) throw new Error("Fixture sender missing");
+    await manager.upsertAccount("google", {
+      ...sender,
+      metadata: {
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      },
+    });
+    await expect(
+      runMeetingGhostForTranscript(runtime, {
+        agentId: runtime.agentId,
+        owner: {
+          ownerUserId: "owner-mtg-revoked",
+          ownerDisplayName: "Synthetic owner",
+          requestedBy: "meeting-ghost",
+          careAbouts: [],
+          approvalExpiresAt: new Date(Date.now() + 86_400_000),
+        },
+        transcript: {
+          meetingId: "revoked-sender-meeting",
+          title: "School planning",
+          startedAt: "2026-09-11T16:00:00.000Z",
+          attendees: [{ name: "Ava", email: "ava@example.test" }],
+          segments: [
+            seg("Mira", 0, "Ava will send the school schedule by 2026-09-15."),
+          ],
+        },
+      }),
+    ).rejects.toThrow();
+    expect(
+      await queue.list({
+        subjectUserId: "owner-mtg-revoked",
+        state: null,
+        action: null,
+      }),
+    ).toEqual([]);
+    const previous = await queue.list({
+      subjectUserId: "owner-mtg-1",
+      state: null,
+      action: "send_email",
+    });
+    expect(previous).not.toHaveLength(0);
+    for (const request of previous)
+      expect(request.payload).toMatchObject({ grantId: senderGrantId });
   }, 60_000);
 });

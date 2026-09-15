@@ -68,6 +68,7 @@ import {
   type ReadJsonBodyOptions,
   type Route,
   readRequestBody,
+  resolveOwnerEntityIdOrDefault,
   ServiceType,
   sendJson,
   sendJsonError,
@@ -3786,7 +3787,23 @@ async function handleRequest(
           );
         }
         if (isTrustedLocalRequest(req)) return undefined;
-        return resolveHttpAccessContext(req);
+        const boundaryAccess = resolveHttpAccessContext(req);
+        if (boundaryAccess) return boundaryAccess;
+        // Direct owner API credentials retain their principal at plugin routes.
+        // Gateway admission alone never grants owner document access.
+        if (
+          state.runtime &&
+          isAuthorized(req) &&
+          !isServerTokenAuthorized(req)
+        ) {
+          return {
+            requesterEntityId: resolveOwnerEntityIdOrDefault(state.runtime),
+            role: "OWNER",
+            isOwner: true,
+            source: "owner-api-token",
+          };
+        }
+        return undefined;
       },
     })
   ) {
