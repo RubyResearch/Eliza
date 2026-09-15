@@ -17,6 +17,7 @@
  */
 
 import {
+  ElizaError,
   type IAgentRuntime,
   logger,
   type Route,
@@ -24,6 +25,9 @@ import {
   type RouteResponse,
   type SetupState,
 } from "@elizaos/core";
+
+import { DEFAULT_ACCOUNT_ID } from "./accounts";
+import { getTelegramPollerClaim } from "./poller-lock";
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
@@ -140,12 +144,70 @@ function readSavedToken(
     : null;
 }
 
-function currentStatus(
+interface CredentialReader {
+  get(
+    reference: string,
+    options: { reveal: boolean; caller: string },
+  ): Promise<string>;
+}
+
+function isCredentialReader(value: unknown): value is CredentialReader {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof (value as Partial<CredentialReader>).get === "function",
+  );
+}
+
+async function resolveSavedToken(
+  runtime: IAgentRuntime,
+  token: string | null,
+): Promise<string | null> {
+  if (!token?.startsWith("vault://")) return token;
+  const reference = token.slice("vault://".length);
+  const store = runtime.getService("connector_credential_store");
+  if (
+    !reference.startsWith(`connector.${runtime.agentId}.telegram.`) ||
+    !reference.endsWith(".bot-token") ||
+    !isCredentialReader(store)
+  ) {
+    throw new ElizaError("The configured Telegram credential is unavailable.", {
+      code: "TELEGRAM_SETUP_CREDENTIAL_UNAVAILABLE",
+    });
+  }
+  const resolved = await store.get(reference, {
+    reveal: true,
+    caller: "telegram-setup-status",
+  });
+  if (!resolved.trim() || resolved.startsWith("vault://")) {
+    throw new ElizaError("The configured Telegram credential is unavailable.", {
+      code: "TELEGRAM_SETUP_CREDENTIAL_UNAVAILABLE",
+    });
+  }
+  return resolved;
+}
+
+function isConfiguredPollerConnected(
+  runtime: IAgentRuntime,
+  token: string | null,
+): boolean {
+  const poller = token ? getTelegramPollerClaim(token) : undefined;
+  return Boolean(
+    poller?.ok &&
+      poller.connected &&
+      poller.ownerId === String(runtime.agentId) &&
+      poller.accountId === DEFAULT_ACCOUNT_ID,
+  );
+}
+
+async function currentStatus(
   setupService: ConnectorSetupService | null,
   runtime: IAgentRuntime,
-): SetupStatusResponse {
-  const hasToken = Boolean(readSavedToken(setupService, runtime));
-  const serviceConnected = Boolean(runtime.getService("telegram"));
+): Promise<SetupStatusResponse> {
+  const savedToken = readSavedToken(setupService, runtime);
+  const token = await resolveSavedToken(runtime, savedToken);
+  const hasToken = Boolean(token);
+  const serviceConnected = isConfiguredPollerConnected(runtime, token);
   const state: SetupState = hasToken
     ? serviceConnected
       ? "paired"
@@ -168,7 +230,17 @@ async function handleStatus(
   runtime: IAgentRuntime,
 ): Promise<void> {
   const setupService = getSetupService(runtime);
-  sendStatus(res, currentStatus(setupService, runtime));
+  try {
+    sendStatus(res, await currentStatus(setupService, runtime));
+  } catch {
+    // error-policy:J1 Credential-read failures are explicit and never expose secret-store errors.
+    sendSetupError(
+      res,
+      503,
+      "credential_unavailable",
+      "Telegram readiness could not be checked. Restore access to the configured credential and retry.",
+    );
+  }
 }
 
 // ── POST /api/setup/telegram/start ──────────────────────────────────
@@ -283,7 +355,7 @@ async function handleStart(
         firstName: bot.first_name,
       },
       hasToken: true,
-      serviceConnected: Boolean(runtime.getService("telegram")),
+      serviceConnected: isConfiguredPollerConnected(runtime, token),
     },
   });
 }
@@ -315,7 +387,7 @@ async function handleCancel(
     }
   }
 
-  sendStatus(res, currentStatus(setupService, runtime));
+  await handleStatus(_req, res, runtime);
 }
 
 /**

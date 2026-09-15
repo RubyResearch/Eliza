@@ -82,6 +82,8 @@ The plugin auto-enables when the `telegram` connector key is present in the agen
 
 ## Setup UI routes
 
+Bot setup reports `paired` only when the saved credential has a connected poller for this agent and the default account. A constructed service, another account, or the previous token does not establish readiness. Vault-backed credentials are resolved through the existing credential store; an unavailable credential returns an explicit error without exposing secret-store details. This status does not prove owner pairing or message delivery.
+
 The plugin mounts these HTTP routes (no plugin-name prefix) for the dashboard setup wizard:
 
 | Method | Path | Purpose |

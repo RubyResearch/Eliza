@@ -16,15 +16,25 @@ vi.mock("@elizaos/core", async () => {
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AgentRuntime } from "@elizaos/core";
+import { Telegraf } from "telegraf";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { tryHandleRuntimePluginRoute } from "../../../packages/agent/src/api/runtime-plugin-routes.ts";
 import { telegramAccountRoutes } from "./account-setup-routes.ts";
+import {
+  claimTelegramPollerToken,
+  markTelegramPollerConnected,
+  markTelegramPollerError,
+  releaseTelegramPollerToken,
+} from "./poller-lock.ts";
 import { telegramSetupRoutes } from "./setup-routes.ts";
 
 const servers: http.Server[] = [];
+const pollers: Array<{ token: string; bot: Telegraf }> = [];
 
 afterEach(async () => {
+  for (const { token, bot } of pollers) releaseTelegramPollerToken(token, bot);
+  pollers.length = 0;
   await Promise.all(
     servers.map(
       (server) =>
@@ -79,11 +89,13 @@ function makeSetupService(state: FakeSetupServiceState) {
 function makeRuntime(
   options: {
     withService?: boolean;
+    withTelegram?: boolean;
+    credentialStore?: { get(reference: string): Promise<string> };
     state?: FakeSetupServiceState;
     settings?: Record<string, string>;
   } = {},
 ): AgentRuntime {
-  const { withService = true, state, settings } = options;
+  const { withService = true, withTelegram = false, state, settings } = options;
   const setupState: FakeSetupServiceState = state ?? {
     // Shape a real connector-setup service returns: a `connectors` block with a
     // present-but-empty `telegram` sub-config (no saved token yet).
@@ -92,12 +104,19 @@ function makeRuntime(
   };
   const setupService = makeSetupService(setupState);
   return {
+    agentId: "00000000-0000-4000-8000-000000000123",
     routes: [...telegramSetupRoutes, ...telegramAccountRoutes],
     // Only the `connector-setup` service exists in these branches. The live
     // `telegram` / `telegram-account` services are absent (null), which is the
     // state a freshly-configuring user is in.
     getService: (key: string) =>
-      withService && key === "connector-setup" ? setupService : null,
+      key === "connector_credential_store" && options.credentialStore
+        ? options.credentialStore
+        : key === "telegram" && withTelegram
+          ? {}
+          : withService && key === "connector-setup"
+            ? setupService
+            : null,
     // No persisted env settings by default — keeps the missing-phone /
     // missing-token validation branches deterministic. `settings` opts a test
     // into the runtime-setting tier `readSavedToken` falls back to.
@@ -427,4 +446,173 @@ describe("plugin-telegram account routes (real dispatch)", () => {
     );
     expect(cancel.status).toBe(401);
   });
+});
+
+describe("Telegram setup poller readiness over HTTP", () => {
+  it("does not report paired merely because a service was constructed", async () => {
+    const base = await startServer(
+      makeRuntime({
+        withTelegram: true,
+        settings: { TELEGRAM_BOT_TOKEN: "880001:synthetic-unlaunched" },
+      }),
+    );
+    const response = await fetch(`${base}/api/setup/telegram/status`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      state: "configuring",
+      detail: { hasToken: true, serviceConnected: false },
+    });
+  });
+
+  it("follows the exact token's connected, failed and replacement states", async () => {
+    const token = "880002:synthetic-readiness";
+    const settings = { TELEGRAM_BOT_TOKEN: token };
+    const runtime = makeRuntime({ settings });
+    const bot = new Telegraf(token);
+    pollers.push({ token, bot });
+    claimTelegramPollerToken(token, {
+      bot,
+      mode: "full",
+      ownerId: String(runtime.agentId),
+      accountId: "default",
+    });
+    const base = await startServer(runtime);
+    const read = async () =>
+      (await fetch(`${base}/api/setup/telegram/status`)).json();
+    expect(await read()).toMatchObject({ state: "configuring" });
+    markTelegramPollerConnected(token, bot);
+    expect(await read()).toMatchObject({
+      state: "paired",
+      detail: { serviceConnected: true },
+    });
+    markTelegramPollerError(token, bot, new Error("synthetic poller outage"));
+    expect(await read()).toMatchObject({
+      state: "configuring",
+      detail: { serviceConnected: false },
+    });
+    markTelegramPollerConnected(token, bot);
+    settings.TELEGRAM_BOT_TOKEN = "880003:synthetic-replacement";
+    expect(await read()).toMatchObject({
+      state: "configuring",
+      detail: { serviceConnected: false },
+    });
+  });
+
+  it.each([
+    ["another-agent", "default"],
+    ["00000000-0000-4000-8000-000000000123", "another-account"],
+  ])("rejects a ready poller owned by %s/%s", async (ownerId, accountId) => {
+    const token = "880004:synthetic-wrong-owner";
+    const bot = new Telegraf(token);
+    pollers.push({ token, bot });
+    claimTelegramPollerToken(token, { bot, mode: "full", ownerId, accountId });
+    markTelegramPollerConnected(token, bot);
+    const base = await startServer(
+      makeRuntime({
+        withTelegram: true,
+        settings: { TELEGRAM_BOT_TOKEN: token },
+      }),
+    );
+    const response = await fetch(`${base}/api/setup/telegram/status`);
+    expect(await response.json()).toMatchObject({
+      state: "configuring",
+      detail: { serviceConnected: false },
+    });
+  });
+});
+
+describe("Telegram encrypted-token readiness", () => {
+  it("checks the saved vault credential rather than the previous runtime token", async () => {
+    const token = "880005:synthetic-vault-token";
+    const reference =
+      "connector.00000000-0000-4000-8000-000000000123.telegram.880005.bot-token";
+    const bot = new Telegraf(token);
+    pollers.push({ token, bot });
+    const runtime = makeRuntime({
+      settings: { TELEGRAM_BOT_TOKEN: "880006:synthetic-previous-token" },
+      state: {
+        config: {
+          connectors: { telegram: { botToken: `vault://${reference}` } },
+        },
+        calls: [],
+      },
+      credentialStore: {
+        get: async (key) => {
+          if (key !== reference)
+            throw new Error("unexpected credential reference");
+          return token;
+        },
+      },
+    });
+    claimTelegramPollerToken(token, {
+      bot,
+      mode: "full",
+      ownerId: String(runtime.agentId),
+      accountId: "default",
+    });
+    markTelegramPollerConnected(token, bot);
+    const base = await startServer(runtime);
+    const response = await fetch(`${base}/api/setup/telegram/status`);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({ state: "paired" });
+    expect(text).not.toContain(token);
+    expect(text).not.toContain(reference);
+  });
+
+  it("reports unavailable credentials without exposing a vault failure", async () => {
+    const runtime = makeRuntime({
+      state: {
+        config: {
+          connectors: {
+            telegram: {
+              botToken:
+                "vault://connector.00000000-0000-4000-8000-000000000123.telegram.880007.bot-token",
+            },
+          },
+        },
+        calls: [],
+      },
+      credentialStore: {
+        get: async () => {
+          throw new Error("sensitive storage detail");
+        },
+      },
+    });
+    const base = await startServer(runtime);
+    const response = await fetch(`${base}/api/setup/telegram/status`);
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({
+      error: { code: "credential_unavailable" },
+    });
+    expect(text).not.toContain("sensitive storage detail");
+  });
+});
+
+it("does not resolve another agent's configured vault reference", async () => {
+  const reads: string[] = [];
+  const runtime = makeRuntime({
+    state: {
+      config: {
+        connectors: {
+          telegram: {
+            botToken:
+              "vault://connector.another-agent.telegram.880008.bot-token",
+          },
+        },
+      },
+      calls: [],
+    },
+    credentialStore: {
+      get: async (key) => {
+        reads.push(key);
+        return "880008:synthetic-other-agent";
+      },
+    },
+  });
+  const base = await startServer(runtime);
+  const response = await fetch(`${base}/api/setup/telegram/status`);
+  expect(response.status).toBe(503);
+  expect(reads).toEqual([]);
 });
