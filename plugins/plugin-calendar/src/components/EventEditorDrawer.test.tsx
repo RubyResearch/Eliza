@@ -348,7 +348,7 @@ describe("EventEditorDrawer", () => {
       grantId: "eliza-calendar",
       calendarId: "primary",
       metadata: {
-        etag: '\"eliza-2\"',
+        etag: '"eliza-2"',
         version: 2,
         deduplication: {
           pendingUpdate: { linkId: "reviewed-link", snapshots: [editEvent] },
@@ -366,7 +366,7 @@ describe("EventEditorDrawer", () => {
       <EventEditorDrawer
         open
         mode="edit"
-        event={{ ...saved, metadata: { etag: '\"eliza-2\"', version: 2 } }}
+        event={{ ...saved, metadata: { etag: '"eliza-2"', version: 2 } }}
         onClose={vi.fn()}
       />,
     );

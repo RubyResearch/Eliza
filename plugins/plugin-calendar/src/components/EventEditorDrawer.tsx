@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import {
   type ComponentProps,
+  type CSSProperties,
   type ReactNode,
   useCallback,
   useEffect,
@@ -54,6 +55,13 @@ const calendarClient = client as typeof client & CalendarClientMethods;
 let editorOperationSequence = 0;
 
 type EditorMode = "edit" | "create";
+
+const editorAccent: CSSProperties &
+  Record<"--accent" | "--accent-hover" | "--accent-foreground", string> = {
+  "--accent": "var(--brand-orange)",
+  "--accent-hover": "#e65a10",
+  "--accent-foreground": "#140c07",
+};
 
 function EventEditorInput({
   mode,
@@ -968,9 +976,11 @@ export function EventEditorDrawer({
     <>
       <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
         <DialogContent
+          showCloseButton={false}
           className="fixed bottom-0 right-0 top-0 !left-auto !right-0 !top-0 m-0 h-full min-w-0 max-w-none !translate-x-0 !translate-y-0 overflow-x-hidden overflow-y-auto bg-bg p-0"
           data-testid="event-editor-drawer"
           style={{
+            ...editorAccent,
             top: 0,
             right: 0,
             bottom: 0,
@@ -1000,6 +1010,7 @@ export function EventEditorDrawer({
               size="icon-sm"
               type="button"
               onClick={onClose}
+              className="size-11"
               aria-label={t("common.close", { defaultValue: "Close" })}
             >
               <X className="size-4" />
@@ -1338,7 +1349,7 @@ export function EventEditorDrawer({
                   description="Open chat about this event"
                   variant="ghost"
                   size="sm"
-                  className="size-8 p-0 text-muted"
+                  className="size-11 p-0 text-muted"
                   onClick={() => onChat(event)}
                 >
                   <MessageSquare className="size-3.5" aria-hidden />
@@ -1360,7 +1371,7 @@ export function EventEditorDrawer({
                   }
                   variant="surfaceDestructive"
                   size="sm"
-                  className="size-8 p-0"
+                  className="size-11 p-0"
                   disabled={deleting || saving || !deleteCapable}
                   onClick={() => setConfirmDeleteOpen(true)}
                 >
@@ -1388,7 +1399,7 @@ export function EventEditorDrawer({
                 description="Close the event editor without saving"
                 variant="outline"
                 size="sm"
-                className="size-8 p-0"
+                className="size-11 p-0"
                 onClick={onClose}
                 disabled={saving}
               >
@@ -1405,7 +1416,7 @@ export function EventEditorDrawer({
                     description="Save the event and keep the editor open"
                     variant="outline"
                     size="sm"
-                    className="size-8 p-0"
+                    className="size-11 p-0"
                     disabled={saving || !form.title.trim() || !calendarReady}
                     onClick={() => void handleSave({ keepOpen: true })}
                   >
@@ -1427,7 +1438,7 @@ export function EventEditorDrawer({
                     label={isCreate ? "Create event" : "Save event"}
                     description="Save the calendar event and close the editor"
                     size="sm"
-                    className="size-8 p-0"
+                    className="size-11 p-0"
                     disabled={saving || !form.title.trim() || !calendarReady}
                     onClick={() => void handleSave()}
                   >
