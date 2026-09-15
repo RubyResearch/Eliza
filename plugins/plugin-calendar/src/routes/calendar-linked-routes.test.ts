@@ -19,6 +19,9 @@ function route(
   const json = vi.fn();
   const service = {
     listLinkedCalendarEvents: vi.fn(async () => []),
+    listLinkedCalendarEventViews: vi.fn(async () => [
+      { id: "link-1", event: null },
+    ]),
     getLinkedCalendarEvent: vi.fn(async () => ({ id: "link-1" })),
   };
   const replacementLink: LifeOpsLinkedCalendarLink = {
@@ -81,6 +84,19 @@ function route(
 }
 
 describe("linked calendar owner routes", () => {
+  it("returns event review data only when explicitly requested", async () => {
+    const test = route("GET", "/api/lifeops/calendar/links", null);
+    test.deps.url.searchParams.set("view", "events");
+    await handleCalendarRoutes(test.deps);
+    expect(test.json).toHaveBeenCalledWith({
+      links: [{ id: "link-1", event: null }],
+    });
+    expect(test.service.listLinkedCalendarEvents).not.toHaveBeenCalled();
+    test.deps.url.searchParams.delete("view");
+    await handleCalendarRoutes(test.deps);
+    expect(test.json).toHaveBeenLastCalledWith({ links: [] });
+  });
+
   it("routes a reviewed replacement through the owner gateway", async () => {
     const body = {
       expectedUpdatedAt: "2026-09-10T12:00:00Z",

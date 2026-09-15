@@ -28,6 +28,12 @@ export type Loadable<T> =
 export interface LinkedCalendarView {
   id: string;
   localEventId: string;
+  event: {
+    title: string;
+    startAt: string;
+    endAt: string;
+    isAllDay: boolean;
+  } | null;
   providerCalendarId: string;
   state: "clean" | "dirty" | "conflicted" | "quarantined" | "paused";
   updatedAt: string;

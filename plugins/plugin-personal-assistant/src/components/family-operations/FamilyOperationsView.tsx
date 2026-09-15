@@ -689,12 +689,25 @@ function CalendarPanel({
       {state.data.map((link) => (
         <Card
           key={link.id}
-          title={`Event ${link.localEventId}`}
-          detail={`Google calendar ${link.providerCalendarId} · updated ${date(link.updatedAt)}`}
+          title={
+            link.event
+              ? link.event.title || "Untitled event"
+              : "Event details unavailable"
+          }
+          detail={`Google sync · updated ${date(link.updatedAt)}`}
         >
           <p>
             <strong>Status:</strong> {link.state}
           </p>
+          <details>
+            <summary>Connection details</summary>
+            <p style={{ overflowWrap: "anywhere" }}>
+              Event ID: {link.localEventId}
+            </p>
+            <p style={{ overflowWrap: "anywhere" }}>
+              Google calendar: {link.providerCalendarId}
+            </p>
+          </details>
           {link.state === "conflicted" ? (
             <div>
               <p role="alert">
@@ -761,7 +774,7 @@ const monthlyScheduleStatusLabels: Record<
   string
 > = {
   scheduled: "Scheduled",
-  fired: "In progress",
+  fired: "Last run started",
   acknowledged: "Acknowledged",
   completed: "Completed",
   skipped: "Skipped",

@@ -317,7 +317,7 @@ export const defaultFamilyOperationsAdapter: FamilyOperationsAdapter = {
           "agreements",
         ),
         loadSection<LinkedCalendarView[]>(
-          "/api/lifeops/calendar/links",
+          "/api/lifeops/calendar/links?view=events",
           "links",
         ),
         loadSchool(),

@@ -67,6 +67,7 @@ import type {
   LifeOpsIcsCalendarSyncResponse,
   LifeOpsLinkedCalendarControl,
   LifeOpsLinkedCalendarControlMutationResult,
+  LifeOpsLinkedCalendarEventView,
   LifeOpsLinkedCalendarLink,
   LifeOpsLinkedCalendarMutationResponse,
   LifeOpsNextCalendarEventContext,
@@ -1611,6 +1612,28 @@ export class CalendarService extends Service {
   async listLinkedCalendarEvents(): Promise<LifeOpsLinkedCalendarLink[]> {
     return (await this.linkedRepo.listForAgent(this.agentId())).map((record) =>
       this.publicLinkedCalendar(record),
+    );
+  }
+
+  async listLinkedCalendarEventViews(): Promise<
+    LifeOpsLinkedCalendarEventView[]
+  > {
+    const links = await this.listLinkedCalendarEvents();
+    return Promise.all(
+      links.map(async (link) => {
+        const event = await this.getCalendarEventById(link.localEventId);
+        return {
+          ...link,
+          event: event
+            ? {
+                title: event.title,
+                startAt: event.startAt,
+                endAt: event.endAt,
+                isAllDay: event.isAllDay,
+              }
+            : null,
+        };
+      }),
     );
   }
 

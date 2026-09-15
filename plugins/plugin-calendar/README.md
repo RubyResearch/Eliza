@@ -62,3 +62,11 @@ bun run --cwd plugins/plugin-calendar typecheck    # tsgo --noEmit
 ```
 
 See the root `AGENTS.md` for repo-wide architecture rules.
+
+## Linked-event review
+
+The owner-only linked-calendar list accepts `?view=events` to include each
+local event's current title and dates. Missing local events remain visible with
+`event: null`; database failures remain errors. The ordinary list response stays
+unchanged. Family Operations uses this view for recognizable event headings and
+keeps provider identifiers in expandable connection details.

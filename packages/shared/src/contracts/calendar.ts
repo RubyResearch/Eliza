@@ -449,6 +449,15 @@ export interface LifeOpsLinkedCalendarLink {
   updatedAt: string;
 }
 
+/** Owner sync review with local event details; null means the event no longer exists. */
+export interface LifeOpsLinkedCalendarEventView
+  extends LifeOpsLinkedCalendarLink {
+  event: Pick<
+    LifeOpsCalendarEvent,
+    "title" | "startAt" | "endAt" | "isAllDay"
+  > | null;
+}
+
 /** Owner-visible sync review; internal dispatch receipts never leave the service. */
 export interface LifeOpsLinkedCalendarControl {
   revision: number;

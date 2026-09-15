@@ -76,6 +76,12 @@ function snapshot(): FamilyOperationsSnapshot {
         {
           id: "link-1",
           localEventId: "school-pickup",
+          event: {
+            title: "School pickup",
+            startAt: "2026-09-10T19:00:00Z",
+            endAt: "2026-09-10T20:00:00Z",
+            isAllDay: false,
+          },
           providerCalendarId: "primary",
           state: "conflicted",
           updatedAt: "2026-08-30T12:00:00.000Z",
@@ -846,6 +852,12 @@ describe("FamilyOperationsView", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Calendar sync" }),
     );
+    expect(
+      await screen.findByRole("heading", { name: "School pickup" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "Event school-pickup" }),
+    ).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: "Keep Eliza" }));
     await waitFor(() =>
       expect(local.resolveCalendarConflict).toHaveBeenCalledWith(

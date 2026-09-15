@@ -171,7 +171,12 @@ export async function handleCalendarRoutes(
   if (method === "GET" && pathname === "/api/lifeops/calendar/links") {
     if (deps.rateLimit("calendar_link_read")) return true;
     return deps.runRoute(async (service) => {
-      deps.json({ links: await service.listLinkedCalendarEvents() });
+      deps.json({
+        links:
+          url.searchParams.get("view") === "events"
+            ? await service.listLinkedCalendarEventViews()
+            : await service.listLinkedCalendarEvents(),
+      });
     });
   }
 
