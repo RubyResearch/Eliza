@@ -1529,7 +1529,6 @@ export function FamilyOperationsView({
           {exportError ? <Unavailable message={exportError} /> : null}
           {exportNotice ? <p role="status">{exportNotice}</p> : null}
         </header>
-        <FamilyDeletionPanel adapter={deletionAdapter} onChange={refresh} />
         <nav
           aria-label="Family Operations sections"
           style={{
@@ -1589,6 +1588,7 @@ export function FamilyOperationsView({
             )}
           </div>
         ) : null}
+        <FamilyDeletionPanel adapter={deletionAdapter} onChange={refresh} />
       </div>
     </main>
   );
