@@ -129,7 +129,7 @@ The plugin registers a `/eliza_pair <code>` bot command that lets the Telegram u
 
 ## 409 Conflict errors
 
-The Telegram Bot API permits only one active long-poll connection per token. If two agent processes share the same token simultaneously, Telegram rejects the second with a 409 error. Full and standalone pollers share a process-local lock keyed by a fingerprint of the token; a live, starting, retrying, or merely quiet owner remains a hard launch failure. The lock becomes reclaimable only after that poller reaches an explicit terminal state. Across separate processes, operators must still ensure that only one process uses a given token at a time.
+The Telegram Bot API permits only one active long-poll connection per token. If two agent processes share the same token simultaneously, Telegram rejects the second with a 409 error. Full and standalone pollers share a process-local lock keyed by a fingerprint of the token; a live, starting, retrying, or merely quiet owner remains a hard launch failure. The lock becomes reclaimable only after that poller reaches an explicit terminal state. Across separate processes, operators must still ensure that only one process uses a given token at a time. Stopping the full service also fences queued failure retries so they cannot restart the old poller or reclaim its token.
 
 ## Development
 

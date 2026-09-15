@@ -397,6 +397,7 @@ export class TelegramService extends Service {
   private botToken: string | null;
   private defaultAccountId = DEFAULT_ACCOUNT_ID;
   private accountStates: Map<string, TelegramAccountRuntime> = new Map();
+  private stopping = false;
 
   /**
    * Constructor for TelegramService class.
@@ -803,6 +804,9 @@ export class TelegramService extends Service {
    * @returns A Promise that resolves once the bot has stopped.
    */
   async stop(): Promise<void> {
+    // A released token is available to a replacement, not to this service's
+    // pending failure handler or previously scheduled retry.
+    this.stopping = true;
     const states =
       this.accountStates instanceof Map
         ? Array.from(this.accountStates.values())
@@ -1081,6 +1085,7 @@ export class TelegramService extends Service {
     const stableRunMs = 60_000;
 
     const ownsToken = (): boolean => {
+      if (this.stopping) return false;
       if (!botToken) {
         return true;
       }
