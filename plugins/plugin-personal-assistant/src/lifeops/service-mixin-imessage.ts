@@ -23,7 +23,7 @@ export interface LifeOpsIMessageService {
   getIMessageConnectorStatus(): Promise<LifeOpsIMessageConnectorStatus>;
   sendIMessage(
     req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string }>;
+  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }>;
   readIMessages(opts: {
     chatId?: string;
     since?: string;

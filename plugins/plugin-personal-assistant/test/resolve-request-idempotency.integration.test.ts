@@ -656,6 +656,79 @@ describe("RESOLVE_REQUEST durable approval execution", () => {
     },
   );
 
+  it.each([true, false])(
+    "retains iMessage chunk receipts through the real domain and queue (success=%s)",
+    async (success) => {
+      const actual = await vi.importActual<
+        typeof import("../src/actions/lib/messaging-helpers.js")
+      >("../src/actions/lib/messaging-helpers.js");
+      const messageIds = success
+        ? ["accepted-part-1", "accepted-part-2"]
+        : ["accepted-part-1"];
+      const send = vi.fn(async () => ({
+        success,
+        messageIds,
+        ...(success
+          ? { messageId: "accepted-part-2" }
+          : { error: "Later chunk failed" }),
+      }));
+      const connector = { isConnected: () => true, sendMessage: send };
+      const service = new LifeOpsService({
+        ...runtime,
+        character: { name: "Synthetic test" },
+        setSetting: vi.fn(),
+        getService: (name: string) =>
+          name === "imessage" ? connector : runtime.getService(name),
+      } as unknown as IAgentRuntime);
+      const prepared = await actual.prepareCrossChannelSend({
+        runtime,
+        service,
+        channel: "imessage",
+        target: "+15551234567",
+        body: "Synthetic calendar review",
+      });
+      const request = await realQueue.enqueue({
+        ...sendMessageInput(),
+        channel: "imessage",
+        payload: {
+          action: "send_message",
+          recipient: "+15551234567",
+          body: "Synthetic calendar review",
+          replyToMessageId: null,
+        },
+      });
+      const approved = await realQueue.approve(request.id, OWNER_A, {
+        resolvedBy: OWNER_A,
+        resolutionReason: "Approved synthetic test",
+      });
+      const attempt = () =>
+        runApprovalDispatch({
+          queue: realQueue,
+          request: approved,
+          subjectUserId: OWNER_A,
+          prepared: {
+            provider: "imessage",
+            dispatch: async (key) => ({
+              value: null,
+              receipt: await prepared.dispatch(key),
+            }),
+          },
+        });
+      const outcome = await attempt();
+      expect(outcome.kind).toBe(
+        success ? "delivered" : "reconciliation_required",
+      );
+      const reopened = createAgentApprovalQueue(runtime, {
+        agentId: AGENT_ID,
+      }) as unknown as ApprovalQueue;
+      expect(await reopened.byId(request.id, OWNER_A)).toMatchObject({
+        execution: { providerReceipt: { provider: "imessage", messageIds } },
+      });
+      await expect(attempt()).rejects.toThrow();
+      expect(send).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each([undefined, "", "   "])(
     "keeps iMessage without a usable receipt (%s) in durable reconciliation",
     async (messageId) => {

@@ -2216,7 +2216,7 @@ export class LifeOpsService extends LifeOpsServiceBase {
 
   sendIMessage(
     req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string }> {
+  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }> {
     return this.imessageDomain.sendIMessage(req);
   }
 

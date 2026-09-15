@@ -171,6 +171,7 @@ export async function prepareCrossChannelSend(args: {
           const receipt = {
             provider: "imessage",
             messageId: sent.messageId ?? null,
+            ...(sent.messageIds ? { messageIds: sent.messageIds } : {}),
           };
           if (!sent.messageId?.trim()) {
             throw new ApprovalAmbiguousDeliveryError(
