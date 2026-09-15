@@ -3,6 +3,7 @@
  * resolution, wei formatting, Alchemy/Ankr/RPC fallbacks, zero-balance
  * filtering, complete metadata retrieval, and NFT field defaults.
  */
+import { logger } from "@elizaos/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EVM_CHAINS,
@@ -933,6 +934,151 @@ describe("Ankr provider path", () => {
       const failed = await fetchEvmNfts(WALLET, { ankrKey: "ankr_live" });
       expect(failed).toEqual([{ chain: "BSC-Ankr", nfts: [] }]);
     } finally {
+      restoreDefaultChains(original);
+    }
+  });
+});
+
+describe("JSON-RPC error envelopes on keyed provider paths", () => {
+  const THROTTLE_MESSAGE =
+    "Your app has exceeded its compute units per second capacity.";
+  const ankrBsc: EvmChainConfig = {
+    name: "BSC-Ankr",
+    subdomain: "bnb-mainnet",
+    chainId: 56,
+    nativeSymbol: "BNB",
+    provider: "ankr",
+    ankrChain: "bsc",
+  };
+
+  function rpcErrorEnvelope(message = THROTTLE_MESSAGE): Response {
+    return jsonResponse({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message },
+    });
+  }
+
+  it("reports an Alchemy native-balance error envelope as a chain failure", async () => {
+    installFetch((url, body) => {
+      if (url.includes("api.dexscreener.com") || url.includes("dexpaprika")) {
+        return jsonResponse([]);
+      }
+      if (body?.method === "eth_getBalance") return rpcErrorEnvelope();
+      return jsonResponse({ result: { tokenBalances: [] } });
+    });
+
+    const chains = await fetchEvmBalances(WALLET, "alk");
+    expect(chains).toHaveLength(7);
+    for (const chain of chains) {
+      expect(chain.error).not.toBeNull();
+      expect(chain.error).toContain(THROTTLE_MESSAGE);
+      expect(chain.tokens).toEqual([]);
+    }
+  });
+
+  it("reports an Alchemy token-balance error envelope even when the native call succeeded", async () => {
+    installFetch((url, body) => {
+      if (url.includes("api.dexscreener.com") || url.includes("dexpaprika")) {
+        return jsonResponse([]);
+      }
+      if (body?.method === "eth_getBalance") {
+        return jsonResponse({ result: ONE_ETH_HEX });
+      }
+      if (body?.method === "alchemy_getTokenBalances") {
+        return rpcErrorEnvelope("invalid api key");
+      }
+      return jsonResponse({ result: {} });
+    });
+
+    const chains = await fetchEvmBalances(WALLET, "alk");
+    const eth = chains.find((c) => c.chainId === 1);
+    expect(eth?.error).toContain("invalid api key");
+    expect(eth?.nativeBalance).toBe("0");
+    expect(eth?.tokens).toEqual([]);
+  });
+
+  it("reports an Ankr account-balance error envelope as a chain failure", async () => {
+    const original = DEFAULT_EVM_CHAINS.slice();
+    (DEFAULT_EVM_CHAINS as unknown as EvmChainConfig[]).splice(
+      0,
+      DEFAULT_EVM_CHAINS.length,
+      ankrBsc,
+    );
+    try {
+      installFetch((url, body) => {
+        if (url.includes("api.dexscreener.com") || url.includes("dexpaprika")) {
+          return jsonResponse([]);
+        }
+        if (body?.method === "ankr_getAccountBalance") {
+          return rpcErrorEnvelope("blockchain is not supported");
+        }
+        return jsonResponse({ result: { assets: [] } });
+      });
+
+      const chains = await fetchEvmBalances(WALLET, { ankrKey: "ankr_live" });
+      expect(chains).toHaveLength(1);
+      expect(chains[0]?.error).toContain("blockchain is not supported");
+      expect(chains[0]?.nativeBalance).toBe("0");
+      expect(chains[0]?.tokens).toEqual([]);
+    } finally {
+      restoreDefaultChains(original);
+    }
+  });
+
+  it("rejects an Alchemy NFT error envelope instead of reading it as an empty collection", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      installFetch((url) => {
+        if (url.includes("eth-mainnet") && url.includes("/nft/v3/")) {
+          return rpcErrorEnvelope();
+        }
+        return jsonResponse({ ownedNfts: [] });
+      });
+
+      const result = await fetchEvmNfts(WALLET, "alk");
+      expect(result.find((r) => r.chain === "Ethereum")?.nfts).toEqual([]);
+      expect(
+        warn.mock.calls.some(
+          ([message]) =>
+            typeof message === "string" &&
+            message.includes("Ethereum") &&
+            message.includes(THROTTLE_MESSAGE),
+        ),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("rejects an Ankr NFT error envelope instead of reading it as an empty collection", async () => {
+    const original = DEFAULT_EVM_CHAINS.slice();
+    (DEFAULT_EVM_CHAINS as unknown as EvmChainConfig[]).splice(
+      0,
+      DEFAULT_EVM_CHAINS.length,
+      ankrBsc,
+    );
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      installFetch((_url, body) => {
+        if (body?.method === "ankr_getNFTsByOwner") {
+          return rpcErrorEnvelope("rate limit exceeded");
+        }
+        return jsonResponse({ result: { assets: [] } });
+      });
+
+      const result = await fetchEvmNfts(WALLET, { ankrKey: "ankr_live" });
+      expect(result).toEqual([{ chain: "BSC-Ankr", nfts: [] }]);
+      expect(
+        warn.mock.calls.some(
+          ([message]) =>
+            typeof message === "string" &&
+            message.includes("BSC-Ankr") &&
+            message.includes("rate limit exceeded"),
+        ),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
       restoreDefaultChains(original);
     }
   });

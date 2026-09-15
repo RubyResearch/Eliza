@@ -5,7 +5,7 @@
  * and automatic fallback to public RPC endpoints when premium APIs are unavailable.
  */
 
-import { logger, toWellFormedUnicode } from "@elizaos/core";
+import { ElizaError, logger, toWellFormedUnicode } from "@elizaos/core";
 import type { EvmChainBalance, EvmNft, EvmTokenBalance } from "@elizaos/shared";
 import {
   computeValueUsd,
@@ -178,6 +178,53 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
   } catch {
     throw new Error(toWellFormedUnicode(text) || "Invalid JSON");
   }
+}
+
+type JsonRpcErrorEnvelope = {
+  error?: unknown;
+};
+
+const PROVIDER_LABEL: Record<EvmChainProvider, string> = {
+  alchemy: "Alchemy",
+  ankr: "Ankr",
+};
+
+/**
+ * Reject a keyed-provider body that carries an `error` member. Alchemy and
+ * Ankr answer HTTP 200 with a JSON-RPC error object (Alchemy's NFT REST API
+ * may use a bare string) for throttling, invalid keys, and unsupported chains,
+ * so `jsonOrThrow` alone would let the caller read a missing `result` as a
+ * healthy zero balance. The thrown error reaches the per-chain boundary in
+ * `fetchEvmBalances` / `fetchEvmNfts`, which report it with the provider text.
+ */
+function requireJsonRpcResult<T extends JsonRpcErrorEnvelope>(
+  data: T,
+  chain: EvmChainConfig,
+): T {
+  const envelopeError = data.error;
+  if (envelopeError === undefined || envelopeError === null) return data;
+  let rawMessage = "";
+  let rpcCode: number | null = null;
+  if (typeof envelopeError === "string") {
+    rawMessage = envelopeError;
+  } else if (typeof envelopeError === "object") {
+    const record = envelopeError as { code?: unknown; message?: unknown };
+    if (typeof record.message === "string") rawMessage = record.message;
+    if (typeof record.code === "number") rpcCode = record.code;
+  }
+  const providerLabel = PROVIDER_LABEL[chain.provider];
+  const message =
+    toWellFormedUnicode(rawMessage).trim() ||
+    `${providerLabel} JSON-RPC error${rpcCode === null ? "" : ` ${rpcCode}`}`;
+  throw new ElizaError(message, {
+    code: "EVM_PROVIDER_RPC_ERROR",
+    context: {
+      provider: chain.provider,
+      chain: chain.name,
+      chainId: chain.chainId,
+      rpcCode,
+    },
+  });
 }
 
 function normalizeApiKey(value: string | null | undefined): string | null {
@@ -382,38 +429,46 @@ async function fetchAlchemyChainBalances(
 ): Promise<EvmChainBalance> {
   const url = `https://${chain.subdomain}.g.alchemy.com/v2/${alchemyKey}`;
 
-  const nativeData = await jsonOrThrow<{ result?: string }>(
-    await fetch(
-      url,
-      rpcJsonRequest(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "eth_getBalance",
-          params: [address, "latest"],
-        }),
+  const nativeData = requireJsonRpcResult(
+    await jsonOrThrow<{ result?: string } & JsonRpcErrorEnvelope>(
+      await fetch(
+        url,
+        rpcJsonRequest(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_getBalance",
+            params: [address, "latest"],
+          }),
+        ),
       ),
     ),
+    chain,
   );
   const nativeBalance = formatWei(
     nativeData.result ? BigInt(nativeData.result) : 0n,
     18,
   );
 
-  const tokenData = await jsonOrThrow<{
-    result?: { tokenBalances?: AlchemyTokenBalance[] };
-  }>(
-    await fetch(
-      url,
-      rpcJsonRequest(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "alchemy_getTokenBalances",
-          params: [address, "DEFAULT_TOKENS"],
-        }),
+  const tokenData = requireJsonRpcResult(
+    await jsonOrThrow<
+      {
+        result?: { tokenBalances?: AlchemyTokenBalance[] };
+      } & JsonRpcErrorEnvelope
+    >(
+      await fetch(
+        url,
+        rpcJsonRequest(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "alchemy_getTokenBalances",
+            params: [address, "DEFAULT_TOKENS"],
+          }),
+        ),
       ),
     ),
+    chain,
   );
   const nonZero = (tokenData.result?.tokenBalances ?? []).filter(
     (t) =>
@@ -509,8 +564,11 @@ async function fetchAnkrChainBalances(
       }),
     ),
   );
-  const data = await jsonOrThrow<{ result?: { assets?: AnkrTokenAsset[] } }>(
-    res,
+  const data = requireJsonRpcResult(
+    await jsonOrThrow<
+      { result?: { assets?: AnkrTokenAsset[] } } & JsonRpcErrorEnvelope
+    >(res),
+    chain,
   );
   const assets = data.result?.assets ?? [];
   const nativeAsset = assets.find(isAnkrNativeAsset);
@@ -778,24 +836,29 @@ async function fetchAlchemyChainNfts(
     `https://${chain.subdomain}.g.alchemy.com/nft/v3/${alchemyKey}/getNFTsForOwner?owner=${address}&withMetadata=true&pageSize=50`,
     { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
   );
-  const data = await jsonOrThrow<{
-    ownedNfts?: Array<{
-      contract?: {
-        address?: string;
-        name?: string;
-        openSeaMetadata?: { collectionName?: string };
-      };
-      tokenId?: string;
-      name?: string;
-      description?: string;
-      image?: {
-        cachedUrl?: string;
-        thumbnailUrl?: string;
-        originalUrl?: string;
-      };
-      tokenType?: string;
-    }>;
-  }>(res);
+  const data = requireJsonRpcResult(
+    await jsonOrThrow<
+      {
+        ownedNfts?: Array<{
+          contract?: {
+            address?: string;
+            name?: string;
+            openSeaMetadata?: { collectionName?: string };
+          };
+          tokenId?: string;
+          name?: string;
+          description?: string;
+          image?: {
+            cachedUrl?: string;
+            thumbnailUrl?: string;
+            originalUrl?: string;
+          };
+          tokenType?: string;
+        }>;
+      } & JsonRpcErrorEnvelope
+    >(res),
+    chain,
+  );
   return {
     chain: chain.name,
     nfts: (data.ownedNfts ?? []).map((nft) => ({
@@ -839,7 +902,12 @@ async function fetchAnkrChainNfts(
       }),
     ),
   );
-  const data = await jsonOrThrow<{ result?: { assets?: AnkrNftAsset[] } }>(res);
+  const data = requireJsonRpcResult(
+    await jsonOrThrow<
+      { result?: { assets?: AnkrNftAsset[] } } & JsonRpcErrorEnvelope
+    >(res),
+    chain,
+  );
   return {
     chain: chain.name,
     nfts: (data.result?.assets ?? []).map((nft) => ({
@@ -979,7 +1047,8 @@ export async function fetchEvmNfts(
           if (!keys.alchemyKey) return { chain: chain.name, nfts: [] };
           return await fetchAlchemyChainNfts(chain, address, keys.alchemyKey);
         } catch (err) {
-          logger.warn(`EVM NFT fetch failed for ${chain.name}: ${err}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn(`EVM NFT fetch failed for ${chain.name}: ${msg}`);
           return { chain: chain.name, nfts: [] };
         }
       },
