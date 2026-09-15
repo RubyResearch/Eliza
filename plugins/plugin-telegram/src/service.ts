@@ -30,6 +30,7 @@ import {
   type MessageConnectorUserContext,
   Role,
   type Room,
+  type SendHandlerResult,
   Service,
   type TargetInfo,
   type ThreadHandle,
@@ -3280,50 +3281,24 @@ export class TelegramService extends Service {
     runtime: IAgentRuntime,
     target: TargetInfo,
     content: Content,
-  ): Promise<void> {
+  ): SendHandlerResult {
     const { accountId, messageManager, chatId, threadId } =
       await this.resolveTelegramSendTarget(runtime, target);
 
-    try {
-      // Use existing MessageManager method, pass chatId and content
-      // Assuming sendMessage handles splitting, markdown, etc.
-      await messageManager.sendMessage(
-        chatId,
-        {
-          ...content,
-          metadata: {
-            ...((content.metadata && typeof content.metadata === "object"
-              ? content.metadata
-              : {}) as Record<string, unknown>),
-            accountId,
-          },
-        },
-        undefined,
-        threadId,
-      );
-      logger.info(
-        {
-          src: "plugin:telegram",
-          agentId: runtime.agentId,
+    return messageManager.sendMessageWithReceipt(
+      chatId,
+      {
+        ...content,
+        metadata: {
+          ...((content.metadata && typeof content.metadata === "object"
+            ? content.metadata
+            : {}) as Record<string, unknown>),
           accountId,
-          chatId,
-          threadId,
         },
-        "Message sent",
-      );
-    } catch (error) {
-      logger.error(
-        {
-          src: "plugin:telegram",
-          agentId: runtime.agentId,
-          accountId,
-          chatId,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Error sending message",
-      );
-      throw error;
-    }
+      },
+      undefined,
+      threadId,
+    );
   }
 
   /**
