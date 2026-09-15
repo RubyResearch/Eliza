@@ -124,6 +124,28 @@ export function isHiddenSourceArtifactDirectory(name) {
   );
 }
 
+// TypeScript output that a neighboring package compiles beside its authored
+// input (`foo.tsx` -> `foo.js`). Only non-declaration inputs count: authored
+// JavaScript that ships a hand-written `foo.d.ts` keeps its `.d` basename and
+// therefore never matches.
+const EMITTED_JAVASCRIPT_INPUTS = new Map([
+  [".js", [".ts", ".tsx"]],
+  [".jsx", [".tsx"]],
+]);
+
+/**
+ * Whether `file` is JavaScript emitted beside its TypeScript source. Sibling
+ * packages include this source tree in their own TypeScript programs, so a
+ * concurrent build can materialize `foo.js` next to `foo.tsx`; that output is
+ * gitignored and must not count as an additional maintained module.
+ */
+export function hasTypedSourceSibling(file) {
+  const inputs = EMITTED_JAVASCRIPT_INPUTS.get(path.extname(file));
+  if (!inputs) return false;
+  const base = file.slice(0, -path.extname(file).length);
+  return inputs.some((extension) => fs.existsSync(`${base}${extension}`));
+}
+
 const GENERATED_STATE_ROOTS = [
   /^packages\/[^/]+\/\.vite(?:\/|$)/,
   /^(?:packages|plugins)\/[^/]+\/\.eliza(?:\/|$)/,
@@ -158,7 +180,9 @@ export function isMaintainedSource(file) {
     !/(^|\/)(test|__tests__|__e2e__|__fixtures__|fixtures|stubs|templates)(\/|$)/.test(
       rel,
     );
-  if (!maintained || /\.[jt]sx$/.test(rel)) return maintained;
+  if (!maintained) return false;
+  if (hasTypedSourceSibling(file)) return false;
+  if (/\.[jt]sx$/.test(rel)) return true;
   let source;
   try {
     source = fs.readFileSync(file, "utf8");
