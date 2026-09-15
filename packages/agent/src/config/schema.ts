@@ -294,8 +294,6 @@ const FIELD_LABELS: Record<string, string> = {
   "tools.message.crossContext.marker.suffix": "Cross-Context Marker Suffix",
   "tools.message.broadcast.enabled": "Enable Message Broadcast",
   "tools.web.search.enabled": "Enable Web Search Tool",
-  "tools.web.search.provider": "Web Search Provider",
-  "tools.web.search.apiKey": "Brave Search API Key",
   "tools.web.search.maxResults": "Web Search Max Results",
   "tools.web.search.timeoutSeconds": "Web Search Timeout (sec)",
   "tools.web.search.cacheTtlMinutes": "Web Search Cache TTL (min)",
@@ -604,21 +602,12 @@ const FIELD_HELP: Record<string, string> = {
     'Text suffix for cross-context markers (supports "{channel}").',
   "tools.message.broadcast.enabled": "Enable broadcast action (default: true).",
   "tools.web.search.enabled":
-    "Enable the web_search tool (requires a provider API key).",
-  "tools.web.search.provider": 'Search provider ("brave" or "perplexity").',
-  "tools.web.search.apiKey":
-    "Brave Search API key (fallback: BRAVE_API_KEY env var).",
+    "Enable the keyless WEB_SEARCH tool (Parallel, then Exa; no API key).",
   "tools.web.search.maxResults": "Default number of results to return (1-10).",
   "tools.web.search.timeoutSeconds":
     "Timeout in seconds for web_search requests.",
   "tools.web.search.cacheTtlMinutes":
     "Cache TTL in minutes for web_search results.",
-  "tools.web.search.perplexity.apiKey":
-    "Perplexity or OpenRouter API key (fallback: PERPLEXITY_API_KEY or OPENROUTER_API_KEY env var).",
-  "tools.web.search.perplexity.baseUrl":
-    "Perplexity base URL override (default: https://openrouter.ai/api/v1 or https://api.perplexity.ai).",
-  "tools.web.search.perplexity.model":
-    'Perplexity model override (default: "perplexity/sonar-pro").',
   "tools.web.fetch.enabled":
     "Enable the web_fetch tool (lightweight HTTP fetch).",
   "tools.web.fetch.timeoutSeconds":
@@ -948,6 +937,18 @@ const FIELD_HELP: Record<string, string> = {
     'Direct message access control ("pairing" recommended). "open" requires connectors.slack.dm.allowFrom=["*"].',
 };
 
+/** Retired keyed web-search settings: WEB_SEARCH is keyless and no runtime
+ * path reads these. The zod shape still accepts them so an existing config
+ * validates; the settings surface never offers them. */
+const RETIRED_WEB_SEARCH_PATHS = [
+  "tools.web.search.provider",
+  "tools.web.search.apiKey",
+  "tools.web.search.perplexity",
+  "tools.web.search.perplexity.apiKey",
+  "tools.web.search.perplexity.baseUrl",
+  "tools.web.search.perplexity.model",
+] as const;
+
 const FIELD_PLACEHOLDERS: Record<string, string> = {
   "gateway.remote.url": "ws://host:18789",
   "gateway.remote.tlsFingerprint": "sha256:ab12cd34…",
@@ -1039,6 +1040,9 @@ function buildBaseHints(): ConfigUiHints {
   for (const [path, placeholder] of Object.entries(FIELD_PLACEHOLDERS)) {
     const current = hints[path];
     hints[path] = current ? { ...current, placeholder } : { placeholder };
+  }
+  for (const path of RETIRED_WEB_SEARCH_PATHS) {
+    hints[path] = { ...hints[path], hidden: true };
   }
   return hints;
 }

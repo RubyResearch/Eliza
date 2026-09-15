@@ -165,13 +165,15 @@ function seedFact(
   return id;
 }
 
-function makeMessage(): Memory {
+function makeMessage(overrides: { text?: string } = {}): Memory {
   return {
     id: crypto.randomUUID() as UUID,
     entityId: USER_ID,
     agentId: AGENT_ID,
     roomId: ROOM_ID,
-    content: { text: "remember this: my favorite color is blue" },
+    content: {
+      text: overrides.text ?? "remember this: my favorite color is blue",
+    },
     createdAt: Date.now(),
   } as Memory;
 }
@@ -455,9 +457,14 @@ describe("MEMORY op:create argument shape", () => {
 
   it("names the field to use when neither text nor query carries content", async () => {
     const { runtime, rows } = makeRuntime();
-    const result = await runCreate(runtime, makeMessage(), {
-      kind: "preference",
-    });
+    const result = await runCreate(
+      runtime,
+      // No statement to fall back on: the message asks, it does not tell.
+      makeMessage({ text: "what should I have for lunch?" }),
+      {
+        kind: "preference",
+      },
+    );
     expect(result.success).toBe(false);
     expect(result.text).toContain('"text" argument');
     expect(rows).toHaveLength(0);
@@ -473,7 +480,11 @@ describe("MEMORY mutations settle with receipts for the grounded reply gate", ()
     });
     expect(result.success).toBe(true);
     expect(result.transcriptVisibility).toBe("internal");
-    expect(result.turnComplete).toBeUndefined();
+    // The mutation owns its verified user-facing line and completes a
+    // single-tool turn (planner loop gate); compound turns still fall through
+    // to the evaluator because the gate requires exactly one executed tool.
+    expect(result.turnComplete).toBe(true);
+    expect(result.verifiedUserFacing).toBe(true);
     expect(result.effectReceipts).toHaveLength(1);
     expect(result.effectReceipts?.[0]).toMatchObject({
       operation: "memory.create",
@@ -575,6 +586,13 @@ describe("MEMORY op:delete by query scope", () => {
     expect(ambiguous.text).toContain(ownId);
     expect(ambiguous.text).toContain(friendId);
     expect(ambiguous.effectReceipts).toBeUndefined();
+    // The user-facing half names the candidate texts, never record ids, and
+    // marks the refusal as a read-only observation (nothing was deleted).
+    expect(ambiguous.userFacingText).toContain("Which one should I forget?");
+    expect(ambiguous.userFacingText).toContain("green tea without sugar");
+    expect(ambiguous.userFacingText).not.toContain(ownId);
+    expect(ambiguous.userFacingText).not.toContain(friendId);
+    expect(ambiguous.data).toMatchObject({ readOnlyOperation: true });
     expect(rows).toEqual(before);
 
     const selected = await runAction(runtime, message, {
@@ -592,6 +610,109 @@ describe("MEMORY op:delete by query scope", () => {
       outcome: "applied",
       commit: { kind: "durable", id: ownId },
     });
+  });
+
+  it("forgets a durable fact together with the observation rows that shadow it", async () => {
+    const { runtime, rows } = makeRuntime();
+    const durableId = seedFact(rows, {
+      text: "The user's favorite color is teal.",
+      entityId: USER_ID,
+      metadata: {
+        source: "MEMORY",
+        kind: "durable",
+        messageId: "msg-color",
+      },
+    });
+    const echoId = seedFact(rows, {
+      text: "user favorite_color teal",
+      entityId: USER_ID,
+      metadata: {
+        source: "facts_and_relationships_stage",
+        kind: "current",
+        messageId: "msg-color",
+      },
+    });
+    const keptId = seedFact(rows, {
+      text: "The user's favorite tea is assam.",
+      entityId: USER_ID,
+      metadata: { source: "MEMORY", kind: "durable", messageId: "msg-tea" },
+    });
+    const message = makeMessage();
+    message.content.text = "forget my favorite color";
+
+    const result = await runAction(runtime, message, {
+      action: "delete",
+      query: "favorite color",
+      confirm: true,
+    });
+
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    expect(rows.map((row) => row.memory.id)).toEqual([keptId]);
+    expect(rows.map((row) => row.memory.id)).not.toContain(durableId);
+    expect(rows.map((row) => row.memory.id)).not.toContain(echoId);
+    // The reply names the durable memory, not its observation shadow.
+    expect(result.userFacingText).toBe("Forgot: your favorite color is teal.");
+  });
+
+  it("stores the user's own statement when a create arrives without text", async () => {
+    const { runtime, rows } = makeRuntime();
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "remember that my favorite tea is oolong." }),
+      { action: "create", kind: "preference", tags: ["tea"] },
+    );
+
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.memory.content.text).toBe("my favorite tea is oolong");
+  });
+
+  it("asks what to remember when a text-less create arrives with a two-request message", async () => {
+    const { runtime, rows } = makeRuntime();
+
+    const result = await runAction(
+      runtime,
+      makeMessage({
+        text: "remember my dog is named Biscuit and also what day is it today?",
+      }),
+      { action: "create", kind: "fact", tags: ["pet"] },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.data).toMatchObject({
+      error: "MEMORY_MISSING_TEXT",
+      readOnlyOperation: true,
+    });
+    expect(result.userFacingText).toBe("What would you like me to remember?");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("still asks for an id when two durable facts match the query", async () => {
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, {
+      text: "The user's favorite color is teal.",
+      entityId: USER_ID,
+      metadata: { source: "MEMORY", kind: "durable", messageId: "msg-a" },
+    });
+    seedFact(rows, {
+      text: "The user's favorite color for cars is black.",
+      entityId: USER_ID,
+      metadata: { source: "MEMORY", kind: "durable", messageId: "msg-b" },
+    });
+    const before = structuredClone(rows);
+    const message = makeMessage();
+    message.content.text = "forget my favorite color";
+
+    const result = await runAction(runtime, message, {
+      action: "delete",
+      query: "favorite color",
+      confirm: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.data).toMatchObject({ error: "MEMORY_AMBIGUOUS_QUERY" });
+    expect(rows).toEqual(before);
   });
 
   it("deletes only the explicit id and preserves unrelated facts from the same source message", async () => {
@@ -1285,7 +1406,11 @@ describe("MEMORY op:create", () => {
 
   it("rejects an empty text", async () => {
     const { runtime, rows } = makeRuntime();
-    const result = await runCreate(runtime, makeMessage(), { text: "   " });
+    const result = await runCreate(
+      runtime,
+      makeMessage({ text: "what should I have for lunch?" }),
+      { text: "   " },
+    );
     expect(result.success).toBe(false);
     expect(rows).toHaveLength(0);
   });
@@ -1506,6 +1631,188 @@ describe("MEMORY uuid validation", () => {
 });
 
 describe("MEMORY op:delete by query", () => {
+  it("falls back to the user's own message when the planner sends confirm alone (live regression)", async () => {
+    // Live 2026-09-11: "forget my favorite tea" dispatched `{"confirm": true}`;
+    // the missing-target failure cost an evaluator round and a second planner
+    // call before the query was quoted. The message text is the contract's
+    // query, and the every-term match still guards the delete.
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, {
+      text: "nubs's favorite tea is darjeeling",
+      entityId: USER_ID,
+    });
+    seedFact(rows, { text: "nubs lives on a boat", entityId: USER_ID });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "forget my favorite tea" }),
+      { action: "delete", confirm: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.userFacingText).toBe(
+      "Forgot: nubs's favorite tea is darjeeling.",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].memory.content.text).toBe("nubs lives on a boat");
+  });
+
+  it("reads the user's words through the external-content envelope (live regression)", async () => {
+    // Connector messages arrive wrapped in the security envelope with the
+    // real text retained in metadata.userPayloadText; the fallback must
+    // query the payload, never the warning banner.
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, {
+      text: "The user's favorite tea is oolong.",
+      entityId: USER_ID,
+    });
+    const wrapped = makeMessage({
+      text: "SECURITY NOTICE: The following content is from an EXTERNAL, UNTRUSTED source. forget my favorite tea",
+    });
+    (wrapped.content as { metadata?: Record<string, unknown> }).metadata = {
+      userPayloadText: "forget my favorite tea",
+      externalContentWrapped: true,
+    };
+
+    const result = await runAction(runtime, wrapped, {
+      action: "delete",
+      confirm: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("ignores platform mention tokens in the implied query (live regression)", async () => {
+    // Discord renders the addressed bot as "Eliza (@1490833425802854491)";
+    // the name and id must not become query terms.
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, {
+      text: "The user's favorite tea is oolong.",
+      entityId: USER_ID,
+    });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({
+        text: "Eliza (@1490833425802854491) forget my favorite tea <@1490833425802854491>",
+      }),
+      { action: "delete", confirm: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("retries a planner-invented query with the user's own words before reporting a miss (live regression)", async () => {
+    // Live 2026-09-13: the planner queried "favorite tea is matcha" for a
+    // stored genmaicha fact twice before the message-text fallback ran.
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, {
+      text: "The user's favorite tea is genmaicha.",
+      entityId: USER_ID,
+    });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "forget my favorite tea" }),
+      { action: "delete", query: "favorite tea is matcha", confirm: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(
+      (result.data as { retriedWithMessageText?: boolean })
+        .retriedWithMessageText,
+    ).toBe(true);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("stores a target-less update as a new memory when no prior fact matches the user's words", async () => {
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, { text: "nubs lives on a boat", entityId: USER_ID });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "remember that my favorite tea is oolong" }),
+      {
+        action: "update",
+        text: "The user's favorite tea is oolong.",
+        confirm: true,
+      },
+    );
+
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    expect(result.data).toMatchObject({
+      op: "create",
+      updateFallback: "created",
+    });
+    expect(result.userFacingText).toContain("favorite tea is oolong");
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.some(
+        (row) =>
+          row.memory.content.text === "The user's favorite tea is oolong.",
+      ),
+    ).toBe(true);
+  });
+
+  it("updates the prior fact a target-less update implies from the user's words", async () => {
+    const { runtime, rows } = makeRuntime();
+    const priorId = seedFact(rows, {
+      text: "The user's favorite tea is oolong.",
+      entityId: USER_ID,
+      metadata: { source: "MEMORY", kind: "durable", messageId: "msg-old" },
+    });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "remember that my favorite tea is oolong" }),
+      {
+        action: "update",
+        text: "The user's favorite tea is oolong, loose leaf.",
+        confirm: true,
+      },
+    );
+
+    expect(result.success, JSON.stringify(result)).toBe(true);
+    expect(result.data).toMatchObject({ op: "update" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.memory.id).toBe(priorId);
+    expect(rows[0]?.memory.content.text).toBe(
+      "The user's favorite tea is oolong, loose leaf.",
+    );
+  });
+
+  it("returns the missing-target failure, not a verdict, when the implied query misses", async () => {
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, { text: "nubs lives on a boat", entityId: USER_ID });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "forget my favorite tea" }),
+      { action: "delete", confirm: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect((result.data as { error: string }).error).toBe("MEMORY_MISSING_ID");
+    expect(rows).toHaveLength(1);
+  });
+
+  it("still refuses a target-less delete when the message carries no content terms", async () => {
+    const { runtime, rows } = makeRuntime();
+    seedFact(rows, { text: "nubs lives on a boat", entityId: USER_ID });
+
+    const result = await runAction(
+      runtime,
+      makeMessage({ text: "forget that" }),
+      { action: "delete", confirm: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect((result.data as { error: string }).error).toBe("MEMORY_MISSING_ID");
+    expect(rows).toHaveLength(1);
+  });
+
   it("resolves the fact by text and deletes every duplicate row of it", async () => {
     // Reflection dedup failures store the same fact several times (live: six
     // copies of "nubs plays guitar" across two sibling entity ids). One
@@ -2087,7 +2394,7 @@ describe("MEMORY op:search complete traversal", () => {
     });
   });
 
-  it("requires pagination instead of rendering an oversized complete result", async () => {
+  it("pages the best-ranked matches instead of refusing an oversized complete search", async () => {
     const { runtime, rows } = makeRuntime();
     for (let i = 0; i <= MAX_MEMORY_PAGE_ITEMS; i++) {
       seedFact(rows, { text: `invoice number ${i}`, entityId: USER_ID });
@@ -2098,13 +2405,16 @@ describe("MEMORY op:search complete traversal", () => {
       query: "invoice number",
     });
 
-    expect(result.success).toBe(false);
+    expect(result.success, JSON.stringify(result)).toBe(true);
     expect(result.data).toMatchObject({
-      error: "MEMORY_SEARCH_REQUIRES_PAGINATION",
+      op: "search",
       totalMatches: MAX_MEMORY_PAGE_ITEMS + 1,
-      maxLimit: MAX_MEMORY_PAGE_ITEMS,
+      offset: 0,
+      nextOffset: 20,
     });
-    expect(result.text).not.toContain("- [facts]");
+    expect((result.data as { memories: unknown[] }).memories).toHaveLength(20);
+    expect(result.text).toContain("best-ranked");
+    expect(result.text).toContain("limit=20, offset=20");
   });
 
   it("rejects one indivisible memory that exceeds the page character budget", async () => {
@@ -2622,6 +2932,7 @@ describe("promoted MEMORY_UPDATE / MEMORY_DELETE target selection", () => {
     operation: "update" | "delete",
     runtime: IAgentRuntime,
     parameters: Record<string, unknown>,
+    message: Memory = makeMessage(),
   ): Promise<ActionResult> {
     const name = `MEMORY_${operation.toUpperCase()}`;
     const action = children.find((candidate) => candidate.name === name);
@@ -2631,7 +2942,7 @@ describe("promoted MEMORY_UPDATE / MEMORY_DELETE target selection", () => {
     if (!validated.valid || !validated.args) {
       throw new Error(`Promoted mutation arguments rejected for ${name}`);
     }
-    return (await action.handler(runtime, makeMessage(), undefined, {
+    return (await action.handler(runtime, message, undefined, {
       parameters: validated.args,
     } as never)) as ActionResult;
   }
@@ -2694,13 +3005,20 @@ describe("promoted MEMORY_UPDATE / MEMORY_DELETE target selection", () => {
           });
           const before = structuredClone(rows);
 
-          const result = await runPromotedMutation(operation, runtime, {
-            confirm: true,
-            ...(operation === "update"
-              ? { text: "My favorite tea is oolong." }
-              : {}),
-            ...parameters,
-          });
+          // A delete may fall back to the user's own words, so the message
+          // here carries none: the handler's own rejection is what is pinned.
+          const result = await runPromotedMutation(
+            operation,
+            runtime,
+            {
+              confirm: true,
+              ...(operation === "update"
+                ? { text: "My favorite tea is oolong." }
+                : {}),
+              ...parameters,
+            },
+            makeMessage({ text: "forget that" }),
+          );
 
           expect(result.success).toBe(false);
           expect(result.data).toMatchObject({ error: "MEMORY_MISSING_ID" });
@@ -2739,5 +3057,192 @@ describe("MEMORY op:delete by query ignores copied imperatives", () => {
 
     expect(result.success).toBe(true);
     expect(rows.some((row) => row.memory.id === factId)).toBe(false);
+  });
+});
+
+describe("MEMORY results own a verified user-facing line", () => {
+  it("speaks to the user on create and forget so the planner loop can skip its evaluator round", async () => {
+    const { runtime, rows } = makeRuntime();
+    const message = makeMessage();
+    message.content.text = "remember that my favorite tea is yerba";
+    const created = await runAction(runtime, message, {
+      action: "create",
+      text: "User's favorite tea is yerba.",
+    });
+    expect(created.success).toBe(true);
+    expect(created).toMatchObject({
+      userFacingText: "Saved: your favorite tea is yerba.",
+      verifiedUserFacing: true,
+      turnComplete: true,
+    });
+    expect(rows.length).toBeGreaterThan(0);
+
+    message.content.text = "forget my favorite tea";
+    const forgotten = await runAction(runtime, message, {
+      action: "delete",
+      query: "favorite tea",
+      confirm: true,
+    });
+    expect(forgotten.success).toBe(true);
+    expect(forgotten).toMatchObject({
+      userFacingText: "Forgot: your favorite tea is yerba.",
+      verifiedUserFacing: true,
+      turnComplete: true,
+    });
+  });
+
+  it("renders memory lines in second person without inventing content", async () => {
+    const { memoryUserFacingLine } = await import("./memories");
+    expect(
+      memoryUserFacingLine("Saved", "The user prefers green tea without sugar"),
+    ).toBe("Saved: the user prefers green tea without sugar.");
+    expect(memoryUserFacingLine("Updated", "user's dog is named Rex.")).toBe(
+      "Updated: your dog is named Rex.",
+    );
+    // Live 2026-09-10: the planner stored "My favorite tea is genmaicha.";
+    // the possessive flips to second person, a first-person "I" keeps its
+    // capital because the verb would not agree after a rewrite.
+    expect(memoryUserFacingLine("Saved", "My favorite tea is genmaicha.")).toBe(
+      "Saved: your favorite tea is genmaicha.",
+    );
+    expect(memoryUserFacingLine("Saved", "I like my coffee black")).toBe(
+      "Saved: I like my coffee black.",
+    );
+    expect(memoryUserFacingLine("Forgot", "   ")).toBe("Forgot.");
+  });
+
+  it("phrases an ambiguous query as a choice between candidate texts, never ids", async () => {
+    const { ambiguousMemoryUserFacingText } = await import("./memories");
+    // Live 2026-09-13 tj-f1579f952d5d21: the durable fact and its
+    // observation echo both matched "forget my favorite color".
+    const question = ambiguousMemoryUserFacingText("forget", [
+      { text: "user favorite_color teal" },
+      { text: "The user's favorite color is teal." },
+      { text: "The user's favorite color is teal." },
+    ]);
+    expect(question).toBe(
+      'That matches 2 saved memories: "user favorite_color teal"; "your favorite color is teal.". Which one should I forget?',
+    );
+    expect(question).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i);
+    expect(
+      ambiguousMemoryUserFacingText("update", [{ text: "a".repeat(400) }]),
+    ).toMatch(
+      /^That matches one saved memory: "a{159}…"\. Which one should I update\?$/,
+    );
+  });
+});
+
+describe("MEMORY inferSubaction (umbrella call without action)", () => {
+  // Live 2026-09-14 tj-22eb87cbbbfac0: "remember that my favorite tea is
+  // yerba" → `MEMORY {text, kind, tags}` with no `action`, routed through the
+  // sub-planner (a second planner model call) before MEMORY_CREATE ran.
+  const MEMORY_ID = "00000000-0000-0000-0000-0000000000f1";
+  const infer = (params: Record<string, unknown>) =>
+    memoryAction.inferSubaction?.(params);
+  const promotedNames = promoteSubactionsToActions(memoryAction)
+    .slice(1)
+    .map((action) => action.name);
+
+  it("names only promoted children of MEMORY", () => {
+    expect(promotedNames).toEqual([
+      "MEMORY_CREATE",
+      "MEMORY_SEARCH",
+      "MEMORY_UPDATE",
+      "MEMORY_DELETE",
+    ]);
+    for (const params of [
+      { text: "t" },
+      { query: "q" },
+      { query: "q", text: "t" },
+      { query: "q", confirm: true },
+    ]) {
+      expect(promotedNames).toContain(infer(params));
+    }
+  });
+
+  it("infers create from text without a target", () => {
+    expect(
+      infer({
+        text: "The user's favorite tea is yerba.",
+        kind: "preference",
+        tags: ["tea", "preference"],
+      }),
+    ).toBe("MEMORY_CREATE");
+    expect(infer({ text: "t" })).toBe("MEMORY_CREATE");
+    // The schema's omission sentinels are not a target.
+    expect(infer({ text: "t", memoryId: "null" })).toBe("MEMORY_CREATE");
+  });
+
+  it("infers search from a bare query", () => {
+    expect(infer({ query: "favorite tea" })).toBe("MEMORY_SEARCH");
+    expect(infer({ query: "favorite tea", type: "facts", limit: 5 })).toBe(
+      "MEMORY_SEARCH",
+    );
+  });
+
+  it("infers update from a target with replacement text", () => {
+    expect(
+      infer({
+        query: "favorite tea",
+        text: "The user's favorite tea is matcha.",
+      }),
+    ).toBe("MEMORY_UPDATE");
+    expect(
+      infer({
+        memoryId: MEMORY_ID,
+        text: "The user's favorite tea is matcha.",
+        confirm: true,
+      }),
+    ).toBe("MEMORY_UPDATE");
+  });
+
+  it("infers delete only from a target with confirm:true and no text", () => {
+    expect(infer({ query: "favorite tea", confirm: true })).toBe(
+      "MEMORY_DELETE",
+    );
+    expect(infer({ memoryId: MEMORY_ID, confirm: true })).toBe("MEMORY_DELETE");
+  });
+
+  it("never names delete without confirm:true, however the op is spelled", () => {
+    const withoutConfirm = [
+      { memoryId: MEMORY_ID },
+      { query: "favorite tea", memoryId: MEMORY_ID },
+      { memoryId: MEMORY_ID, confirm: false },
+      { memoryId: MEMORY_ID, confirm: "true" },
+      { op: "delete", query: "favorite tea" },
+      { subaction: "delete", memoryId: MEMORY_ID },
+      { action: "delete", query: "favorite tea" },
+    ];
+    for (const params of withoutConfirm) {
+      expect(infer(params)).toBeUndefined();
+    }
+  });
+
+  it("honors a declared legacy discriminator", () => {
+    expect(infer({ op: "search", query: "q", confirm: true })).toBe(
+      "MEMORY_SEARCH",
+    );
+    expect(infer({ subaction: "create", text: "t", query: "q" })).toBe(
+      "MEMORY_CREATE",
+    );
+    expect(infer({ op: "delete", memoryId: MEMORY_ID, confirm: true })).toBe(
+      "MEMORY_DELETE",
+    );
+    // An unknown spelling carries no declaration; the structure decides.
+    expect(infer({ op: "bogus", text: "t" })).toBe("MEMORY_CREATE");
+  });
+
+  it("returns undefined when the arguments are ambiguous", () => {
+    for (const params of [
+      {},
+      { kind: "preference" },
+      { confirm: true },
+      { type: "facts" },
+      { text: "   " },
+      { query: "   " },
+      { memoryId: "null", confirm: true },
+    ]) {
+      expect(infer(params)).toBeUndefined();
+    }
   });
 });

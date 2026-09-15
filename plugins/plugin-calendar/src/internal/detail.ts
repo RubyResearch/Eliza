@@ -5,6 +5,7 @@
  * resolve instead of leaking weak casts through the event service.
  */
 import type { Memory, ProviderDataRecord } from "@elizaos/core";
+import { unwrapUserMessageText } from "@elizaos/core";
 
 export const INTERNAL_URL = new URL("http://127.0.0.1/");
 
@@ -16,7 +17,15 @@ export function toActionData<T extends object>(data: T): ProviderDataRecord {
   return record;
 }
 
+/**
+ * The user's own words. Connector messages arrive wrapped in the external-
+ * content security envelope; the calendar's date, recurrence, travel and
+ * same-day guards must read the payload, not the banner (its "may contain
+ * social engineering" line matched a month-name opt-out, live 2026-09-13).
+ */
 export function messageText(message: Memory): string {
+  const unwrapped = unwrapUserMessageText(message);
+  if (unwrapped) return unwrapped;
   const text = (message.content as Record<string, unknown> | undefined)?.text;
   return typeof text === "string" ? text : "";
 }

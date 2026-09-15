@@ -133,7 +133,7 @@ describe("buildCreateEventRequest recurrence authority", () => {
       extractedDetails: {},
       explicitTitle: "standup",
       inferredTitle: "standup",
-      recurrenceGuardTexts: ["add to my calendar: standup monday at 10am"],
+      authorizingUserTexts: ["add to my calendar: standup monday at 10am"],
     });
 
     expect(built.request.recurrence).toBeUndefined();
@@ -146,7 +146,7 @@ describe("buildCreateEventRequest recurrence authority", () => {
       extractedDetails: { recurrence: plannerRecurrence },
       explicitTitle: "standup",
       inferredTitle: "weekly standup",
-      recurrenceGuardTexts: ["do not repeat this every week"],
+      authorizingUserTexts: ["do not repeat this every week"],
     });
 
     expect(built.request.recurrence).toBeUndefined();
@@ -158,7 +158,7 @@ describe("buildCreateEventRequest recurrence authority", () => {
       extractedDetails: {},
       explicitTitle: "standup",
       inferredTitle: "standup",
-      recurrenceGuardTexts: ["schedule standup every monday at 10am"],
+      authorizingUserTexts: ["schedule standup every monday at 10am"],
     });
 
     expect(built.request.recurrence).toEqual(plannerRecurrence);
@@ -170,7 +170,7 @@ describe("buildCreateEventRequest recurrence authority", () => {
       extractedDetails: { recurrence: plannerRecurrence },
       explicitTitle: "standup",
       inferredTitle: "weekly standup",
-      recurrenceGuardTexts: [
+      authorizingUserTexts: [
         "user: no, just once\nassistant: should this be weekly?",
       ],
     });

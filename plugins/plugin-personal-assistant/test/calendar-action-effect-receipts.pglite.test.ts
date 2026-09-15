@@ -217,7 +217,7 @@ describe("registered CALENDAR strict settlement — real PGlite", () => {
       type: "object",
       additionalProperties: false,
       properties: {
-        startAt: { type: "string" },
+        start: { type: "string" },
         recurrence: expect.any(Object),
       },
     });
@@ -388,7 +388,7 @@ describe("registered CALENDAR strict settlement — real PGlite", () => {
         {
           action: "create_event",
           title: "Team sync",
-          details: { startAt: EVENT_START, endAt: EVENT_END },
+          details: { start: EVENT_START, end: EVENT_END },
         },
       )
     ).result;
@@ -443,8 +443,8 @@ describe("registered CALENDAR strict settlement — real PGlite", () => {
         side: "owner",
         grantId: "connector-account:calendar-receipt-owner",
         calendarId: "primary",
-        startAt: "2026-07-30T17:00:00.000Z",
-        endAt: "2026-07-30T18:00:00.000Z",
+        start: "2026-07-30T17:00:00.000Z",
+        end: "2026-07-30T18:00:00.000Z",
         timeZone: "UTC",
       },
     };

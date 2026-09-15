@@ -317,4 +317,58 @@ describe("context renderer", () => {
 		expect(user?.content).toContain("feed: latest market snapshot");
 		expect(system?.content).not.toContain("feed: latest market snapshot");
 	});
+
+	it("keeps per-turn selected contexts out of the byte-stable system prefix", () => {
+		// Stage-1 picks different contexts every turn; the system message must
+		// still be byte-identical so provider prefix caches hit across turns.
+		const render = (selected: string[]) =>
+			buildStageChatMessages({
+				contextSegments: renderContextObject({
+					id: `ctx-${selected.join("-")}`,
+					version: "v5",
+					staticPrefix: {
+						systemPrompt: {
+							id: "system",
+							label: "system",
+							content: "You are Eliza.",
+							stable: true,
+						},
+					},
+					trajectoryPrefix: {
+						messageHandlerThought: `route to ${selected.join(", ")}`,
+						selectedContexts: selected,
+						contextDefinitions: selected.map((id) => ({
+							id,
+							description: `${id} work`,
+						})),
+					},
+					events: [
+						{
+							id: "msg",
+							type: "message",
+							message: { role: "user", content: "Check status." },
+						},
+					],
+				}).promptSegments,
+				stageLabel: "planner_stage",
+				instructions: "decide the next action",
+				dynamicBlocks: [],
+				stepMessages: [],
+			});
+
+		const calendar = render(["calendar"]);
+		const memory = render(["memory"]);
+		expect(calendar[0]?.content).toBe(
+			"You are Eliza.\n\nplanner_stage:\ndecide the next action",
+		);
+		expect(memory[0]?.content).toBe(calendar[0]?.content);
+		expect(calendar[1]?.content).toBe(
+			[
+				"message_handler_thought: route to calendar",
+				"selected_contexts: calendar",
+				"contexts:\n- calendar: calendar work",
+				"message:user:\nCheck status.",
+			].join("\n\n"),
+		);
+	});
 });

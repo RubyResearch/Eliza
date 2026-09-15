@@ -442,7 +442,12 @@ Before routing, the response handler receives an `available_actions` discovery
 catalog containing every eligible action's name. Direct-text turns use a complete
 name index when smaller; the planner reads full descriptions, contexts and aliases
 through `DISCOVER_TOOLS names=[]`, and loads schemas by exact name. Voice, group
-and coding paths retain the complete inline reference. Discovery checks the current actor, delivery audience, connector
+and coding paths (and any turn where it renders shorter than the index) retain
+the complete inline reference: one `NAME: description` line per eligible
+umbrella action. Aliases resolve server-side, contexts come from
+`available_contexts`, and promoted sub-actions are represented by their parent,
+since each virtual repeats the parent's description and Stage 1 routes by
+family. Discovery checks the current actor, delivery audience, connector
 policy, and action validation under the action's declared routing contexts. This
 catalog is rebuilt for each turn. Direct text places its complete current content
 before changing history and provider text so an identical authorized catalog can

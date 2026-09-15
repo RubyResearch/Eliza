@@ -6455,7 +6455,8 @@ export async function handleConversationRoutes(
         } catch (err) {
           if (generationDelivered) {
             // error-policy:J7 The durable reply and idempotency outcome already
-            // reached the caller; report a later drain failure without replying again.
+            // reached the caller; report a later drain failure without replying
+            // again (develop #31349 contract).
             runtime.reportError("ConversationJson.postDelivery", err, {
               conversationId: conv.id,
               roomId: conv.roomId,

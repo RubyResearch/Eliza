@@ -6,6 +6,7 @@
  * deterministic.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { promoteSubactionsToActions } from "../../actions/promote-subactions";
 import type { Action, IAgentRuntime, Memory } from "../../types";
 import { _resetActionRolePolicyCacheForTests } from "../action-role-policy";
 import {
@@ -62,6 +63,155 @@ describe("sub-planner helpers", () => {
 			process.env.ACTION_ROLE_POLICY = ORIGINAL_ACTION_ROLE_POLICY;
 		}
 		_resetActionRolePolicyCacheForTests();
+	});
+
+	function ledgerFamily(): { parent: Action; virtuals: Action[] } {
+		const parent = makeAction({
+			name: "LEDGER",
+			description: "Create and remove ledger entries.",
+			parameters: [
+				{
+					name: "action",
+					description: "Operation",
+					required: true,
+					schema: { type: "string", enum: ["create", "delete"] },
+				},
+				{
+					name: "id",
+					description: "Entry identity",
+					required: true,
+					schema: { type: "string" },
+				},
+				{
+					name: "text",
+					description: `Complete ledger entry text. ${"A per-child tool repeats this property in full. ".repeat(12)}`,
+					required: false,
+					schema: { type: "string" },
+				},
+			],
+		});
+		const promoted = promoteSubactionsToActions(parent).map((action) => ({
+			...action,
+		}));
+		const promotedParent = promoted.find((action) => action.name === "LEDGER");
+		if (!promotedParent) throw new Error("promotion dropped the parent");
+		return {
+			parent: promotedParent,
+			virtuals: promoted.filter((action) => action.name !== "LEDGER"),
+		};
+	}
+
+	it("collapses a promoted family onto the umbrella tool with the discriminator required (live: CALENDAR without action, 40K-token round)", async () => {
+		const { parent, virtuals } = ledgerFamily();
+		expect(virtuals.map((action) => action.name)).toEqual([
+			"LEDGER_CREATE",
+			"LEDGER_DELETE",
+		]);
+		const useModel = vi.fn(async () => ({
+			text: "",
+			toolCalls: [
+				{
+					id: "call-1",
+					name: "LEDGER",
+					arguments: { action: "delete", id: "entry-7" },
+				},
+			],
+		}));
+		const execute = vi.fn(async () => ({
+			success: true,
+			text: "removed",
+			data: { actionName: "LEDGER_DELETE" },
+		}));
+		const result = await runSubPlanner({
+			runtime: makeRuntime([parent, ...virtuals], useModel),
+			action: parent,
+			context: { id: "ctx", events: [] },
+			ctx: { message: makeMessage() },
+			execute,
+			evaluate: async () => ({
+				success: true,
+				decision: "FINISH",
+				thought: "Done.",
+				messageToUser: "Done.",
+			}),
+		});
+		const modelParams = useModel.mock.calls[0]?.[1] as {
+			tools?: Array<{
+				name: string;
+				description?: string;
+				parameters?: {
+					required?: string[];
+					properties?: Record<string, { enum?: string[] }>;
+				};
+			}>;
+		};
+		const tools = modelParams.tools ?? [];
+		expect(tools.map((tool) => tool.name)).toEqual([
+			"LEDGER",
+			"REPLY",
+			"IGNORE",
+			"STOP",
+		]);
+		const umbrella = tools[0];
+		expect(umbrella?.parameters?.required).toContain("action");
+		expect(umbrella?.parameters?.properties?.action?.enum).toEqual([
+			"create",
+			"delete",
+		]);
+		expect(umbrella?.description).toContain(
+			"`action` is required; choose one of:",
+		);
+		expect(umbrella?.description).toContain("delete");
+		// The umbrella schema renders once instead of once per child.
+		const repeated = "A per-child tool repeats this property in full.";
+		expect(JSON.stringify(tools).split(repeated).length - 1).toBe(12);
+		expect(execute).toHaveBeenCalledWith(
+			expect.any(Object),
+			expect.any(Object),
+			expect.objectContaining({
+				name: "LEDGER_DELETE",
+				params: expect.objectContaining({ action: "delete", id: "entry-7" }),
+			}),
+			expect.any(Object),
+		);
+		expect(result.status).toBe("finished");
+	});
+
+	it("rejects an umbrella call that still omits the discriminator without executing anything", async () => {
+		const { parent, virtuals } = ledgerFamily();
+		const useModel = vi
+			.fn()
+			.mockResolvedValueOnce({
+				text: "",
+				toolCalls: [
+					{ id: "call-1", name: "LEDGER", arguments: { id: "entry-7" } },
+				],
+			})
+			.mockResolvedValueOnce({
+				text: "",
+				toolCalls: [
+					{ id: "call-2", name: "REPLY", arguments: { message: "Which one?" } },
+				],
+			});
+		const execute = vi.fn(async () => ({ success: true, text: "never" }));
+		const result = await runSubPlanner({
+			runtime: makeRuntime([parent, ...virtuals], useModel),
+			action: parent,
+			context: { id: "ctx", events: [] },
+			ctx: { message: makeMessage() },
+			execute,
+			evaluate: async () => ({
+				success: true,
+				decision: "NEXT_RECOMMENDED",
+				thought: "Missing action.",
+			}),
+		});
+		expect(execute).not.toHaveBeenCalled();
+		const first = result.trajectory.steps[0]?.result;
+		expect(first?.success).toBe(false);
+		expect(String(first?.error)).toContain(
+			"requires `action`, one of: create, delete",
+		);
 	});
 
 	it("detects declared sub-actions and resolves them by exact name", () => {

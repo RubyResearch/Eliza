@@ -7,14 +7,45 @@
 import { DISCOVER_TOOLS_NAME } from "../../actions/to-tool";
 import { ElizaError } from "../../errors";
 import { buildActionCatalog } from "../../runtime/action-catalog";
+import { actionGateRejection } from "../../runtime/action-gate";
 import type { Action } from "../../types/components";
+import type { AgentContext, RoleGateRole } from "../../types/contexts";
 import type { ContextObject } from "../../types/context-object";
+import type { Memory } from "../../types/memory";
 import type { ToolDefinition } from "../../types/model";
 import { isObjectRecord } from "../../utils/type-guards";
+import { mergeAgentContexts } from "./action-surface.js";
 import {
 	collectBudgetedStageOneCandidateActions,
 	collectPlannerTools,
 } from "./planned-tool.js";
+
+/**
+ * The complete catalog DISCOVER_TOOLS advertises: every runtime action the
+ * actor may run under the action's OWN declared contexts merged with the
+ * turn's selected contexts (the executor gate's rule), with private,
+ * disclosure and role gates unchanged. Building it from the Stage-1 context
+ * slice hid context-validated families (MESSAGE on a general-routed turn) and
+ * cost a whole planner round per miss (live 2026-09-14).
+ */
+export function collectDiscoveryCatalogActions(args: {
+	actions: readonly Action[];
+	message: Memory;
+	selectedContexts: readonly AgentContext[];
+	userRoles: readonly RoleGateRole[];
+}): Action[] {
+	return args.actions.filter(
+		(action) =>
+			actionGateRejection(action, {
+				message: args.message,
+				userRoles: args.userRoles,
+				activeContexts: mergeAgentContexts(
+					args.selectedContexts,
+					action.contexts,
+				),
+			}) === undefined,
+	);
+}
 
 export function createPlannerToolDiscoveryAction(
 	authorizedActions: readonly Action[],
@@ -47,6 +78,10 @@ export function createPlannerToolDiscoveryAction(
 	const catalog = catalogFor(authorizedActions);
 	return {
 		name: DISCOVER_TOOLS_NAME,
+		// Names and children only: the routing hints repeated a 14.9K-character
+		// catalog in every planner round (audit 2026-09-13); a loaded family
+		// carries its complete description on the next round, and names=[]
+		// reads the full descriptions on demand without loading any schema.
 		description:
 			"Load complete tool schemas from the authorized name index below when an exposed tool does not cover an intent. " +
 			"Pass exact child names to load those operations, or parent names to load their complete authorized families. Pass names=[] to read the complete family descriptions and routing hints if the names alone are ambiguous. " +
@@ -80,10 +115,17 @@ export function createPlannerToolDiscoveryAction(
 					(name): name is string => typeof name === "string" && name.length > 0,
 				)
 			) {
+				// A miss loads nothing and changes nothing: it steers the model
+				// (coachingFailure) and never owns the turn's final message, which
+				// otherwise shipped "the available runtime step failed" over a
+				// later successful answer (live 2026-09-14, tj-8ce2f7a7e5384b).
+				// readOnlyOperation lets the planner loop feed the error back for
+				// a corrected call, exactly as it does for an unadmitted name.
 				return {
 					success: false,
 					error:
 						"Select exact names from the authorized discovery catalog. No tools were loaded.",
+					data: { readOnlyOperation: true, coachingFailure: true },
 				};
 			}
 			if (names.length === 0) {
@@ -129,12 +171,14 @@ export function createPlannerToolDiscoveryAction(
 					admitted.set(action.name, action);
 			}
 			if (!names.every((name) => admitted.has(name))) {
+				// Same coaching miss as above: no schema loaded, nothing to own.
 				return {
 					success: false,
 					error:
 						"Requested tool family was not admitted by the current capability and permission checks. No tools were loaded. Select an exact relevant name from availableNames, or use names=[] if you need complete catalog descriptions. Do not substitute an unrelated family for the requested operation.",
 					data: {
 						readOnlyOperation: true,
+						coachingFailure: true,
 						availableNames: [...admitted.keys()],
 					},
 				};

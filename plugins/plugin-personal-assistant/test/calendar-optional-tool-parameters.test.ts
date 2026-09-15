@@ -56,8 +56,8 @@ describe.each([
       const args = {
         title: "Pottery class",
         details: {
-          startAt: "2026-09-11T16:00:00.000Z",
-          endAt: "2026-09-11T17:00:00.000Z",
+          start: "2026-09-11T16:00:00.000Z",
+          end: "2026-09-11T17:00:00.000Z",
           timeZone: "UTC",
         },
       };
@@ -109,8 +109,8 @@ describe.each([
     const args = {
       title: "Unknown",
       details: {
-        startAt: "2026-07-27T16:00:00.000Z",
-        endAt: "2026-07-27T17:00:00.000Z",
+        start: "2026-07-27T16:00:00.000Z",
+        end: "2026-07-27T17:00:00.000Z",
         timeZone: "UTC",
       },
     };

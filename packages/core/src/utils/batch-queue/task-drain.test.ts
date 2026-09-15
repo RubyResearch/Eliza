@@ -135,3 +135,46 @@ describe("TaskDrain", () => {
 		});
 	});
 });
+
+describe("TaskDrain idle backoff", () => {
+	async function workerFor(onDrainResult: number | undefined) {
+		let worker:
+			| {
+					execute: (
+						rt: unknown,
+						options: unknown,
+						task: unknown,
+					) => Promise<unknown>;
+			  }
+			| undefined;
+		const runtime = createMockRuntime({
+			agentId: AGENT_ID,
+			registerTaskWorker: (w: typeof worker) => {
+				worker = w;
+			},
+			getTasksByName: async () => [],
+			createTask: vi.fn(async () => "00000000-0000-0000-0000-000000000099"),
+		});
+		const drain = new TaskDrain({
+			taskName: "EMBEDDING_DRAIN",
+			intervalMs: 1_000,
+			idleIntervalMs: 5_000,
+			onDrain: async () => onDrainResult,
+		});
+		await drain.start(runtime);
+		if (!worker) throw new Error("worker not registered");
+		return worker.execute(runtime, {}, {} as never);
+	}
+
+	test("backs off to the idle interval when a drain processed nothing", async () => {
+		expect(await workerFor(0)).toEqual({ nextInterval: 5_000 });
+	});
+
+	test("restores the working interval after a non-empty drain", async () => {
+		expect(await workerFor(3)).toEqual({ nextInterval: 1_000 });
+	});
+
+	test("keeps the legacy no-signal behaviour when the drain reports nothing", async () => {
+		expect(await workerFor(undefined)).toBeUndefined();
+	});
+});

@@ -244,7 +244,7 @@ describe("BatchQueue (via public entrypoint)", () => {
 		});
 		await q.start(runtime);
 		q.enqueue(9);
-		await expect(q.drain()).resolves.toBeUndefined();
+		await expect(q.drain()).resolves.toBe(1);
 		expect(processed).toEqual([9]);
 		expect(runtime.reportError).toHaveBeenCalledWith(
 			"BatchQueue.outcomeHook",
@@ -269,7 +269,7 @@ describe("BatchQueue (via public entrypoint)", () => {
 			},
 		});
 		q.enqueue(1);
-		await expect(q.drain()).resolves.toBeUndefined();
+		await expect(q.drain()).resolves.toBe(1);
 	});
 
 	it("skips a second drain while one is already in flight", async () => {

@@ -2056,6 +2056,34 @@ describe("executePlannedToolCall", () => {
 		expect(handler).not.toHaveBeenCalled();
 	});
 
+	it("runs an action admitted under its own contexts whose validate() reads the routing state", async () => {
+		const { hasActionContext } = await import("../../utils/action-validation");
+		const handler = vi.fn(async () => ({ success: true, text: "3 messages" }));
+		const action = makeAction({
+			name: "MESSAGE",
+			contexts: ["messaging"],
+			validate: async (_runtime, message, state) =>
+				hasActionContext(message, state, { contexts: ["messaging"] }),
+			handler,
+		});
+		const result = await executePlannedToolCall(
+			makeRuntime([action]),
+			{
+				message: makeMessage(),
+				state: {
+					text: "",
+					data: {},
+					values: { __contextRouting: { primaryContext: "general" } },
+				},
+				activeContexts: ["general", "messaging"],
+				userRoles: ["ADMIN"],
+			},
+			{ name: "MESSAGE", params: {} },
+		);
+		expect(result.success).toBe(true);
+		expect(handler).toHaveBeenCalledTimes(1);
+	});
+
 	it("fails closed when canonical role lookup throws instead of fabricating USER", async () => {
 		const handler = vi.fn(async () => ({ success: true }));
 		const action = makeAction({

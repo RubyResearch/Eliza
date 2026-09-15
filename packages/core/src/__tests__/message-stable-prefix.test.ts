@@ -5,6 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { renderMessageHandlerStablePrefix } from "../services/message";
+import type { Action } from "../types/components";
 import type { UUID } from "../types/primitives";
 import type { IAgentRuntime } from "../types/runtime";
 import type { State } from "../types/state";
@@ -20,7 +21,7 @@ function makeState(): State {
 	};
 }
 
-function makeRuntime(): IAgentRuntime {
+function makeRuntime(opts: { actions?: Action[] } = {}): IAgentRuntime {
 	return {
 		agentId: AGENT_ID,
 		character: {
@@ -28,8 +29,12 @@ function makeRuntime(): IAgentRuntime {
 			system: "You are concise and helpful.",
 			bio: "I help with calendars.",
 		},
-		actions: [],
+		actions: opts.actions ?? [],
 		providers: [],
+		// Action discovery runs the execution gates, which read the room and
+		// report gate failures.
+		getRoom: vi.fn(async () => null),
+		reportError: vi.fn(),
 		// Stage-1 triage reads the reply-bypass channel settings before it can
 		// decide which providers an ambient turn excludes, so a runtime without
 		// `getSetting` cannot render the prefix at all.

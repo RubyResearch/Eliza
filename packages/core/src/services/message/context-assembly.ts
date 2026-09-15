@@ -1,6 +1,7 @@
 /** Assembles message context from ordered dialogue, selected providers, and the authorized action surface. */
 
 import { v4 } from "uuid";
+import { isPromotedSubactionVirtual } from "../../actions/promote-subactions";
 import { actionToTool, CORE_PLANNER_TERMINALS } from "../../actions/to-tool";
 import { canActionRun } from "../../runtime/action-gate";
 import { createContextObject } from "../../runtime/context-object";
@@ -31,6 +32,32 @@ import {
 } from "./dialogue-context.js";
 import { normalizeActionIdentifier } from "./direct-action-heuristics";
 import { MODEL_CONTEXT_PROVIDER_EXCLUSIONS } from "./provider-state.js";
+
+/**
+ * Render the Stage-1 discovery catalog as one `NAME: description` line per
+ * action. The JSON array it replaces spent 2.8K of its 35K characters on keys
+ * and quoting for the 107-entry owner catalog (live 2026-09-14) and turned
+ * every quote and newline inside a description into an escape sequence. Each
+ * line carries the name and the complete description; a newline run inside a
+ * description collapses to one space so each catalog line stays one action.
+ * Stage-1 output never parses this text: the `candidateActionNames` it emits
+ * are names, resolved server-side against runtime.actions (action-surface.ts).
+ */
+export function formatAvailableActionsForPrompt(
+	actions: readonly Pick<Action, "name" | "description">[],
+): string {
+	if (actions.length === 0) {
+		return "(no actions available)";
+	}
+	return actions
+		.map((action) => {
+			const description = (action.description ?? "")
+				.replace(/[ \t]*\r?\n[ \t\r\n]*/g, " ")
+				.trim();
+			return description ? `${action.name}: ${description}` : action.name;
+		})
+		.join("\n");
+}
 
 /** One owner for the current-turn policy; source-reference capability changes
  * only its recall guidance, preserving the same request and effect boundary. */
@@ -289,16 +316,29 @@ export async function createV5MessageContextObject(args: {
 			userRoles: args.userRoles,
 			discoverActions: true,
 		});
-		// Every name remains visible. Full reference text and schemas are read
-		// through the existing permission-checked planner discovery protocol.
-		const fullCatalog = JSON.stringify(
-			actions.map((action) => ({
-				name: action.name,
-				description: action.description,
-				contexts: action.contexts,
-				similes: action.similes,
-			})),
+		// This is a discovery projection, not an execution tool surface. Every
+		// authorized name stays visible: the direct-text index lists every name
+		// and the planner reads complete descriptions, contexts and aliases
+		// through the permission-checked DISCOVER_TOOLS protocol (names=[]) and
+		// loads schemas by exact name. The inline reference (voice, group and
+		// coding turns, and any turn where it renders shorter than the index)
+		// carries each authorized umbrella's name and complete description;
+		// Stage 2 supplies the native parameter schemas and rechecks
+		// authorization before
+		// execution. Promoted sub-actions are represented by their parent there:
+		// each virtual repeats the parent's description with a suffix, and on a
+		// full catalog (380 entries, 273 of them promoted) that repetition was
+		// 235K characters (~58K tokens) per Stage-1 call, 2–3× the whole prompt
+		// (live 2026-09-12). Stage 1 routes by family; the planner expands it.
+		// Aliases and declared contexts are omitted from the reference: every
+		// consumer of `similes` (exposedActionMatches, resolveRuntimeAction,
+		// reply policy, sub-planner) reads runtime.actions, and Stage 1 receives
+		// available_contexts separately. On the 73-action guest catalog they
+		// were 14.6K of 39.8K characters (~4.6K tokens) per turn (2026-09-13).
+		const discoverable = actions.filter(
+			(action) => !isPromotedSubactionVirtual(action),
 		);
+		const reference = formatAvailableActionsForPrompt(discoverable);
 		const index = [
 			// This is a name lookup index, not the planner's relevance ranking.
 			// Keep equal authorized sets byte-identical when the active view changes.
@@ -312,12 +352,19 @@ export async function createV5MessageContextObject(args: {
 			segment: {
 				id: "available-actions",
 				label: "available_actions",
+				// The catalog depends on the sender's role and the room's gates, not
+				// on the turn, but it stays a dynamic segment so prefix placement can
+				// never turn it into cached authority: renderMessageHandlerModelInput
+				// orders it ahead of the changing dialogue and provider text on direct
+				// text so an identical authorized catalog still reuses the provider's
+				// prefix cache, and a role, availability or registration change simply
+				// rebuilds it.
 				stable: false,
 				content:
 					args.includeActionDiscovery === "index" &&
-					index.length < fullCatalog.length
+					index.length < reference.length
 						? index
-						: fullCatalog,
+						: reference,
 			},
 		});
 	}

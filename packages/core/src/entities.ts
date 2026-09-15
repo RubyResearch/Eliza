@@ -901,8 +901,85 @@ function formatEntityNames(names: string[]): string {
 	return renderedNames;
 }
 
-export function formatEntityMetadata(metadata: unknown): string {
-	return stableStringify(metadata);
+/**
+ * Presentation projection of entity metadata for the "People in the Room"
+ * block. Image URLs are never useful to a text model, and connectors store
+ * the same name/username/id three times (top level, `default`, `<source>`);
+ * on the live room that was 5.9K characters in every Stage-1, planner and
+ * evaluator call (2026-09-13). The surviving `<source>` copy still restated
+ * the header's names as name/userName/username/displayName and its id as
+ * userId: 22 entities × ~250 characters in every Stage-1 and planner call
+ * (live 2026-09-14). A string that only repeats a header name (Discord
+ * discriminators aside) or a value already rendered in the same object adds
+ * nothing, and an object emptied that way is pruned. Bio, roles and the
+ * platform id stay.
+ */
+export function formatEntityMetadata(
+	metadata: unknown,
+	names: readonly string[] = [],
+): string {
+	return stableStringify(projectEntityDisplayMetadata(metadata, names));
+}
+
+const ENTITY_METADATA_OMITTED_KEYS = new Set([
+	"avatarUrl",
+	"avatar",
+	"originalId",
+]);
+
+/** Comparison key for a rendered name: case, surrounding space, a leading @ and a Discord `#1234` discriminator do not distinguish it. */
+function entityNameKey(value: string): string {
+	return value
+		.trim()
+		.replace(/^@/, "")
+		.replace(/#\d{1,5}$/, "")
+		.trim()
+		.toLowerCase();
+}
+
+function isEmptyProjection(value: unknown): boolean {
+	if (Array.isArray(value)) return value.length === 0;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Object.keys(value).length === 0
+	);
+}
+
+export function projectEntityDisplayMetadata(
+	value: unknown,
+	names: readonly string[] = [],
+): unknown {
+	const known = new Set(names.filter(Boolean).map(entityNameKey));
+	return projectEntityDisplayValue(value, known);
+}
+
+function projectEntityDisplayValue(
+	value: unknown,
+	known: Set<string>,
+): unknown {
+	if (Array.isArray(value)) {
+		return value
+			.map((entry) => projectEntityDisplayValue(entry, known))
+			.filter((entry) => !isEmptyProjection(entry));
+	}
+	if (!value || typeof value !== "object") return value;
+	const out: Record<string, unknown> = {};
+	const rendered = new Set<string>();
+	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+		if (ENTITY_METADATA_OMITTED_KEYS.has(key) || key === "default") continue;
+		if (typeof entry === "string") {
+			const entryKey = entityNameKey(entry);
+			if (known.has(entryKey) || rendered.has(entryKey)) continue;
+			rendered.add(entryKey);
+			out[key] = entry;
+			continue;
+		}
+		const projected = projectEntityDisplayValue(entry, known);
+		if (isEmptyProjection(projected)) continue;
+		out[key] = projected;
+	}
+	return out;
 }
 
 export function formatEntities({ entities }: { entities: Entity[] }) {
@@ -916,10 +993,12 @@ export function formatEntities({ entities }: { entities: Entity[] }) {
 	});
 
 	const entityStrings = sortedEntities.map((entity: Entity) => {
-		const header = `${formatEntityNames(entity.names)}\nID: ${entity.id}${
+		const data =
 			entity.metadata && Object.keys(entity.metadata).length > 0
-				? `\nData: ${formatEntityMetadata(entity.metadata)}\n`
-				: "\n"
+				? formatEntityMetadata(entity.metadata, entity.names)
+				: "{}";
+		const header = `${formatEntityNames(entity.names)}\nID: ${entity.id}${
+			data === "{}" ? "\n" : `\nData: ${data}\n`
 		}`;
 		return header;
 	});

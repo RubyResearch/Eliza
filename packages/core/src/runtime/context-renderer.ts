@@ -353,13 +353,16 @@ export function renderContextObject(
 	// Synthetic system segments use label="system" so segmentBlock emits the
 	// raw content without a redundant `<label>:\n` header — every content body
 	// below is already self-labeled (e.g. `selected_contexts: ...`,
-	// `contexts:\n- ...`).
+	// `contexts:\n- ...`). They change per turn (Stage-1 output), so they are
+	// dynamic: keeping them out of the system message leaves the planner and
+	// evaluator system prefix byte-stable across turns for provider prompt
+	// caches (live 2026-09-13: 6.6K of 19K system chars shared before).
 	if (context.trajectoryPrefix?.messageHandlerThought) {
 		appendSyntheticSegment(rendered, {
 			id: "message-handler-thought",
 			label: "system",
 			content: `message_handler_thought: ${context.trajectoryPrefix.messageHandlerThought}`,
-			stable: true,
+			stable: false,
 		});
 	}
 	if (context.trajectoryPrefix?.selectedContexts?.length) {
@@ -367,7 +370,7 @@ export function renderContextObject(
 			id: "selected-contexts",
 			label: "system",
 			content: `selected_contexts: ${context.trajectoryPrefix.selectedContexts.join(", ")}`,
-			stable: true,
+			stable: false,
 		});
 	}
 	if (context.trajectoryPrefix?.contextDefinitions?.length) {
@@ -383,7 +386,7 @@ export function renderContextObject(
 			id: "context-definitions",
 			label: "system",
 			content: `contexts:\n${lines.join("\n")}`,
-			stable: true,
+			stable: false,
 		});
 	}
 	for (const segment of context.trajectoryPrefix?.contextProviders ?? []) {

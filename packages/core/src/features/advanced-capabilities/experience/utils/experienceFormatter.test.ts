@@ -9,6 +9,7 @@ import type { Experience } from "../types";
 import { ExperienceType, OutcomeType } from "../types";
 import {
 	extractKeywords,
+	formatExperienceForPrompt,
 	formatExperienceForRAG,
 	getExperienceStats,
 	groupExperiencesByDomain,
@@ -104,5 +105,38 @@ describe("formatExperienceForRAG", () => {
 		const text = formatExperienceForRAG(exp({ tags: ["a", "b"] }));
 		expect(text).toMatch(/Experience Type: success/);
 		expect(text).toMatch(/Tags: a, b/);
+	});
+});
+
+describe("formatExperienceForPrompt", () => {
+	it("renders a WHY that adds to DO", () => {
+		const text = formatExperienceForPrompt(
+			exp({ id: "e1" as Experience["id"], result: "the retry succeeded" }),
+		);
+		expect(text).toContain("DO: learned something useful");
+		expect(text).toContain("WHY: the retry succeeded");
+		expect(text).toContain("META: id=e1");
+	});
+
+	it("replaces a WHY that only repeats DO with the extraction rationale or a local reference (live store: result == learning)", () => {
+		const duplicate = formatExperienceForPrompt(
+			exp({
+				id: "e2" as Experience["id"],
+				result: "learned something useful",
+				extractionReason: "the user corrected the first attempt",
+			}),
+		);
+		expect(duplicate).toContain("WHY: the user corrected the first attempt");
+		expect(duplicate).not.toContain("WHY: learned something useful");
+		const bare = formatExperienceForPrompt(
+			exp({
+				id: "e3" as Experience["id"],
+				result: " learned  something useful ",
+			}),
+		);
+		expect(bare).not.toContain("WHY: learned");
+		expect(bare).toMatch(
+			/WHEN: ctx\nWHY: Same text as DO above\.\nMETA: id=e3/,
+		);
 	});
 });

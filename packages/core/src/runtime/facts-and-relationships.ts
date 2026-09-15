@@ -23,7 +23,9 @@ import { ElizaError } from "../errors.ts";
 import {
 	buildFactKeywordsForStorage,
 	factClaimsEquivalent,
+	factPolarityDiffers,
 	scoreFactKeywordRelevance,
+	tokenizeFactText,
 } from "../features/advanced-capabilities/fact-keywords.ts";
 import { resolveCanonicalOwnerId } from "../roles.ts";
 import { isMobilePlatform } from "../runtime-env";
@@ -43,7 +45,9 @@ import { ModelType } from "../types/model";
 import type { UUID } from "../types/primitives";
 import type { IAgentRuntime } from "../types/runtime";
 import type { State } from "../types/state";
+import { getUserMessageText } from "../utils/message-text";
 import { isSyntheticConversationArtifactMemory } from "../utils/synthetic-conversation-artifact";
+import { isObjectRecord } from "../utils/type-guards";
 import { parseJsonObject } from "./json-output";
 import { buildCanonicalSystemPrompt } from "./system-prompt";
 
@@ -140,6 +144,14 @@ export interface FactsAndRelationshipsRunArgs {
 	state: State;
 	extract: MessageHandlerExtract;
 	priorDialogue?: readonly Memory[];
+	/** Settled planner tool results for this turn, in execution order. */
+	executedTools?: readonly FactsStageExecutedTool[];
+}
+
+/** The subset of a settled planner tool result the stage inspects. */
+export interface FactsStageExecutedTool {
+	name: string;
+	result: { success: boolean; data?: Record<string, unknown> };
 }
 
 export interface FactsAndRelationshipsRunResult {
@@ -156,7 +168,92 @@ export interface FactsAndRelationshipsRunResult {
 	 * fabricated `"default"` literal (#13623).
 	 */
 	provider?: string;
+	/** Set when a deterministic gate answered the stage without a model call. */
+	skipReason?: string;
 	written: { facts: number; relationships: number };
+}
+
+const MEMORY_MUTATION_ACTION = /^MEMORY(?:CREATE|UPDATE)?$/;
+const REMEMBER_PREFIX =
+	/^(?:(?:hey|hi|ok|okay)[\s,]+)?(?:please\s+)?(?:remember|note|keep in mind|save)\s+(?:that\s+)?/i;
+
+function normalizeMemoryActionName(name: string): string {
+	return name.toUpperCase().replace(/[^A-Z]/g, "");
+}
+
+/** True when Stage 1 routed the turn to a MEMORY create/update. */
+export function planNamesMemoryMutation(plan: {
+	candidateActions?: readonly string[];
+	deterministicToolCall?: { name: string };
+}): boolean {
+	const names = [
+		...(plan.candidateActions ?? []),
+		...(plan.deterministicToolCall ? [plan.deterministicToolCall.name] : []),
+	];
+	return names.some((name) =>
+		MEMORY_MUTATION_ACTION.test(normalizeMemoryActionName(name)),
+	);
+}
+
+function storedMemoryTexts(
+	executedTools: readonly FactsStageExecutedTool[],
+): string[] {
+	const texts: string[] = [];
+	for (const { name, result } of executedTools) {
+		const data = result.data;
+		if (result.success !== true || !data) continue;
+		const actionName =
+			typeof data.actionName === "string" ? data.actionName : name;
+		if (
+			!MEMORY_MUTATION_ACTION.test(normalizeMemoryActionName(actionName)) &&
+			!MEMORY_MUTATION_ACTION.test(normalizeMemoryActionName(name))
+		) {
+			continue;
+		}
+		const stored =
+			data.op === "create"
+				? data.text
+				: data.op === "update"
+					? (data.memory as { content?: { text?: unknown } } | null | undefined)
+							?.content?.text
+					: undefined;
+		if (typeof stored === "string" && stored.trim()) texts.push(stored.trim());
+	}
+	return texts;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The user's claim minus the agent mention and the remember/save prefix. */
+function residualUserClaim(runtime: IAgentRuntime, message: Memory): string {
+	let text = getUserMessageText(message).replace(/^<@!?\d+>\s*/, "");
+	const agentName = (runtime.character.name ?? "").trim();
+	if (agentName) {
+		text = text.replace(
+			new RegExp(
+				`^@?${escapeRegExp(agentName)}(?:\\s*\\(@\\d+\\))?[\\s,:!.-]*`,
+				"i",
+			),
+			"",
+		);
+	}
+	return text.replace(REMEMBER_PREFIX, "").trim();
+}
+
+/** Every content word of the claim is in a stored text, with matching polarity. */
+function storedTextsCoverClaim(
+	claim: string,
+	storedTexts: readonly string[],
+): boolean {
+	const claimTokens = tokenizeFactText(claim);
+	if (claimTokens.length === 0) return false;
+	const storedTokens = new Set(storedTexts.flatMap(tokenizeFactText));
+	return (
+		claimTokens.every((token) => storedTokens.has(token)) &&
+		storedTexts.every((text) => !factPolarityDiffers(claim, text))
+	);
 }
 
 export async function runFactsAndRelationshipsStage(
@@ -208,6 +305,32 @@ export async function runFactsAndRelationshipsStage(
 			tools: [],
 			written: { facts: 0, relationships: 0 },
 		};
+	}
+
+	// A successful MEMORY create/update holding every content word of the
+	// message already owns this turn's fact; there is nothing left to validate.
+	if (candidateRelationships.length === 0) {
+		const storedTexts = storedMemoryTexts(args.executedTools ?? []);
+		if (
+			storedTexts.length > 0 &&
+			storedTextsCoverClaim(residualUserClaim(runtime, message), storedTexts)
+		) {
+			runtime.logger.info(
+				{ messageId: message.id, candidateFacts: candidateFacts.length },
+				"[FactsStage] skipped the model call: this turn's MEMORY action stored the whole message",
+			);
+			return {
+				parsed: {
+					facts: [],
+					relationships: [],
+					thought: "skipped: MEMORY action stored the whole message",
+				},
+				messages: [],
+				tools: [],
+				skipReason: "memory_action_stored_message",
+				written: { facts: 0, relationships: 0 },
+			};
+		}
 	}
 
 	const [similarFacts, existingRelationships, roomEntities] = await Promise.all(
@@ -1073,13 +1196,52 @@ function resolveRelationshipEntityId(
 	) {
 		return runtime.agentId;
 	}
+	// The author's own display name for this message outranks any room entity
+	// that shares the alias: two harness identities both carried "nubs-e2e" and
+	// the fact landed under the one that had not spoken (live 2026-09-13).
+	if (
+		messageAuthorNames(message).some(
+			(name) => normalizeForComparison(name) === normalized,
+		)
+	) {
+		return message.entityId;
+	}
+	const matches = new Set<UUID>();
 	for (const entity of entities) {
 		if (!entity.id) continue;
-		for (const name of entity.names) {
-			if (normalizeForComparison(name) === normalized) return entity.id;
+		if (
+			entity.names.some((name) => normalizeForComparison(name) === normalized)
+		) {
+			matches.add(entity.id);
 		}
 	}
+	if (matches.size === 1) return [...matches][0];
+	// Several participants share the alias: the speaker wins when present;
+	// otherwise the subject stays unresolved rather than crediting a bystander.
+	if (matches.has(message.entityId)) return message.entityId;
 	return undefined;
+}
+
+/** Display names the connector recorded for the message author. */
+function messageAuthorNames(message: Memory): string[] {
+	const names: string[] = [];
+	const push = (value: unknown): void => {
+		if (typeof value === "string" && value.trim().length > 0) {
+			names.push(value);
+		}
+	};
+	const metadata: unknown = message.metadata;
+	if (isObjectRecord(metadata)) {
+		push(metadata.entityName);
+		push(metadata.entityUserName);
+	}
+	const content: unknown = message.content;
+	if (isObjectRecord(content)) {
+		push(content.name);
+		push(content.userName);
+		push(content.username);
+	}
+	return names;
 }
 
 function asUuidOrNull(value: string): UUID | null {

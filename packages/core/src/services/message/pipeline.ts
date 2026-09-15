@@ -14,6 +14,7 @@ import type { V5MessageRuntimeInput } from "./turn-input.js";
 
 export type { V5MessageRuntimeInput } from "./turn-input.js";
 
+import { promotedSubactionParent } from "../../actions/promote-subactions";
 import { DISCOVER_TOOLS_NAME } from "../../actions/to-tool";
 import { ElizaError } from "../../errors";
 import { runShouldRespondInjectionGate } from "../../features/trust/should-respond-risk-gate";
@@ -33,6 +34,8 @@ import { appendContextEvent } from "../../runtime/context-object";
 import { type EvaluatorEffects, runEvaluator } from "../../runtime/evaluator";
 import {
 	type FactsAndRelationshipsRunResult,
+	type FactsStageExecutedTool,
+	planNamesMemoryMutation,
 	runFactsAndRelationshipsStage,
 } from "../../runtime/facts-and-relationships";
 import { getLocalizedExamplesProvider } from "../../runtime/localized-examples-provider";
@@ -79,6 +82,7 @@ import type { IAgentRuntime } from "../../types/runtime";
 import {
 	attachAvailableContexts,
 	CONTEXT_ROUTING_STATE_KEY,
+	getContextRoutingFromState,
 } from "../../utils/context-routing";
 import { getUserMessageText } from "../../utils/message-text";
 import { isProviderContextOverflowFailure } from "../../utils/model-errors";
@@ -94,6 +98,7 @@ import {
 	collectV5PlannerCandidateActions,
 	getMessageHandlerCandidateActions,
 	getMessageHandlerParentActionHints,
+	mergeAgentContexts,
 	privacyDenialReplyForReasons,
 	stringArrayProperty,
 } from "./action-surface.js";
@@ -126,6 +131,7 @@ import {
 } from "./planned-tool.js";
 import {
 	ambientTurnProviderExclusions,
+	EVALUATOR_STAGE_PROVIDER_EXCLUSIONS,
 	isBenchmarkForcingToolCall,
 	isOwnerLifeManagementToolCandidate,
 	isTextScoredBenchmarkTurn,
@@ -160,7 +166,7 @@ import {
 } from "./stage1-reply-policy.js";
 import { subAgentCompletionRelayBody } from "./task-completion-relay.js";
 import {
-	appendDiscoveredPlannerTools,
+	collectDiscoveryCatalogActions,
 	createPlannerToolDiscoveryAction,
 } from "./tool-discovery.js";
 import { recordFactsAndRelationshipsStage } from "./trajectory-stages.js";
@@ -345,6 +351,9 @@ export async function runV5MessageRuntimeStage1(
 		error?: unknown;
 	} | null> = Promise.resolve(null);
 	let settledFactsOutcome: Awaited<typeof factsTask> | undefined;
+	let releaseFactsStage:
+		| ((executedTools: readonly FactsStageExecutedTool[]) => void)
+		| undefined;
 	let messageHandlerStageTask: Promise<void> = Promise.resolve();
 	try {
 		const {
@@ -422,13 +431,26 @@ export async function runV5MessageRuntimeStage1(
 			// canonical assistant-history settlement. A failed settlement must
 			// not freeze or acknowledge a partial conversation snapshot.
 			if (!memoryWorker?.ownsDeferredFacts?.(args.message)) {
-				const startedAt = Date.now();
-				factsTask = runFactsAndRelationshipsStage({
-					runtime: args.runtime,
-					message: args.message,
-					state: args.state,
-					extract: messageHandler.extract,
-				})
+				let startedAt = Date.now();
+				const extract = messageHandler.extract;
+				// A plan naming a MEMORY create/update waits for that tool's result so
+				// a stored fact covering the whole message can skip the model call.
+				const executedToolsGate = planNamesMemoryMutation(messageHandler.plan)
+					? new Promise<readonly FactsStageExecutedTool[]>((resolve) => {
+							releaseFactsStage = resolve;
+						})
+					: Promise.resolve<readonly FactsStageExecutedTool[]>([]);
+				factsTask = executedToolsGate
+					.then((executedTools) => {
+						startedAt = Date.now();
+						return runFactsAndRelationshipsStage({
+							runtime: args.runtime,
+							message: args.message,
+							state: args.state,
+							extract,
+							executedTools,
+						});
+					})
 					.then((result) => ({ startedAt, endedAt: Date.now(), result }))
 					.catch((error) => {
 						// error-policy:J7 Facts persistence is detached from reply delivery;
@@ -1103,11 +1125,32 @@ export async function runV5MessageRuntimeStage1(
 				selectedActionFamilies.length < plannerCandidateActions.length)
 				? selectedActionFamilies
 				: undefined;
+		const discoveryCatalogActions = progressiveActions
+			? collectDiscoveryCatalogActions({
+					actions: args.runtime.actions ?? [],
+					message: args.message,
+					selectedContexts,
+					userRoles: [senderRole],
+				})
+			: [];
 		if (progressiveActions) {
 			progressiveActions.push(
 				createPlannerToolDiscoveryAction(
-					plannerCandidateActions,
+					discoveryCatalogActions,
 					(discoveredActions) => {
+						// A loaded family's declared contexts join the turn's routing
+						// state so its validate() (hasActionContext) sees them at
+						// dispatch, exactly as the executor gate already merges them.
+						// Contexts are only added; the primary context is unchanged.
+						const routing = getContextRoutingFromState(plannerState);
+						plannerState.values[CONTEXT_ROUTING_STATE_KEY] = {
+							primaryContext:
+								routing.primaryContext ?? selectedContexts[0] ?? "general",
+							secondaryContexts: mergeAgentContexts(
+								routing.secondaryContexts,
+								...discoveredActions.map((action) => action.contexts),
+							),
+						};
 						const existingNames = new Set(
 							exposedPlannerActions.map((action) => action.name),
 						);
@@ -1119,11 +1162,18 @@ export async function runV5MessageRuntimeStage1(
 						}
 						// The planner loop holds this array for the lifetime of the turn.
 						// Update it in place so the next model call sees the loaded schemas.
-						appendDiscoveredPlannerTools(
+						// The expanded surface keeps the canonical umbrella contracts of the
+						// initial one: a loaded family's promoted aliases ride on their
+						// umbrella instead of repeating its schema as separate tools, and a
+						// child loaded without its umbrella still gets its own tool.
+						const expandedTools = collectPlannerTools(
 							plannerContextWithDecision,
-							plannerTools,
-							discoveredActions,
+							exposedPlannerActions,
+							{
+								canonicalFamilies: true,
+							},
 						);
+						plannerTools.splice(0, plannerTools.length, ...expandedTools);
 					},
 					(names) =>
 						collectV5PlannerCandidateActions({
@@ -1159,8 +1209,18 @@ export async function runV5MessageRuntimeStage1(
 			localizedExamples: localizedExamples ?? undefined,
 		});
 		if (progressiveActions) {
+			// The discovery tool is planner protocol, not a capability family; keep
+			// it out of the tier-A parent summary rendered into the planner context.
+			actionSurface.summary.tierAParents =
+				actionSurface.summary.tierAParents.filter(
+					(name) =>
+						normalizeActionIdentifier(name) !==
+						normalizeActionIdentifier("DISCOVER_TOOLS"),
+				);
+		}
+		if (progressiveActions) {
 			actionSurface.summary.discoverableActionCount =
-				plannerCandidateActions.length;
+				discoveryCatalogActions.length;
 			actionSurface.summary.discoveryToolName = "DISCOVER_TOOLS";
 		}
 		const exposedPlannerActions = (
@@ -1268,6 +1328,41 @@ export async function runV5MessageRuntimeStage1(
 			plannerContext,
 			plannerDecisionEvent,
 		);
+		// The evaluator reads the same composed state without the providers its
+		// template never uses; rendering only, the providers were run once above.
+		// Everything else the planner composition carries (the loaded context
+		// catalog, discovery and history-reference metadata, the completion
+		// context) reaches the evaluator too: a reference the planner loaded
+		// must not read as still pending at evaluation time.
+		const evaluatorContext = await createV5MessageContextObject({
+			...args,
+			includeContextCatalog: contextCatalogRead,
+			state: plannerState,
+			selectedContexts,
+			includeTools: true,
+			userRoles: [senderRole],
+			availableContexts,
+			preselectedActions: exposedPlannerActions,
+			actionSurface,
+			ambientTurn,
+			extraProviderExclusions: [
+				...ambientTurnProviderExclusions(args.runtime, args.message),
+				...EVALUATOR_STAGE_PROVIDER_EXCLUSIONS,
+			],
+		});
+		evaluatorContext.metadata = {
+			...evaluatorContext.metadata,
+			providerDiscoveryEnabled,
+			historyReferenceEncoding: providerDiscoveryEnabled,
+			loadedContextProviders,
+			...(messageHandler.plan.completionContext
+				? { completionContext: { ...messageHandler.plan.completionContext } }
+				: {}),
+		};
+		const evaluatorContextWithDecision = appendContextEvent(
+			evaluatorContext,
+			plannerDecisionEvent,
+		);
 		const runtimeWithOptionalServices = args.runtime as typeof args.runtime & {
 			getService?: (service: string) => unknown;
 		};
@@ -1326,7 +1421,6 @@ export async function runV5MessageRuntimeStage1(
 			undefined,
 			{
 				canonicalFamilies: true,
-				candidateActions: getMessageHandlerCandidateActions(messageHandler),
 			},
 		);
 		let budgetedPlannerContextWithDecision = plannerContextWithDecision;
@@ -1361,6 +1455,10 @@ export async function runV5MessageRuntimeStage1(
 			const parentNames = new Set(
 				actionSurface.summary.tierAParents.map(normalizeActionIdentifier),
 			);
+			// Discovery is planner protocol, not a capability family (it is not a
+			// tier-A parent); the collapsed surface must still be able to load
+			// the children it just set aside.
+			parentNames.add(normalizeActionIdentifier(DISCOVER_TOOLS_NAME));
 			const actionLookup = buildRuntimeActionLookup({
 				actions: exposedPlannerActions,
 			});
@@ -1476,9 +1574,20 @@ export async function runV5MessageRuntimeStage1(
 			// exposed and runnable.
 			if (exposedActionMatches(plannerToolActions, normalized)) return true;
 			const resolved = resolveRuntimeAction(stageOneActionLookup, name);
+			if (resolved === undefined) return false;
+			if (plannerToolNames.has(normalizeActionIdentifier(resolved.name))) {
+				return true;
+			}
+			// The canonical surface represents a promoted alias through its
+			// umbrella's alias contract instead of a second native tool
+			// (collectCanonicalPlannerActions), so a Stage-1 hint naming
+			// CALENDAR_UPDATE_EVENT still names an exposed, runnable operation while
+			// CALENDAR is on the wire. Reading it as unresolvable would silently drop
+			// hard-tool enforcement for exactly the turns Stage 1 routed precisely.
+			const umbrella = promotedSubactionParent(resolved);
 			return (
-				resolved !== undefined &&
-				plannerToolNames.has(normalizeActionIdentifier(resolved.name))
+				umbrella !== undefined &&
+				plannerToolNames.has(normalizeActionIdentifier(umbrella))
 			);
 		};
 		const stageOneNamedAToolForThisTurn =
@@ -1852,6 +1961,7 @@ export async function runV5MessageRuntimeStage1(
 				runPlannerLoop({
 					runtime: plannerRuntime,
 					context: loopContext,
+					evaluatorContext: evaluatorContextWithDecision,
 					codingMode: args.codingMode === true,
 					config: args.plannerLoopConfig,
 					tools: plannerTools.length > 0 ? plannerTools : undefined,
@@ -1997,6 +2107,7 @@ export async function runV5MessageRuntimeStage1(
 						invokeDeterministicToolCall,
 					)
 				: await invokePlannerLoop(plannerContextAfterEarlyReply);
+			releaseFactsStage?.(settledPlannerToolResults);
 			getStreamingContext()?.abortSignal?.throwIfAborted();
 		} catch (error) {
 			// Cancellation belongs to the interrupted-turn boundary, even after preliminary delivery.
@@ -2256,6 +2367,8 @@ export async function runV5MessageRuntimeStage1(
 		endStatus = isProviderContextOverflowFailure(err) ? "finished" : "errored";
 		throw err;
 	} finally {
+		// A turn that never reached the planner still runs the stage as before.
+		releaseFactsStage?.([]);
 		// Trajectory persistence is diagnostic work. Preserve stage ordering in
 		// its own task without adding filesystem latency to the user-visible turn.
 		const finalizeTrajectory = async (waitForFacts: boolean) => {

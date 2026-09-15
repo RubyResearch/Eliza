@@ -685,6 +685,21 @@ export const navigationReplyPolicy = `navigation_reply:
 
 export const NAVIGATION_REPLY_POLICY = navigationReplyPolicy;
 
+// Stage-1 routing prose. Each section below (Routing, Reply, crisis rule,
+// instruction/secret boundaries, Domain routing, Extraction) states a rule once
+// with at most a couple of examples; the incident narratives that used to
+// justify them live here, not in the prompt: ack-as-answer on the simple path
+// ("On it." with no planner run), fabricated investigative claims ("Scanning
+// the chat history now" with no tool), fake moderation excuses ("your request
+// was flagged"), personal-crisis tactical advice instead of deferral,
+// credential disclosure under framing games, and "as of my training data" /
+// "I don't have live access to the date" leaks. Rules restated by the
+// registered field docs (`replyText` / `contexts` descriptions: refusal-opening
+// ban, ack contract) are kept there, not duplicated here. The template names
+// only the registered flat fields (contexts, intents, candidateActionNames,
+// facts, relationships, addressedTo); retired `requiresTool` /
+// `parentActionHints` / `contextSlices` are derived by the runtime and the old
+// nested `extract` is the flat facts / relationships / addressedTo trio.
 export const messageHandlerTemplate = `task: {{#if directMessage}}Plan this direct message{{else}}Decide shouldRespond + plan{{/if}}.
 
 available_contexts:
@@ -705,7 +720,7 @@ Routing:
 - Requests for current contents or status of tracked tasks/goals/todos/routines/reminders, Notes, Calendar and day/week records require live record reads. For what was literally said, supplied original prior_message/reply_reference/authorized verified_cross_room_message evidence suffices, including exact quotes. Apply later corrections, keep people distinct, and never invent missing details/provenance or expose private attachment URLs. Retrieve missing evidence, requested metadata, explicit searches and exhaustive stored-history coverage as current_turn_boundary requires; respect restrictions on lookup. Describe the supplied scope unless exhaustive coverage is established. Reading supplied text is not a search.
 - Inspecting a visible ATTACHMENTS item, including "this/that/it", requires ATTACHMENT in media/messaging or another applicable non-simple context. A general question about reading files does not request attachment inspection.
 - Explicit remember/save/note/keep-in-mind/forget directives require the matching MEMORY_CREATE/UPDATE/DELETE/SEARCH operation when available; add settings only for configuration/persona/style/future-behavior changes. Mere personal assertions may answer simply and feed normal post-turn extraction. Do not duplicate facts/relationships owned by an explicit memory mutation, especially deletion; independent new assertions still qualify.
-- Clarify directly with simple context and no future action hints only when no independent work or useful lookup can proceed. Preserve work that can proceed. Prohibited, cancelled and hypothetical actions are not requests to execute; cancelling an unexecuted conversational intention differs from cancelling a persisted record/job.
+- Clarify directly with simple context and no future action hints only when no independent work or useful lookup can proceed. Preserve work that can proceed. A directive whose details the user already stated (a calendar, reminder, todo or memory change with its date, time or value given) proceeds to its context; do not ask to confirm a value the user just gave. Prohibited, cancelled and hypothetical actions are not requests to execute; cancelling an unexecuted conversational intention differs from cancelling a persisted record/job.
 
 Reply:
 - Use only registered schema fields. A simple reply is the complete nonempty answer: no internal plan, placeholder, promised lookup or claimed investigation. No planner follows it. For tools, give a brief natural acknowledgment, not a premature completion or refusal; navigation-only uses the held confirmation above. Only long-running asynchronous handoffs send an early acknowledgment; synchronous work delivers its grounded result.

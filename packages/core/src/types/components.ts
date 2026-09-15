@@ -660,6 +660,22 @@ export interface Action {
 	/** Child tool/action names or inline definitions exposed beneath this action. */
 	subActions?: Array<string | Action>;
 
+	/**
+	 * Deterministic dispatch for a call to this umbrella that omits its
+	 * discriminator. Returns the name of one promoted child in `subActions`
+	 * when `params` can only mean that sub-action, otherwise `undefined`. The
+	 * planner executor consults it before delegating such a call to the
+	 * sub-planner, a second planner model call over the child tools (live
+	 * 2026-09-14: `MEMORY {text, kind, tags}` with no `action` took 4.5 s
+	 * instead of ~2 s). Must be pure and synchronous, return `undefined` on
+	 * any ambiguity, and never name a destructive sub-action without the
+	 * call's own confirmation argument; the umbrella's handler still enforces
+	 * its per-operation contract on the pinned call.
+	 */
+	inferSubaction?: (
+		params: Readonly<Record<string, unknown>>,
+	) => string | undefined;
+
 	/** Whether this action should delegate selection to a sub-planner. */
 	subPlanner?: boolean | { name?: string; description?: string };
 

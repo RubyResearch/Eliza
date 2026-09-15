@@ -187,6 +187,24 @@ function requestedLimit(value: number | undefined): number | undefined {
 	return value === undefined ? undefined : Math.max(1, Math.floor(value));
 }
 
+/**
+ * A "recent" read (the default range) with no limit is a page of the most
+ * recent messages, not the whole channel: with no limit the Discord connector
+ * paged through the entire history and ran every historical attachment
+ * through the vision and transcription models (live 2026-09-15, "read the
+ * last 3 messages in #general": a 5-minute turn, dozens of provider calls).
+ * A dated range or an explicit limit is honored as requested.
+ */
+export const DEFAULT_RECENT_READ_LIMIT = 20;
+
+export function recentReadLimit(
+	range: string | undefined,
+	limit: number | undefined,
+): number | undefined {
+	if (limit !== undefined) return limit;
+	return range === "dates" ? undefined : DEFAULT_RECENT_READ_LIMIT;
+}
+
 function normalizeComparable(value: unknown): string {
 	return String(value ?? "")
 		.trim()
@@ -578,7 +596,40 @@ function buildQueryContext(
 	};
 }
 
-function selectConnectorForOp(
+/**
+ * A connector service registers a legacy source-level route beside one route
+ * per account (plugin-discord service.ts: registerConnector(undefined) then
+ * registerConnector(accountId)). With a single account that is two connectors
+ * aliasing "discord", and a turn that names no account — the owner API room
+ * carries no connector envelope — has nothing to disambiguate (live
+ * 2026-09-14: "read the last 3 messages in #general" failed as
+ * SOURCE_AMBIGUOUS, then fell back to the local room table once the
+ * connector count was not 1). Only distinct sources or accounts are
+ * ambiguous; the account-scoped route stands for the family.
+ */
+export function soleConnectorFamily(
+	connectors: readonly ConnectorWithHooks[],
+): ConnectorWithHooks | undefined {
+	if (connectors.length === 0) return undefined;
+	if (connectors.length === 1) return connectors[0];
+	const sources = new Set(
+		connectors.map((connector) => normalizeComparable(connector.source)),
+	);
+	const accountIds = new Set(
+		connectors.flatMap((connector) =>
+			connectorAccountIds(connector).map(normalizeComparable),
+		),
+	);
+	if (sources.size !== 1 || accountIds.size > 1) return undefined;
+	return (
+		connectors.find((connector) => connectorAccountIds(connector).length > 0) ??
+		connectors[0]
+	);
+}
+
+// Exported for unit-test coverage of the account-resolution rules; not part
+// of the public runtime surface.
+export function selectConnectorForOp(
 	connectors: ConnectorWithHooks[],
 	source: string | undefined,
 	currentSource: string | undefined,
@@ -602,7 +653,9 @@ function selectConnectorForOp(
 			)
 		: [];
 	const explicitMatches = selectAccountConnectors(sourceMatches, accountId);
-	if (source && explicitMatches.length > 1) {
+	const sole = soleConnectorFamily(explicitMatches);
+	const resolvedMatches = sole ? [sole] : explicitMatches;
+	if (source && resolvedMatches.length > 1) {
 		return {
 			error: opFailure(
 				op,
@@ -611,7 +664,7 @@ function selectConnectorForOp(
 			),
 		};
 	}
-	const explicit = explicitMatches[0];
+	const explicit = resolvedMatches[0];
 	const sourceExists = sourceMatches.length > 0;
 	if (source && !explicit) {
 		return {
@@ -3616,7 +3669,14 @@ async function fetchRecentMessagesFromConnector(
 	return memories;
 }
 
-async function resolveLocalChannelRoom(
+/**
+ * The stored room a channel name denotes. An exact name beats a substring
+ * match and a text channel beats a voice channel: the Discord test server
+ * has a text channel "general" and a voice channel "General", and the first
+ * room in participant order was the voice one, so "read the last 3 messages
+ * in #general" read 0 messages from an empty room (live 2026-09-15).
+ */
+export async function resolveLocalChannelRoom(
 	runtime: IAgentRuntime,
 	source: string | undefined,
 	channel: string,
@@ -3629,18 +3689,40 @@ async function resolveLocalChannelRoom(
 	const rooms = await Promise.all(
 		agentRooms.map((roomId) => runtime.getRoom(roomId)),
 	);
-	const channelLower = channel.toLowerCase();
-	for (const room of rooms) {
-		if (!room) continue;
-		const roomRecord = room as Room & { name?: string; source?: string };
+	return rankLocalChannelRooms(rooms, source, channel)[0] ?? null;
+}
+
+const VOICE_ROOM_TYPES = new Set<string>([
+	ChannelType.VOICE_GROUP,
+	ChannelType.VOICE_DM,
+]);
+
+export function rankLocalChannelRooms(
+	rooms: ReadonlyArray<Room | null | undefined>,
+	source: string | undefined,
+	channel: string,
+): Room[] {
+	const channelLower = channel.trim().toLowerCase().replace(/^#/, "");
+	const sourceLower = source?.toLowerCase();
+	const ranked: Array<{ room: Room; rank: number; index: number }> = [];
+	rooms.forEach((room, index) => {
+		if (!room) return;
+		const roomRecord = room as Room & {
+			name?: string;
+			source?: string;
+			type?: string;
+		};
 		const name = (roomRecord.name ?? "").toLowerCase();
 		const roomSource = (roomRecord.source ?? "").toLowerCase();
-		if (name === channelLower || name.includes(channelLower)) {
-			if (source && roomSource !== source.toLowerCase()) continue;
-			return room;
-		}
-	}
-	return null;
+		if (sourceLower && roomSource !== sourceLower) return;
+		const exact = name === channelLower;
+		if (!exact && !name.includes(channelLower)) return;
+		const voice = VOICE_ROOM_TYPES.has(String(roomRecord.type ?? ""));
+		ranked.push({ room, rank: (exact ? 0 : 2) + (voice ? 1 : 0), index });
+	});
+	return ranked
+		.sort((a, b) => a.rank - b.rank || a.index - b.index)
+		.map((entry) => entry.room);
 }
 
 async function handleReadChannel(
@@ -3660,8 +3742,11 @@ async function handleReadChannel(
 	const source = sourceFromParams(params, message);
 	const accountId = accountIdFromParams(params, message);
 	const channel = textParam(params.channel) ?? textParam(params.target);
-	const limit = requestedLimit(numberParam(params.limit));
 	const range = textParam(params.range);
+	const limit = recentReadLimit(
+		range,
+		requestedLimit(numberParam(params.limit)),
+	);
 
 	// Prefer in-process connector fetchMessages when available.
 	const hookConnectors = connectors.filter(
@@ -3681,9 +3766,7 @@ async function handleReadChannel(
 	const selectedConnector =
 		selectedResult && "connector" in selectedResult
 			? selectedResult.connector
-			: hookConnectors.length === 1
-				? hookConnectors[0]
-				: undefined;
+			: soleConnectorFamily(hookConnectors);
 
 	if (selectedConnector?.fetchMessages) {
 		const resolved = await resolveOptionalTarget(

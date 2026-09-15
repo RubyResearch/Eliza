@@ -15,6 +15,7 @@ import {
 } from "./planned-tool";
 import {
 	appendDiscoveredPlannerTools,
+	collectDiscoveryCatalogActions,
 	createPlannerToolDiscoveryAction,
 } from "./tool-discovery";
 
@@ -447,6 +448,14 @@ describe("planner tool discovery", () => {
 			loaded = selected;
 		});
 		expect(discovery.description).not.toContain("DENIED_CHILD");
+		// Names and children only: one index entry per family (a parent without
+		// children maps to an empty list), never the catalog objects with their
+		// descriptions.
+		const index = JSON.parse(discovery.description.split("\n").at(-1) ?? "");
+		expect(index.VIEWS).toEqual([]);
+		expect(index.CALENDAR).toEqual(["EVENTS"]);
+		expect(discovery.description).not.toContain('{"name"');
+		expect(discovery.description).not.toContain("FINAL_DETAIL");
 		const result = await discovery.handler?.(runtime, message, undefined, {
 			parameters: { names: ["CALENDAR"] },
 		});
@@ -560,9 +569,50 @@ describe("planner tool discovery", () => {
 				parameters: { names },
 			});
 			expect(result?.success).toBe(false);
+			expect(result?.data).toMatchObject({ coachingFailure: true });
+			expect(result?.error).toContain("No tools were loaded");
 			expect(loaded).toBe(false);
 		},
 	);
+
+	it("lists a family gated only by context under its own declared contexts and keeps the private and role gates (live: MESSAGE on a general-routed turn)", async () => {
+		const actions: Action[] = [
+			{ name: "MESSAGE", description: "Messaging", contexts: ["messaging"] },
+			{ name: "VIEWS", description: "Navigate", contexts: ["general"] },
+			{
+				name: "PRIVATE_X",
+				description: "Autonomy only",
+				contexts: ["general"],
+				private: true,
+			},
+			{
+				name: "OWNER_X",
+				description: "Owner only",
+				contexts: ["general"],
+				roleGate: { minRole: "OWNER" },
+			},
+		] as Action[];
+		const catalog = collectDiscoveryCatalogActions({
+			actions,
+			message,
+			selectedContexts: ["general"],
+			userRoles: ["ADMIN"],
+		});
+		expect(catalog.map((action) => action.name)).toEqual(["MESSAGE", "VIEWS"]);
+		let loaded: string[] = [];
+		const discovery = createPlannerToolDiscoveryAction(catalog, (found) => {
+			loaded = found.map((action) => action.name);
+		});
+		const index = JSON.parse(discovery.description.split("\n").at(-1) ?? "");
+		expect(Object.keys(index).sort()).toEqual(["MESSAGE", "VIEWS"]);
+		expect(discovery.description).not.toContain("PRIVATE_X");
+		expect(discovery.description).not.toContain("OWNER_X");
+		const result = await discovery.handler?.(runtime, message, undefined, {
+			parameters: { names: ["MESSAGE"] },
+		});
+		expect(result?.success).toBe(true);
+		expect(loaded).toEqual(["MESSAGE"]);
+	});
 
 	it("returns admitted exact retry names without loading a partial or rejected request", async () => {
 		const loads: Action[][] = [];

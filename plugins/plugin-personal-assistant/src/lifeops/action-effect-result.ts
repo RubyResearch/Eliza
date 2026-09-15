@@ -130,6 +130,13 @@ export async function completeLifeOpsEffect(
   }
   const canonical: ActionResult = {
     ...result,
+    // The exact sentence below IS the transcript: a handler's "internal"
+    // marker (meant for its machine-facing result text) must not carry over,
+    // or the reply policy binds the internal marker to the selected reply and
+    // delivery drops it. (The 2026-09-14 API-room transcript gap had a
+    // different cause: compat routes never persisted callback-delivered
+    // replies; see persistUnpersistedChatReply in @elizaos/agent.)
+    transcriptVisibility: undefined,
     text,
     userFacingText: text,
     verifiedUserFacing: true,

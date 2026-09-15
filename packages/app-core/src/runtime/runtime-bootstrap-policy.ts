@@ -48,6 +48,17 @@ export function resolveRuntimeBootstrapFailure(params: {
   state: "error" | "starting";
 } {
   const lastError = getRuntimeBootErrorMessage(params.err);
+  // A blocked destructive migration cannot succeed on retry: the schema on
+  // disk is older than the database. Retrying for five minutes hid the real
+  // cause behind "Runtime bootstrap failed" (live 2026-09-12, ~12 min outage).
+  if (/Destructive migration blocked/i.test(lastError)) {
+    return {
+      lastError,
+      phase: "runtime-error",
+      shouldRetry: false,
+      state: "error",
+    };
+  }
   if (
     typeof params.err === "object" &&
     params.err !== null &&

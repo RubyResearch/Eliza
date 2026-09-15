@@ -156,6 +156,9 @@ export async function recordFactsAndRelationshipsStage(args: {
 				kept,
 				written,
 				thought,
+				...(result?.skipReason
+					? { llmCallSkipped: true, reason: result.skipReason }
+					: {}),
 			},
 		});
 	} catch (err) {

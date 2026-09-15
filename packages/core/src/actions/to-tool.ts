@@ -378,8 +378,9 @@ export interface BuildPlannerToolsFromTieredActionsOptions {
 	/**
 	 * Expand registered child actions into first-class native tools. Defaults to
 	 * true. A caller may disable expansion only when it still exposes every
-	 * authorized umbrella parent and keeps explicit turn candidates direct; the
-	 * parent schema remains the lossless dispatch surface for its children.
+	 * authorized umbrella parent and keeps independently implemented children
+	 * direct; the parent schema plus its alias contracts remain the lossless
+	 * dispatch surface for its promoted children.
 	 */
 	expandSubActions?: boolean;
 }

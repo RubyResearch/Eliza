@@ -8,7 +8,10 @@
  */
 export async function probeApiHealthWithConfirmation(
   port,
-  { timeoutMs = 1500, confirmationTimeoutMs = 10_000, ...options } = {},
+  // The supervisor's loop also pipes the child's log stream, and on a loaded
+  // box a 30 ms endpoint measured 3–6 s (audit 2026-09-13); three such probes
+  // restarted a healthy runtime. Budget for the probe, not the endpoint.
+  { timeoutMs = 4000, confirmationTimeoutMs = 20_000, ...options } = {},
 ) {
   const initial = await probeApiHealth(port, { ...options, timeoutMs });
   if (initial.reason !== "timeout") return initial;
@@ -25,7 +28,7 @@ export async function probeApiHealthWithConfirmation(
 
 export async function probeApiHealth(
   port,
-  { fetchImpl = fetch, timeoutMs = 1500, now = () => performance.now() } = {},
+  { fetchImpl = fetch, timeoutMs = 4000, now = () => performance.now() } = {},
 ) {
   const startedAt = now();
   const signal = AbortSignal.timeout(timeoutMs);

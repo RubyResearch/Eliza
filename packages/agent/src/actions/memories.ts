@@ -29,6 +29,7 @@ import {
   ModelType,
   readStoredFactKeywords,
   toWellFormedUnicode,
+  unwrapUserMessageText,
   validateUuid,
 } from "@elizaos/core";
 
@@ -159,6 +160,70 @@ const SEARCH_QUERY_STOP_WORDS = new Set([
   "called",
 ]);
 
+/**
+ * A stored fact in the user's terms: whitespace-collapsed, possessives
+ * rewritten to second person. Only possessives are rewritten ("user's" / "my"
+ * → "your"); subject rewrites would need verb agreement ("the user prefers" →
+ * "you prefer") and are left as-is, so a first-person "I" keeps its capital.
+ */
+function spokenMemoryText(factText: string): string {
+  return toWellFormedUnicode(factText)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:the )?user'?s\b/i, "your")
+    .replace(/\bthe user'?s\b/gi, "your")
+    .replace(/^my\b/i, "your");
+}
+
+/**
+ * A sentence the user can see verbatim for a completed memory mutation. Stored
+ * facts are third person ("User's favorite tea is yerba."); the reply speaks to
+ * the user. With `verifiedUserFacing` + `turnComplete` the planner loop skips
+ * its post-tool evaluator round (1.3–2.5 s, ~15K tokens on the VPS) for a
+ * single-tool turn and delivers this line as the reply.
+ */
+export function memoryUserFacingLine(verb: string, factText: string): string {
+  const spoken = spokenMemoryText(factText);
+  const body =
+    spoken && !/^I\b/.test(spoken)
+      ? spoken.charAt(0).toLowerCase() + spoken.slice(1)
+      : spoken;
+  const terminated = /[.!?]$/.test(body) ? body : `${body}.`;
+  return body ? `${verb}: ${terminated}` : `${verb}.`;
+}
+
+/** Longest candidate excerpt quoted in an ambiguous-query question. */
+const AMBIGUOUS_MEMORY_EXCERPT_CHARS = 160;
+
+/**
+ * The user-facing half of an ambiguous-query refusal: the candidate TEXTS in
+ * the user's terms, never record ids. `text` keeps the id list for the planner
+ * (which resolves the choice by memoryId); this question is what the planner
+ * loop may relay verbatim when the planner cannot resolve it and keeps
+ * re-sending the same query (live 2026-09-13 tj-f1579f952d5d21: the
+ * repeated-failure limit ended that turn with a generic apology).
+ */
+export function ambiguousMemoryUserFacingText(
+  verb: "forget" | "update",
+  candidates: readonly Pick<MemoryListItem, "text">[],
+): string {
+  const distinct = [
+    ...new Set(candidates.map((item) => spokenMemoryText(item.text))),
+  ].filter((text) => text.length > 0);
+  const listed = distinct
+    .map((text) =>
+      text.length > AMBIGUOUS_MEMORY_EXCERPT_CHARS
+        ? `"${text.slice(0, AMBIGUOUS_MEMORY_EXCERPT_CHARS - 1)}…"`
+        : `"${text}"`,
+    )
+    .join("; ");
+  const count =
+    distinct.length === 1
+      ? "one saved memory"
+      : `${distinct.length} saved memories`;
+  return `That matches ${count}: ${listed}. Which one should I ${verb}?`;
+}
+
 function fail(
   text: string,
   error: string,
@@ -211,6 +276,56 @@ function adoptUuidQueryAsMemoryId(params: MemoryParams): MemoryParams {
 function normalizeMemoryOp(params: MemoryParams): MemoryOp | undefined {
   const candidate = params.action ?? params.subaction ?? params.op;
   return candidate && MEMORY_OPS.includes(candidate) ? candidate : undefined;
+}
+
+/** Planner spellings of "no memoryId"; the schema strips them before the handler. */
+const MEMORY_ID_OMISSION_SENTINELS = ["", "null", "undefined"] as const;
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Structural dispatch for a MEMORY call that omitted `action`, consulted by
+ * the planner executor before it delegates the umbrella to the sub-planner
+ * (live 2026-09-14 tj-22eb87cbbbfac0: "remember that my favorite tea is
+ * yerba" → `MEMORY {text, kind, tags}` → a second planner model call before
+ * create ran). Names the promoted child only when the arguments can mean one
+ * operation under this action's own contract: a legacy discriminator
+ * (`op`/`subaction`, which this description's `op:create` wording invites) is
+ * honored as declared; otherwise text without a target is a create, a target
+ * with replacement text an update, a target with confirm a delete, and a bare
+ * query a search. Anything else — including a target with neither text nor
+ * confirm, which may be a delete the planner forgot to confirm — returns
+ * undefined and keeps the sub-planner. A delete is never named without
+ * `confirm: true`, however the operation was spelled.
+ */
+export function inferMemorySubaction(
+  params: Readonly<Record<string, unknown>>,
+): string | undefined {
+  const text = hasNonEmptyString(params.text);
+  const memoryId =
+    hasNonEmptyString(params.memoryId) &&
+    !(MEMORY_ID_OMISSION_SENTINELS as readonly string[]).includes(
+      params.memoryId.trim().toLowerCase(),
+    );
+  const query = hasNonEmptyString(params.query);
+  const confirm = params.confirm === true;
+  let op = normalizeMemoryOp(params as MemoryParams);
+  if (!op) {
+    const target = memoryId || query;
+    if (text && !target) {
+      op = "create";
+    } else if (target && text) {
+      op = "update";
+    } else if (target && confirm) {
+      op = "delete";
+    } else if (query && !memoryId && !confirm) {
+      op = "search";
+    }
+  }
+  if (!op || (op === "delete" && !confirm)) return undefined;
+  return `MEMORY_${op.toUpperCase()}`;
 }
 
 /**
@@ -474,6 +589,9 @@ async function upgradeStageFact(
     success: true,
     transcriptVisibility: "internal",
     text: `Stored memory ${stageFact.id}.`,
+    userFacingText: memoryUserFacingLine("Saved", next.text),
+    verifiedUserFacing: true,
+    turnComplete: true,
     values: {
       memoryId: stageFact.id,
       kind: next.kind ?? null,
@@ -526,12 +644,26 @@ async function doCreate(
       "[MEMORY] create arrived with the content in `query`; storing it as text",
     );
   }
-  const text = explicitText || queryAsText;
+  const impliedText =
+    !explicitText && !queryAsText
+      ? impliedCreateTextFromMessage(runtime, message)
+      : undefined;
+  const text = explicitText || queryAsText || impliedText || "";
   if (!text) {
-    return fail(
-      'text is required for create: put the content to remember in the "text" argument (query is only for search, update and delete lookups).',
-      "MEMORY_MISSING_TEXT",
-    );
+    // Nothing was stored, so the loop may relay this question when the
+    // planner keeps omitting the content (live 2026-09-14: three identical
+    // MEMORY creates without text ended in "I hit a snag").
+    return {
+      ...fail(
+        'text is required for create: put the content to remember in the "text" argument (query is only for search, update and delete lookups).',
+        "MEMORY_MISSING_TEXT",
+      ),
+      userFacingText: "What would you like me to remember?",
+      data: {
+        error: "MEMORY_MISSING_TEXT",
+        readOnlyOperation: true,
+      },
+    };
   }
 
   const kind =
@@ -594,6 +726,9 @@ async function doCreate(
     success: true,
     transcriptVisibility: "internal",
     text: `Stored memory ${memoryId}.`,
+    userFacingText: memoryUserFacingLine("Saved", text),
+    verifiedUserFacing: true,
+    turnComplete: true,
     values: { memoryId, kind: kind ?? null, tagCount: tags.length },
     effectReceipts: [
       memoryMutationReceipt({
@@ -632,6 +767,8 @@ interface CandidateScan {
 
 const COMPLETE_MEMORY_PAGE_SIZE = 10_000;
 export const MAX_MEMORY_PAGE_ITEMS = 50;
+/** Page size when an unbounded search exceeds MAX_MEMORY_PAGE_ITEMS. */
+const DEFAULT_MEMORY_PAGE_ITEMS = 20;
 export const MAX_MEMORY_ACTION_RESULT_CHARS = 256 * 1024;
 
 function traversalError(
@@ -1041,22 +1178,19 @@ async function doSearch(
       },
     );
   }
-  if (limit === undefined && totalMatches > MAX_MEMORY_PAGE_ITEMS) {
-    return fail(
-      `The complete search has ${totalMatches} matches, which exceeds the maximum safe result size of ${MAX_MEMORY_PAGE_ITEMS} records. Retry with limit at most ${MAX_MEMORY_PAGE_ITEMS}. If narrowing the query, author or other filters, start at offset 0 without snapshot; the snapshot below belongs only to the current filters.`,
-      "MEMORY_SEARCH_REQUIRES_PAGINATION",
-      {
-        totalMatches,
-        maxLimit: MAX_MEMORY_PAGE_ITEMS,
-        suggestedLimit: Math.min(20, MAX_MEMORY_PAGE_ITEMS),
-        snapshot,
-      },
-    );
-  }
+  // Candidates are ranked by relevance, so an unbounded search over a large
+  // store answers with its best page rather than a refusal that costs the
+  // planner another round (live 2026-09-14: "favorite tea" matched 406 rows).
+  const autoPaged = limit === undefined && totalMatches > MAX_MEMORY_PAGE_ITEMS;
+  const pageLimit = autoPaged
+    ? Math.min(DEFAULT_MEMORY_PAGE_ITEMS, MAX_MEMORY_PAGE_ITEMS)
+    : limit;
   const items =
-    limit === undefined ? allItems : allItems.slice(offset, offset + limit);
+    pageLimit === undefined
+      ? allItems
+      : allItems.slice(offset, offset + pageLimit);
   const nextOffset =
-    limit !== undefined && offset + items.length < totalMatches
+    pageLimit !== undefined && offset + items.length < totalMatches
       ? offset + items.length
       : undefined;
   // The trusted planner consumes structured results, so keep source bodies in
@@ -1090,14 +1224,16 @@ async function doSearch(
           `- [${m.type}${m.evidenceStatus === "inactive" ? "; INACTIVE source evidence: historical record, not a current fact" : ""}] ${m.id} at ${new Date(m.createdAt).toISOString()}${m.type === "messages" ? ` [author=${authorRole(m.entityId)}; entityId=${m.entityId}]` : ""}: ${toWellFormedUnicode(m.text)}`,
       );
   const renderNote =
-    limit === undefined
+    pageLimit === undefined
       ? `Showing all ${items.length} match(es) found in the complete scan`
-      : `Showing ${items.length} match(es) at offset ${offset} of ${totalMatches} found in the complete scan`;
+      : autoPaged
+        ? `Showing the ${items.length} best-ranked match(es) of ${totalMatches} found in the complete scan (more than ${MAX_MEMORY_PAGE_ITEMS} matched, so the list is ranked by relevance; if narrowing the query, author or other filters, start at offset 0 without snapshot, since the snapshot below belongs only to the current filters)`
+        : `Showing ${items.length} match(es) at offset ${offset} of ${totalMatches} found in the complete scan`;
   const continuationNote =
     nextOffset === undefined
       ? []
       : [
-          `More matches remain. To continue losslessly, call MEMORY_SEARCH with the same filters, limit=${limit}, offset=${nextOffset}, snapshot=${snapshot}.`,
+          `More matches remain. To continue losslessly, call MEMORY_SEARCH with the same filters, limit=${pageLimit}, offset=${nextOffset}, snapshot=${snapshot}.`,
         ];
 
   const result: ActionResult = {
@@ -1148,7 +1284,7 @@ async function doSearch(
   };
   const serializedChars = JSON.stringify(result).length;
   if (serializedChars > MAX_MEMORY_ACTION_RESULT_CHARS) {
-    if (limit === undefined) {
+    if (pageLimit === undefined) {
       return fail(
         `The complete search result requires ${serializedChars} characters, exceeding the safe action-result budget of ${MAX_MEMORY_ACTION_RESULT_CHARS}. Retry with an explicit page limit.`,
         "MEMORY_SEARCH_REQUIRES_PAGINATION",
@@ -1185,7 +1321,7 @@ async function doSearch(
       `The requested page requires ${serializedChars} action-result characters, exceeding the safe budget of ${MAX_MEMORY_ACTION_RESULT_CHARS}. Retry with limit=${suggestedLimit}.`,
       "MEMORY_PAGE_RESULT_TOO_LARGE",
       {
-        requestedLimit: limit,
+        requestedLimit: pageLimit,
         suggestedLimit,
         renderedChars: serializedChars,
         maxResultChars: MAX_MEMORY_ACTION_RESULT_CHARS,
@@ -1204,8 +1340,18 @@ async function doUpdate(
   const memoryParam = parseUuidParam(params.memoryId, "memoryId");
   if (!memoryParam.ok) return memoryParam.result;
   const memoryId = memoryParam.id;
-  const query = params.query?.trim();
+  const explicitQuery = params.query?.trim();
   const text = typeof params.text === "string" ? params.text.trim() : "";
+  // A target-less update carrying replacement text is how the planner phrases
+  // "remember that …" when it guesses a prior fact exists (live 2026-09-14:
+  // three sub-planner rounds before it fell back to create). Resolve the
+  // target from the user's own words; with no prior match the request is a
+  // create and is stored as one.
+  const impliedQuery =
+    !memoryId && !explicitQuery
+      ? mutationQueryFromMessage(runtime, message)
+      : undefined;
+  const query = explicitQuery || impliedQuery;
   if (!memoryId && !query) {
     return fail(MEMORY_MISSING_TARGET_MESSAGE, "MEMORY_MISSING_ID");
   }
@@ -1249,6 +1395,19 @@ async function doUpdate(
         (candidate.memory.content as { text?: string } | undefined)?.text ?? "";
       return scoreText(candidateText, query ?? "") >= 1;
     });
+    if (matched.length === 0 && impliedQuery !== undefined) {
+      const created = await doCreate(runtime, message, params);
+      if (!created.success) return created;
+      return {
+        ...created,
+        text: `No stored memory matched the user's words ("${impliedQuery}"), so this is new information; stored it. ${created.text ?? ""}`.trim(),
+        data: {
+          ...(created.data ?? {}),
+          updateFallback: "created",
+          impliedQuery,
+        },
+      };
+    }
     if (matched.length === 0) {
       return fail(
         `No prior stored memory matches "${query}". ${describeCompleteScan(scan)} Search saved facts for the subject, then update the existing records by id. An observation extracted from this update request is not an existing target.`,
@@ -1279,7 +1438,15 @@ async function doUpdate(
           `Query "${query}" matches ${distinctTexts.size} distinct memories. Review all candidates and update each record affected by the user's correction by memoryId, preserving unrelated facts in each replacement:`,
           ...lines,
         ].join("\n"),
-        data: { error: "MEMORY_AMBIGUOUS_QUERY", candidates },
+        userFacingText: ambiguousMemoryUserFacingText("update", candidates),
+        // Nothing was written: an ambiguous query is an observation, not a
+        // broken mutation, so it must not own the turn's terminal message
+        // once a later by-id update succeeds.
+        data: {
+          error: "MEMORY_AMBIGUOUS_QUERY",
+          candidates,
+          readOnlyOperation: true,
+        },
       };
     }
     existingMemories = matched.map((candidate) => candidate.memory);
@@ -1324,6 +1491,9 @@ async function doUpdate(
     success: true,
     transcriptVisibility: "internal",
     text: `Updated ${updatedIds.length} memory record(s).`,
+    userFacingText: memoryUserFacingLine("Updated", updatedText),
+    verifiedUserFacing: true,
+    turnComplete: true,
     values: { memoryId: primaryMemoryId, updatedCount: updatedIds.length },
     effectReceipts: updatedIds.map((id) =>
       memoryMutationReceipt({
@@ -1350,6 +1520,87 @@ async function doUpdate(
   };
 }
 
+/**
+ * The planner sometimes dispatches a forget with `confirm` alone ("forget my
+ * favorite tea" → `{"confirm": true}`, live 2026-09-11), which cost a failed
+ * step, an evaluator round and a second planner call (~3 s) before it quoted
+ * the message. The query contract is the user's own words from this message,
+ * so use them directly when the message carries content terms; the same
+ * every-term match and ambiguity refusal still guard the delete.
+ */
+const LEADING_ADDRESSING_PREFIX =
+  /^\s*(?:<@!?\d+>\s*|@\S+\s+|[^()\n]{0,80}\(@\d+\)\s*)/u;
+const MENTION_MARKER_PATTERN = /<@!?\d{6,}>|\(@\d{6,}\)/gu;
+
+const REMEMBER_REQUEST_PREFIX =
+  /^(?:(?:hey|hi|ok|okay|please)[\s,]+)*(?:please\s+)?(?:remember|note|keep in mind|save)\s+(?:this[:,]?\s+)?(?:that\s+)?/i;
+const SECOND_CLAUSE_PATTERN = /\b(?:and also|and then|also|but|then)\b|[?;]/i;
+
+/**
+ * The content of a single-clause "remember that X" request, for a create the
+ * planner sent without `text`. A message that carries a second request or a
+ * question is left to the planner; storing it whole would remember the
+ * question.
+ */
+function impliedCreateTextFromMessage(
+  runtime: IAgentRuntime,
+  message: Memory,
+): string | undefined {
+  const residual = mutationQueryFromMessage(runtime, message);
+  if (!residual) return undefined;
+  const content = residual.replace(REMEMBER_REQUEST_PREFIX, "").trim();
+  if (
+    !content ||
+    content === residual.trim() ||
+    content.length > 240 ||
+    SECOND_CLAUSE_PATTERN.test(content) ||
+    scoreQueryTerms(content).length < 2
+  ) {
+    return undefined;
+  }
+  logger.info(
+    "[MEMORY] create carried no text; storing the user's own statement",
+  );
+  return content.replace(/[.!\s]+$/, "");
+}
+
+function mutationQueryFromMessage(
+  runtime: IAgentRuntime,
+  message: Memory,
+): string | undefined {
+  // The user's actual words, not the external-content security envelope that
+  // wraps connector messages: the envelope's warning text matched nothing and
+  // turned a plain "forget my favorite tea" into a hard miss (live 2026-09-12).
+  // Drop platform mention tokens ("Eliza (@1490833…)" / "<@1490833…>"): they
+  // are addressing, not content, and their name and id would have to match
+  // the stored fact for the every-term rule (live 2026-09-12, harness room).
+  const raw = unwrapUserMessageText(message);
+  const addressed = MENTION_MARKER_PATTERN.test(raw);
+  MENTION_MARKER_PATTERN.lastIndex = 0;
+  let text = raw
+    .replace(LEADING_ADDRESSING_PREFIX, "")
+    .replace(MENTION_MARKER_PATTERN, " ");
+  if (addressed) {
+    // The agent's own name next to a mention marker is addressing too.
+    for (const word of (runtime.character?.name ?? "").split(/\s+/)) {
+      if (word.length >= 2)
+        text = text.replace(
+          new RegExp(
+            `\\b${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+            "gi",
+          ),
+          " ",
+        );
+    }
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text || scoreQueryTerms(text).length === 0) return undefined;
+  logger.info(
+    "[MEMORY] delete carried no query; using the user's message text",
+  );
+  return text;
+}
+
 async function doDelete(
   runtime: IAgentRuntime,
   message: Memory,
@@ -1358,7 +1609,8 @@ async function doDelete(
   const memoryParam = parseUuidParam(params.memoryId, "memoryId");
   if (!memoryParam.ok) return memoryParam.result;
   const memoryId = memoryParam.id;
-  const query = params.query?.trim();
+  const explicitQuery = params.query?.trim();
+  const query = explicitQuery || mutationQueryFromMessage(runtime, message);
   if (!memoryId && !query) {
     return fail(MEMORY_MISSING_TARGET_MESSAGE, "MEMORY_MISSING_ID");
   }
@@ -1382,6 +1634,9 @@ async function doDelete(
       success: true,
       transcriptVisibility: "internal",
       text: `Forgot memory ${memoryId}: ${toWellFormedUnicode(existing.content.text ?? "")}`,
+      userFacingText: memoryUserFacingLine("Forgot", forgottenText),
+      verifiedUserFacing: true,
+      turnComplete: true,
       values: { memoryId },
       effectReceipts: [
         memoryMutationReceipt({
@@ -1408,7 +1663,39 @@ async function doDelete(
   if (!query) {
     return fail(MEMORY_MISSING_TARGET_MESSAGE, "MEMORY_MISSING_ID");
   }
-  return doDeleteByQuery(runtime, message, params, query);
+  const result = await doDeleteByQuery(runtime, message, params, query);
+  // A planner-invented query ("favorite tea is matcha" for a stored genmaicha,
+  // live 2026-09-13) misses twice before the user's own words are tried; try
+  // them once here, under the same single-match rule, before reporting a miss.
+  if (
+    explicitQuery &&
+    !result.success &&
+    (result.data as { error?: unknown } | undefined)?.error ===
+      "MEMORY_NOT_FOUND"
+  ) {
+    const implied = mutationQueryFromMessage(runtime, message);
+    if (implied && implied.toLowerCase() !== explicitQuery.toLowerCase()) {
+      const retried = await doDeleteByQuery(runtime, message, params, implied);
+      if (retried.success) {
+        return {
+          ...retried,
+          data: { ...(retried.data ?? {}), retriedWithMessageText: true },
+        };
+      }
+    }
+    return result;
+  }
+  // A miss on the implied query is not evidence that nothing is stored; hand
+  // the planner the original ask for an explicit query instead of a verdict.
+  if (
+    !explicitQuery &&
+    !result.success &&
+    (result.data as { error?: unknown } | undefined)?.error ===
+      "MEMORY_NOT_FOUND"
+  ) {
+    return fail(MEMORY_MISSING_TARGET_MESSAGE, "MEMORY_MISSING_ID");
+  }
+  return result;
 }
 
 /**
@@ -1475,9 +1762,30 @@ async function doDeleteByQuery(
       .trim()
       .toLowerCase();
   const distinctTexts = new Set(matched.map(normalize));
+  // One durable fact plus the observation rows that shadow it (the facts
+  // stage's `current` rows for the same claim, including relationship echoes)
+  // is one memory to the user. Live 2026-09-13 "forget my favorite color"
+  // matched "The user's favorite color is teal." and the echo
+  // "user favorite_color teal"; the planner resent the same query and the
+  // turn died on the repeated-failure limit.
+  const factKindOf = (c: MemoryCandidate): "durable" | "current" | null => {
+    if (c.type !== "facts") return null;
+    const meta = metadataRecord(c.memory);
+    if (meta.kind === "current") return "current";
+    if (meta.kind === "durable") return "durable";
+    return meta.source === STAGE_FACT_SOURCE ? "current" : null;
+  };
+  const durableMatches = matched.filter((c) => factKindOf(c) === "durable");
+  const shadowsOfOneDurableFact =
+    durableMatches.length === 1 &&
+    matched.every(
+      (c) =>
+        c.memory.entityId === durableMatches[0]?.memory.entityId &&
+        (factKindOf(c) === "durable" || factKindOf(c) === "current"),
+    );
   // Retrieval matches do not establish that distinct texts express the same
   // claim, even when their records share an author. Let the planner select ids.
-  if (distinctTexts.size > 1) {
+  if (distinctTexts.size > 1 && !shadowsOfOneDurableFact) {
     const candidates = matched.map((c) => toListItem(c.memory, c.type));
     const lines = candidates.map(
       (m) => `- [${m.type}] ${m.id}: ${toWellFormedUnicode(m.text)}`,
@@ -1488,7 +1796,16 @@ async function doDeleteByQuery(
         `Query "${query}" matches ${distinctTexts.size} distinct memories. Delete by memoryId instead:`,
         ...lines,
       ].join("\n"),
-      data: { error: "MEMORY_AMBIGUOUS_QUERY", candidates },
+      userFacingText: ambiguousMemoryUserFacingText("forget", candidates),
+      // Nothing was deleted: an ambiguous query is an observation, not a
+      // broken mutation, so it must not own the turn's terminal message
+      // once a later by-id delete succeeds (the failure-authority tail would
+      // otherwise append this question after "Forgot: …").
+      data: {
+        error: "MEMORY_AMBIGUOUS_QUERY",
+        candidates,
+        readOnlyOperation: true,
+      },
     };
   }
 
@@ -1530,7 +1847,12 @@ async function doDeleteByQuery(
             `- [${item.type}] ${item.id}: ${toWellFormedUnicode(item.text)}`,
         ),
       ].join("\n"),
-      data: { error: "MEMORY_AMBIGUOUS_QUERY", candidates },
+      userFacingText: ambiguousMemoryUserFacingText("forget", candidates),
+      data: {
+        error: "MEMORY_AMBIGUOUS_QUERY",
+        candidates,
+        readOnlyOperation: true,
+      },
     };
   }
 
@@ -1546,10 +1868,24 @@ async function doDeleteByQuery(
   const forgottenTexts = deleted
     .map((item) => toWellFormedUnicode(item.text))
     .filter((value) => value.trim().length > 0);
+  // Observation rows collapsed with a durable fact are the same memory to the
+  // user; the reply names the durable text only.
+  const spokenTexts = shadowsOfOneDurableFact
+    ? durableMatches
+        .map((c) =>
+          toWellFormedUnicode(
+            (c.memory.content as { text?: string } | undefined)?.text ?? "",
+          ),
+        )
+        .filter((value) => value.trim().length > 0)
+    : forgottenTexts;
   return {
     success: true,
     transcriptVisibility: "internal",
     text: `Forgot ${deleted.length} memory record(s) matching "${query}": ${toWellFormedUnicode(deleted[0]?.text ?? "")}`,
+    userFacingText: memoryUserFacingLine("Forgot", spokenTexts.join("; ")),
+    verifiedUserFacing: true,
+    turnComplete: true,
     values: { deletedCount: deleted.length },
     effectReceipts: deleted.map((item) =>
       memoryMutationReceipt({
@@ -1614,6 +1950,7 @@ export const memoryAction: Action = {
   routingHint:
     "NOTES ARE NOT MEMORY: 'make a note', 'note to self', 'jot this down', 'what notes do i have' -> NOTES. MEMORY manages the agent's stored knowledge: create/search/update/delete. Use supplied conversation and fact evidence directly when it answers the question, applying later corrections; referring to an earlier turn alone does not require a search. Use op:search for evidence absent from supplied context, other conversations, or exact stored-message counts (rendered dialogue may filter internal rows and duplicates). Search type=facts for saved facts/preferences; type=messages for conversation history. Do NOT use for open-web lookups -> WEB_SEARCH, connected external inboxes -> MESSAGE, or skill catalog -> SKILL",
   validate: async () => true,
+  inferSubaction: inferMemorySubaction,
   handler: async (
     runtime: IAgentRuntime,
     message,
@@ -1673,7 +2010,7 @@ export const memoryAction: Action = {
     {
       name: "text",
       description:
-        "create: REQUIRED — the content to remember, as a complete sentence (never leave it empty and never put it in query). update: complete replacement text for the existing record; preserve every unrelated fact. When correcting saved knowledge, search the subject and reconcile all affected records before reporting completion.",
+        'create: REQUIRED — the content to remember, as a complete third-person sentence about the user ("The user\'s favorite tea is matcha." — not "my", not their name; never leave it empty and never put it in query). update: complete replacement text for the existing record; preserve every unrelated fact. When correcting saved knowledge, search the subject and reconcile all affected records before reporting completion.',
       required: false,
       requiredForSubactions: ["create", "update"],
       schema: { type: "string" as const },
@@ -1773,7 +2110,7 @@ export const memoryAction: Action = {
       description:
         "update/delete: exact memory UUID from a previous search result; sufficient without query. Takes precedence when both memoryId and query are supplied.",
       required: false,
-      modelOmissionSentinels: ["", "null", "undefined"],
+      modelOmissionSentinels: [...MEMORY_ID_OMISSION_SENTINELS],
       schema: { type: "string" as const, pattern: UUID_SCHEMA_PATTERN },
     },
     {

@@ -5281,13 +5281,17 @@ describe("v5 planner loop skeleton", () => {
 		];
 		const injected = withTurnScopeToolArg(tools);
 
-		expect(
-			injected?.[0]?.parameters?.properties?.[TURN_SCOPE_ARG],
-		).toMatchObject({
+		// A standalone caller (no shared system prompt) keeps the complete
+		// batch-scope description on the arg; the planner path passes its
+		// template and gets the short pointer instead (asserted below).
+		expect(injected?.[0]?.parameters?.properties?.[TURN_SCOPE_ARG]).toEqual({
 			type: "string",
 			enum: [TURN_SCOPE_FINAL, TURN_SCOPE_MORE_WORK_PENDING],
 			description: expect.stringContaining(plannerBatchScopeDescription),
 		});
+		expect(plannerTemplate).toContain(
+			"every tool requires the reserved arg `eliza_turn_scope`",
+		);
 		// JSON and native planning must agree: verifying this queue's results
 		// is not a request for a later action batch. Contradictory instructions
 		// caused a live read + navigation to repeat planning after both finished.
@@ -7417,5 +7421,247 @@ describe("terminal-only tool surface short-circuit", () => {
 			evaluate: vi.fn(),
 		});
 		expect(runtime.useModel).toHaveBeenCalled();
+	});
+});
+
+describe("verified intent gate", () => {
+	function nativePlannerOnce(opts: {
+		text?: string;
+		toolCalls: Array<{
+			id: string;
+			name: string;
+			arguments?: Record<string, unknown>;
+		}>;
+	}) {
+		// Native-mode return: parsePlannerOutput's native branch infers
+		// messageToUser from `text` but does NOT carry it as an explicit field.
+		// The gate must withhold even if `text` is a clean string, because in
+		// native mode `text` is ambiguous (thought vs final answer).
+		return vi.fn(async () => ({
+			text: opts.text ?? "",
+			toolCalls: opts.toolCalls,
+		}));
+	}
+
+	const receipt = {
+		receiptId: "memory-receipt-1",
+		operation: "memory.create",
+		resource: { kind: "memory", id: "mem-1" },
+		artifacts: [],
+		idempotency: { key: null, replayed: false },
+		observedAt: "2026-09-11T17:50:00.000Z",
+		outcome: "applied",
+		commit: {
+			kind: "durable",
+			id: "mem-1",
+			committedAt: "2026-09-11T17:50:00.000Z",
+		},
+	};
+	function intentContext(intents: string[]) {
+		return {
+			id: "ctx",
+			events: [
+				{
+					id: "message-handler:1",
+					type: "message_handler",
+					source: "message-service",
+					createdAt: 1,
+					metadata: { plan: { intents } },
+				},
+			],
+		} as never;
+	}
+	function harness(reply: string) {
+		const runtime = {
+			useModel: nativePlannerOnce({
+				toolCalls: [
+					{
+						id: "memory-1",
+						name: "MEMORY_CREATE",
+						arguments: {
+							text: "User's favorite tea is matcha.",
+							eliza_turn_scope: "final",
+						},
+					},
+				],
+			}),
+		};
+		const executeToolCall = vi.fn(async () => ({
+			success: true,
+			text: "Stored memory mem-1.",
+			userFacingText: reply,
+			verifiedUserFacing: true,
+			turnComplete: true,
+			effectReceipts: [receipt],
+		}));
+		const evaluate = vi.fn(async () => ({
+			success: true,
+			decision: "FINISH" as const,
+			thought: "evaluator ran",
+			messageToUser: "Got it, unfucked the memory.",
+		}));
+		return { runtime, executeToolCall, evaluate };
+	}
+
+	it("skips the evaluator when the sole verified result names the single declared intent", async () => {
+		const { runtime, executeToolCall, evaluate } = harness(
+			"Saved: your favorite tea is matcha.",
+		);
+		const result = await runPlannerLoop({
+			runtime,
+			context: intentContext(["remember favorite tea is matcha"]),
+			executeToolCall,
+			evaluate,
+		});
+		expect(evaluate).not.toHaveBeenCalled();
+		expect(result.status).toBe("finished");
+		expect(result.finalMessage).toBe("Saved: your favorite tea is matcha.");
+		expect(result.evaluator?.thought).toContain("single declared intent");
+	});
+
+	it("drops a same-action hedge call once the first result verifies the single intent (live regression)", async () => {
+		// Live 2026-09-12: the planner emitted MEMORY_DELETE {confirm} and
+		// MEMORY_DELETE {confirm, query} in one response; the first succeeded
+		// through the action's fallback and the second found nothing left.
+		const runtime = {
+			useModel: nativePlannerOnce({
+				toolCalls: [
+					{
+						id: "delete-1",
+						name: "MEMORY_DELETE",
+						arguments: { confirm: true, eliza_turn_scope: "final" },
+					},
+					{
+						id: "delete-2",
+						name: "MEMORY_DELETE",
+						arguments: {
+							confirm: true,
+							query: "favorite tea is oolong",
+							eliza_turn_scope: "final",
+						},
+					},
+				],
+			}),
+		};
+		const executeToolCall = vi.fn(async () => ({
+			success: true,
+			text: 'Forgot 1 memory record(s) matching "favorite tea".',
+			userFacingText: "Forgot: your favorite tea is oolong.",
+			verifiedUserFacing: true,
+			turnComplete: true,
+			effectReceipts: [
+				{
+					...receipt,
+					operation: "memory.delete",
+					receiptId: "memory-receipt-2",
+				},
+			],
+		}));
+		const evaluate = vi.fn(async () => ({
+			success: true,
+			decision: "FINISH" as const,
+			thought: "evaluator ran",
+			messageToUser: "Forgot it.",
+		}));
+		const result = await runPlannerLoop({
+			runtime,
+			context: intentContext(["forget favorite tea"]),
+			executeToolCall,
+			evaluate,
+		});
+		expect(executeToolCall).toHaveBeenCalledTimes(1);
+		expect(evaluate).not.toHaveBeenCalled();
+		expect(result.status).toBe("finished");
+		expect(result.finalMessage).toBe("Forgot: your favorite tea is oolong.");
+		expect(
+			result.trajectory.context.plannedQueue?.find(
+				(entry) => entry.id === "delete-2",
+			)?.status,
+		).toBe("skipped");
+	});
+
+	it("keeps a same-action call whose arguments differ (two facts are two pieces of work)", async () => {
+		const runtime = {
+			useModel: nativePlannerOnce({
+				toolCalls: [
+					{
+						id: "create-1",
+						name: "MEMORY_CREATE",
+						arguments: {
+							text: "User's favorite tea is matcha.",
+							eliza_turn_scope: "final",
+						},
+					},
+					{
+						id: "create-2",
+						name: "MEMORY_CREATE",
+						arguments: {
+							text: "User's dog is named Biscuit.",
+							eliza_turn_scope: "final",
+						},
+					},
+				],
+			}),
+		};
+		const executeToolCall = vi.fn(async () => ({
+			success: true,
+			text: "Stored memory.",
+			userFacingText: "Saved.",
+			verifiedUserFacing: true,
+			turnComplete: true,
+			effectReceipts: [receipt],
+		}));
+		const evaluate = vi.fn(async () => ({
+			success: true,
+			decision: "FINISH" as const,
+			thought: "evaluator ran",
+			messageToUser: "Saved both.",
+		}));
+		const result = await runPlannerLoop({
+			runtime,
+			context: intentContext(["remember two things"]),
+			executeToolCall,
+			evaluate,
+		});
+		// The differing call is real work: it stays queued for the evaluator's
+		// NEXT_RECOMMENDED instead of being skipped, and the verified-intent gate
+		// cannot settle a turn with a non-empty queue, so the evaluator runs.
+		expect(executeToolCall).toHaveBeenCalledTimes(1);
+		expect(evaluate).toHaveBeenCalled();
+		expect(
+			result.trajectory.context.plannedQueue?.find(
+				(entry) => entry.id === "create-2",
+			)?.status,
+		).toBe("queued");
+		expect(result.status).toBe("finished");
+	});
+
+	it("still evaluates when the verified text does not cover the declared intent", async () => {
+		const { runtime, executeToolCall, evaluate } = harness(
+			"Forgot: your dog is named Rex.",
+		);
+		await runPlannerLoop({
+			runtime,
+			context: intentContext(["forget my favorite tea"]),
+			executeToolCall,
+			evaluate,
+		});
+		expect(evaluate).toHaveBeenCalled();
+	});
+
+	it("still evaluates when Stage 1 declared several intents", async () => {
+		const { runtime, executeToolCall, evaluate } = harness(
+			"Saved: your favorite tea is matcha.",
+		);
+		await runPlannerLoop({
+			runtime,
+			context: intentContext([
+				"remember favorite tea is matcha",
+				"remind me tomorrow",
+			]),
+			executeToolCall,
+			evaluate,
+		});
+		expect(evaluate).toHaveBeenCalled();
 	});
 });

@@ -108,6 +108,37 @@ export function promotedSubactionParent(action: Action): string | undefined {
 }
 
 /**
+ * The discriminator an umbrella call needs to run as one of its promoted
+ * children without the sub-planner: the single-value enum that
+ * `pinDiscriminatorForVirtual` left on the child's copy of the parent's
+ * discriminator parameter. `undefined` unless `childName` is declared in
+ * `parent.subActions` and resolves (inline, or through `lookup`) to an action
+ * carrying such a pin, so a name that is not a promoted child of this umbrella
+ * can never bypass sub-planner routing.
+ */
+export function pinnedDiscriminatorForPromotedChild(
+	parent: Action,
+	childName: string,
+	lookup: (name: string) => Action | undefined,
+): { child: string; discriminator: string; value: string } | undefined {
+	const wanted = toUpperSnake(childName);
+	const declared = parent.subActions?.find(
+		(entry) =>
+			toUpperSnake(typeof entry === "string" ? entry : entry.name) === wanted,
+	);
+	if (!declared) return undefined;
+	const child = typeof declared === "string" ? lookup(declared) : declared;
+	if (!child) return undefined;
+	const discriminator = findDiscriminatorParameter(child.parameters);
+	if (!discriminator) return undefined;
+	const enumValues = (discriminator.schema as { enum?: unknown }).enum;
+	if (!Array.isArray(enumValues) || enumValues.length !== 1) return undefined;
+	const value = enumValues[0];
+	if (typeof value !== "string") return undefined;
+	return { child: child.name, discriminator: discriminator.name, value };
+}
+
+/**
  * Returns the list of subaction string values declared by an umbrella's
  * `action` parameter (or one of the legacy aliases). The lookup is purely
  * structural: it inspects the JSON Schema enum on the parameter named
@@ -211,6 +242,15 @@ function parameterAppliesToSubaction(
  * the discriminator into `mergeOptionsWithSubaction` regardless, so
  * dispatch is unaffected.
  */
+/**
+ * Description a promoted virtual writes on its pinned discriminator. Exported
+ * so the umbrella's alias-contract renderer (planned-tool.ts) can recognise
+ * the pin and carry it as `pins[name] = value` instead of the full override.
+ */
+export function pinnedDiscriminatorDescription(subaction: string): string {
+	return `Subaction discriminator (auto-set to "${subaction}" for this virtual; do not change).`;
+}
+
 function pinDiscriminatorForVirtual(
 	parameters: readonly ActionParameter[] | undefined,
 	subaction: string,
@@ -228,7 +268,7 @@ function pinDiscriminatorForVirtual(
 			const { subactions: _stray, ...discriminatorRest } = parameter;
 			sliced.push({
 				...discriminatorRest,
-				description: `Subaction discriminator (auto-set to "${subaction}" for this virtual; do not change).`,
+				description: pinnedDiscriminatorDescription(subaction),
 				required: false,
 				schema: {
 					...baseSchema,

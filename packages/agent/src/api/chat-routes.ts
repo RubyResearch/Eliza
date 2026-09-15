@@ -52,6 +52,7 @@ import {
   revertedEffectReceiptIds,
   runWithInferenceTiming,
   runWithTrajectoryContext,
+  shouldSkipResponseMemoryPersistence,
   stringToUuid,
   stripDashboardOnlyMarkers,
   type TrustedApiPrincipal,
@@ -2274,6 +2275,81 @@ export async function persistAssistantConversationMemory(
 }
 
 /**
+ * Compat chat routes (`POST /api/agents/:id/message`, `/v1/*`) hand the
+ * message service a callback that only streams, and the service persists a
+ * reply itself only on the simple path: a planner turn whose final text was
+ * already delivered through an action callback ends with no response
+ * memories at all (planner-echo suppression), so the reply reached the
+ * caller but never the room transcript. Live 2026-09-14/15, API room: 15
+ * user rows against 6 agent rows, every calendar answer missing, later
+ * prompts rendered the requests unanswered. Connectors persist inside their
+ * own callbacks and the dashboard route reconciles after generation; this is
+ * the compat-route equivalent. Returns the stored memory, or null when the
+ * service already committed the reply, the turn has no visible text, or the
+ * same agent sentence is already stored since the turn started.
+ */
+export async function persistUnpersistedChatReply(
+  runtime: AgentRuntime,
+  message: Memory,
+  result: ChatGenerationResult,
+  turnStartedAt: number,
+): Promise<Memory | null> {
+  const text = result.text.trim();
+  if (
+    !text ||
+    result.transcriptVisibility === "internal" ||
+    result.noResponseReason === "ignored" ||
+    isNoResponsePlaceholder(text)
+  ) {
+    return null;
+  }
+  const persistedIds = new Set(result.persistedResponseMessageIds ?? []);
+  const committedByService = (result.responseMessages ?? []).some(
+    (memory) =>
+      typeof memory.id === "string" &&
+      persistedIds.has(memory.id) &&
+      memory.entityId === runtime.agentId &&
+      memory.roomId === message.roomId,
+  );
+  if (committedByService) return null;
+  const responseContent: Content =
+    result.responseContent && typeof result.responseContent === "object"
+      ? { ...result.responseContent }
+      : { text };
+  delete responseContent.transcriptVisibility;
+  const inReplyTo = responseContent.inReplyTo ?? message.id;
+  const content: Content = {
+    ...responseContent,
+    text,
+    ...(inReplyTo ? { inReplyTo } : {}),
+    source:
+      typeof message.content.source === "string"
+        ? message.content.source
+        : MESSAGE_SOURCE_CLIENT_CHAT,
+    channelType: ChannelType.API,
+    ...(result.actionCallbackHistory && result.actionCallbackHistory.length > 0
+      ? { actionCallbackHistory: [...result.actionCallbackHistory] }
+      : {}),
+  };
+  if (
+    shouldSkipResponseMemoryPersistence({
+      content,
+      roomId: message.roomId,
+      entityId: runtime.agentId,
+    } as Memory)
+  ) {
+    return null;
+  }
+  return persistAssistantConversationMemory(
+    runtime,
+    message.roomId,
+    content,
+    ChannelType.API,
+    turnStartedAt,
+  );
+}
+
+/**
  * Persist the terminal receipt for an aborted (Stop/disconnect) turn before
  * the route releases it. Unlike `persistAssistantConversationMemory` this
  * MUST persist even when no token streamed — a zero-token Stop still owns a
@@ -4117,6 +4193,7 @@ export async function handleChatRoutes(
             trustedApiPrincipal,
           );
 
+          const turnStartedAt = Date.now();
           const result = await generateChatResponse(
             runtime,
             message,
@@ -4130,6 +4207,12 @@ export async function handleChatRoutes(
               resolveNoResponseText: () =>
                 resolveNoResponseFallback(state.logBuffer, runtime),
             },
+          );
+          await persistUnpersistedChatReply(
+            runtime,
+            message,
+            result,
+            turnStartedAt,
           );
           transcriptVisibility = result.transcriptVisibility;
           if (result.localInference && !fullText) {
@@ -4262,6 +4345,7 @@ export async function handleChatRoutes(
           message,
           trustedApiPrincipal,
         );
+        const turnStartedAt = Date.now();
         const result = await generateChatResponse(
           runtime,
           message,
@@ -4270,6 +4354,12 @@ export async function handleChatRoutes(
             resolveNoResponseText: () =>
               resolveNoResponseFallback(state.logBuffer, runtime),
           },
+        );
+        await persistUnpersistedChatReply(
+          runtime,
+          message,
+          result,
+          turnStartedAt,
         );
         syncRuntimeCharacterToChatStateConfig(state);
         transcriptVisibility = result.transcriptVisibility;
@@ -4516,6 +4606,7 @@ export async function handleChatRoutes(
             trustedApiPrincipal,
           );
 
+          const turnStartedAt = Date.now();
           const generation = await generateChatResponse(
             runtime,
             message,
@@ -4526,6 +4617,12 @@ export async function handleChatRoutes(
               resolveNoResponseText: () =>
                 resolveNoResponseFallback(state.logBuffer, runtime),
             },
+          );
+          await persistUnpersistedChatReply(
+            runtime,
+            message,
+            generation,
+            turnStartedAt,
           );
           transcriptVisibility = generation.transcriptVisibility;
           outputTokens = generation.usage?.completionTokens ?? outputTokens;
@@ -4652,6 +4749,7 @@ export async function handleChatRoutes(
           message,
           trustedApiPrincipal,
         );
+        const turnStartedAt = Date.now();
         const result = await generateChatResponse(
           runtime,
           message,
@@ -4660,6 +4758,12 @@ export async function handleChatRoutes(
             resolveNoResponseText: () =>
               resolveNoResponseFallback(state.logBuffer, runtime),
           },
+        );
+        await persistUnpersistedChatReply(
+          runtime,
+          message,
+          result,
+          turnStartedAt,
         );
         syncRuntimeCharacterToChatStateConfig(state);
         transcriptVisibility = result.transcriptVisibility;
@@ -4836,6 +4940,7 @@ export async function handleChatRoutes(
             : {}),
         });
       };
+      const turnStartedAt = Date.now();
       const result = await generateChatResponse(
         runtime,
         message,
@@ -4847,6 +4952,12 @@ export async function handleChatRoutes(
             respond(ready);
           },
         },
+      );
+      await persistUnpersistedChatReply(
+        runtime,
+        message,
+        result,
+        turnStartedAt,
       );
       respond(result);
     } catch (err) {

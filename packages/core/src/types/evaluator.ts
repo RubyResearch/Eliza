@@ -68,6 +68,20 @@ export interface EvaluatorSharedPromptContext {
 	roomTranscriptRendered: boolean;
 	/** Exact action-result rendering already present in the shared context. */
 	actionResultsText?: string;
+	/**
+	 * Per-result character cap the shared action-result rendering applied
+	 * (POST_TURN_EVALUATOR_RESULT_MAX_CHARS). A section that re-renders the
+	 * same results applies the same cap before comparing with actionResultsText.
+	 */
+	actionResultsMaxChars?: number;
+	/**
+	 * Named blocks (heading -> exact text) rendered once in the shared context,
+	 * collected from the active sections' `sharedBlocks`. A section whose own
+	 * rendering of a block is byte-identical refers to the shared copy instead
+	 * of embedding it (live 2026-09-14: two sections each carried the room
+	 * entity list).
+	 */
+	blocks?: Readonly<Record<string, string>>;
 }
 
 export interface EvaluatorPromptContext<TPrepared = unknown>
@@ -147,6 +161,15 @@ export interface Evaluator<TOutput = JsonValue, TPrepared = unknown> {
 	 * Boundaries must not split a Unicode code point.
 	 */
 	promptSegments?(context: EvaluatorPromptContext<TPrepared>): PromptSegment[];
+	/**
+	 * Blocks this section embeds that other active sections may embed too,
+	 * keyed by heading (for example "Entities in Room"). The service renders
+	 * each heading once in the shared turn context and exposes the text as
+	 * `shared.blocks`; the section then refers to it instead of repeating it.
+	 */
+	sharedBlocks?(
+		context: EvaluatorPromptContext<TPrepared>,
+	): Record<string, string>;
 	parse?(
 		output: unknown,
 		context?: EvaluatorPromptContext<TPrepared> & {

@@ -1707,7 +1707,12 @@ describe("runV5MessageRuntimeStage1", () => {
 			};
 			const wire = params.messages.map(({ content }) => content).join("\n");
 			expect(wire).toContain(description.trim());
-			expect(wire).toContain("CUSTOM_ALIAS");
+			expect(wire).toContain("CUSTOM_ACTION: ");
+			// The inline reference is one `NAME: description` line per action;
+			// aliases are resolved server-side against runtime.actions and are
+			// readable on demand through DISCOVER_TOOLS names=[], so they never
+			// ride in the Stage-1 prompt.
+			expect(wire).not.toContain("CUSTOM_ALIAS");
 			expect(wire).not.toContain("context_discovery: CONTEXT_CATALOG");
 			expect(useModelCalls(runtime)).toHaveLength(1);
 		},
@@ -1736,10 +1741,18 @@ describe("runV5MessageRuntimeStage1", () => {
 			([, params]) =>
 				params as {
 					messages: Array<{ role: string; content: string }>;
-					providerOptions: { eliza: { prefixHash: string } };
+					providerOptions: {
+						eliza: { prefixHash: string };
+						cerebras: { prompt_cache_key: string };
+					};
 				},
 		);
 		expect(calls).toHaveLength(2);
+		// The re-render continues the same scoped workflow: one cache slot.
+		expect(calls[0]?.providerOptions.cerebras.prompt_cache_key).toBeTruthy();
+		expect(calls[1]?.providerOptions.cerebras.prompt_cache_key).toBe(
+			calls[0]?.providerOptions.cerebras.prompt_cache_key,
+		);
 		expect(calls[0]?.messages[0]).toEqual(calls[1]?.messages[0]);
 		expect(calls[0]?.providerOptions.eliza.prefixHash).toEqual(
 			calls[1]?.providerOptions.eliza.prefixHash,
@@ -3346,6 +3359,61 @@ describe("runV5MessageRuntimeStage1", () => {
 		}
 	});
 
+	it("re-asks once when Stage 1 ends an addressed question with STOP and an empty plan (live 2026-09-15: 'what's the capital of chile?' shipped the canned deferral)", async () => {
+		const runtime = makeRuntime([
+			stage1Response({ shouldRespond: "STOP", contexts: [] }),
+			stage1Response({ contexts: ["simple"], replyText: "Santiago." }),
+		]);
+		const result = await runV5MessageRuntimeStage1({
+			runtime,
+			message: makeMessage({
+				text: "one line: what's the capital of chile?",
+				channelType: ChannelType.DM,
+			}),
+			state: makeState(),
+			responseId: "00000000-0000-0000-0000-000000000005" as UUID,
+		});
+		expect(result.kind).toBe("direct_reply");
+		if (result.kind === "direct_reply") {
+			expect(result.result.responseContent?.text).toBe("Santiago.");
+		}
+		const calls = useModelCalls(runtime);
+		expect(calls.map(([type]) => type)).toEqual([
+			ModelType.RESPONSE_HANDLER,
+			ModelType.RESPONSE_HANDLER,
+		]);
+		const repairInput = calls[1]?.[1] as {
+			messages: Array<{ role: string; content: string }>;
+		};
+		expect(repairInput.messages.at(-1)?.content).toContain(
+			"response_contract_repair:",
+		);
+		expect(repairInput.messages.at(-1)?.content).toContain("without answering");
+	});
+
+	it("keeps the deferral when the repaired re-ask still ends the turn without an answer (#11504)", async () => {
+		const runtime = makeRuntime([
+			stage1Response({ shouldRespond: "STOP", contexts: [] }),
+			stage1Response({ shouldRespond: "STOP", contexts: [] }),
+		]);
+		const result = await runV5MessageRuntimeStage1({
+			runtime,
+			message: makeMessage({
+				text: "one line: what's the capital of chile?",
+				channelType: ChannelType.DM,
+			}),
+			state: makeState(),
+			responseId: "00000000-0000-0000-0000-000000000005" as UUID,
+		});
+		expect(result.kind).toBe("direct_reply");
+		if (result.kind === "direct_reply") {
+			expect(result.result.responseContent?.text).toBe(
+				"I'm not sure how to answer that.",
+			);
+		}
+		expect(useModelCalls(runtime)).toHaveLength(2);
+	});
+
 	it("still defers empty, whitespace, refusal-stub, and degenerate-run replies (#11504)", async () => {
 		for (const badReply of [
 			"",
@@ -4572,6 +4640,14 @@ describe("runV5MessageRuntimeStage1", () => {
 		const plannerUserContent = plannerCall.messages?.[1]?.content ?? "";
 		expect(plannerUserContent).toContain(
 			'"candidateActions":["TASKS_SPAWN_AGENT"]',
+		);
+		// Progressive surface: the explicit candidate's family is exposed, FILE
+		// stays discoverable, and the discovery tool is not reported as a parent.
+		expect(plannerUserContent).toContain(
+			'"tierAParents":["TASKS_SPAWN_AGENT"]',
+		);
+		expect(plannerUserContent).toContain(
+			'"discoveryToolName":"DISCOVER_TOOLS"',
 		);
 		expect(plannerCall.tools?.map((tool) => tool.name)).toContain(
 			"TASKS_SPAWN_AGENT",
@@ -5862,7 +5938,10 @@ describe("runV5MessageRuntimeStage1", () => {
 			]);
 			const result = await runV5MessageRuntimeStage1({
 				runtime,
-				message: makeMessage(),
+				// See the STOP lexicon: a terminal STOP needs a stop-shaped message.
+				message: makeMessage(
+					shouldRespond === "STOP" ? { text: "please stop, be quiet" } : {},
+				),
 				state: makeState(),
 				responseId: "00000000-0000-0000-0000-000000000005" as UUID,
 			});
@@ -9835,6 +9914,10 @@ describe("runV5MessageRuntimeStage1", () => {
 		};
 		const toolNames = plannerParams.tools?.map((tool) => tool.name) ?? [];
 		expect(toolNames).toContain("CHECK_RUNTIME");
+		// The progressive surface exposes Stage 1's families and keeps every other
+		// authorized action discoverable: the complete name index rides in
+		// DISCOVER_TOOLS, so a ranking hint still cannot remove SHELL.
+		expect(toolNames).toContain("DISCOVER_TOOLS");
 		expect(
 			plannerParams.tools?.find((tool) => tool.name === "DISCOVER_TOOLS")
 				?.description,
@@ -10068,7 +10151,11 @@ describe("runV5MessageRuntimeStage1", () => {
 
 			const result = await runV5MessageRuntimeStage1({
 				runtime,
-				message: makeMessage(),
+				// STOP is terminal only for an actual disengage request; a STOP
+				// verdict on an ordinary message routes on (live misfires 2026-09-11/12).
+				message: makeMessage(
+					action === "STOP" ? { text: "ok stop, leave me alone" } : {},
+				),
 				state: makeState(),
 				responseId: "00000000-0000-0000-0000-000000000005" as UUID,
 			});
@@ -10992,8 +11079,10 @@ describe("verified read actions own the turn's single user-facing message", () =
 		]);
 		expect(calendarHandler).toHaveBeenCalledTimes(1);
 		expect(distractorHandler).not.toHaveBeenCalled();
-		// Stage-1 selects the native family; every other authorized family stays
-		// advertised by discovery and no distractor executes without a tool call.
+		// Stage-1 hints do not authorize catalog removal: the planner receives
+		// the selected native family directly and every other authorized family
+		// stays advertised by the DISCOVER_TOOLS name index; its tool call
+		// determines which one executes and no distractor runs without one.
 		const plannerParams = calls[1]?.[1] as {
 			tools?: Array<{ name: string; description?: string }>;
 		};

@@ -104,6 +104,7 @@ import {
 import {
 	declaredIntentsFromContext,
 	repairFinishWithProgressPromise,
+	restoreEvaluatorProviders,
 	runEvaluator,
 } from "./evaluator";
 import {
@@ -395,7 +396,8 @@ async function runPlannerLoopIterations(
 	// Tool success proves execution, not fulfillment of the user's intent.
 	// Evaluate even a single declared intent: a final-scope call can still
 	// target the wrong resource or surface.
-	const declaredIntentCount = declaredIntentsFromContext(plannerContext).length;
+	const declaredIntents = declaredIntentsFromContext(plannerContext);
+	const declaredIntentCount = declaredIntents.length;
 	const requiresIntentEvaluation = declaredIntentCount > 0;
 	// Diagnostic projection for every context/event copy of tool-call
 	// arguments: runtime-known secrets composed with the shared tool-shape
@@ -439,19 +441,28 @@ async function runPlannerLoopIterations(
 			"postToolReplySeed requires a successful result with modelReplyRequired",
 		);
 	}
-	const trajectoryContext = postToolReplySeed
-		? appendContextEvent(plannerContext, {
+	const postToolReplyEvent: ContextEvent | undefined = postToolReplySeed
+		? {
 				id: "post-tool-model-reply",
 				type: "instruction",
 				source: "planner-loop",
 				createdAt: Date.now(),
 				content:
 					"The tool result in this turn is already settled and complete. Write the final user-facing reply in the agent's natural voice from that result. Do not describe the work as starting, opening now, pending, or still in progress. If the result provides a link object, include it as a Markdown link using its label and href. Do not expose internal IDs or raw tool data.",
-			})
+			}
+		: undefined;
+	const trajectoryContext = postToolReplyEvent
+		? appendContextEvent(plannerContext, postToolReplyEvent)
 		: plannerContext;
+	const evaluatorBaseContext = params.evaluatorContext
+		? postToolReplyEvent
+			? appendContextEvent(params.evaluatorContext, postToolReplyEvent)
+			: params.evaluatorContext
+		: undefined;
 	const trajectory: PlannerTrajectory = {
 		context: trajectoryContext,
 		modelBaseContext: trajectoryContext,
+		...(evaluatorBaseContext ? { evaluatorBaseContext } : {}),
 		codingMode,
 		steps: postToolReplySeed
 			? [
@@ -750,7 +761,7 @@ async function runPlannerLoopIterations(
 				trajectory,
 				preferredFinalMessageFromToolOrModel(
 					trajectory,
-					evaluator.messageToUser,
+					evaluatorFinishProse(trajectory, evaluator),
 					evaluator.success === false
 						? failedToolFallbackMessage(trajectory)
 						: undefined,
@@ -1372,7 +1383,7 @@ async function runPlannerLoopIterations(
 									trajectory,
 									preferredFinalMessageFromToolOrModel(
 										trajectory,
-										evaluator.messageToUser,
+										evaluatorFinishProse(trajectory, evaluator),
 										evaluator.success === false
 											? failedToolFallbackMessage(trajectory)
 											: undefined,
@@ -1697,7 +1708,11 @@ async function runPlannerLoopIterations(
 									trajectory,
 									preferredFinalMessageFromToolOrModel(
 										trajectory,
-										evaluator.messageToUser ?? plannerOutput.messageToUser,
+										evaluatorFinishProse(trajectory, {
+											success: evaluator.success,
+											messageToUser:
+												evaluator.messageToUser ?? plannerOutput.messageToUser,
+										}),
 									),
 									// Same structural failure acknowledgment as the post-tool
 									// FINISH path: success:false licenses the evaluator's own
@@ -1749,6 +1764,34 @@ async function runPlannerLoopIterations(
 						};
 					}
 
+					const settledFailureClarification =
+						deterministicSettledFailureClarificationRelay(
+							trajectory,
+							plannerOutput.messageToUser,
+						);
+					if (settledFailureClarification) {
+						params.runtime.logger?.warn?.(
+							{ iteration },
+							"[planner-loop] evaluator continued after a settled non-retryable failure and a planner clarification; finishing with the question",
+						);
+						return {
+							status: "finished",
+							trajectory,
+							evaluator: { ...evaluator, success: false, decision: "FINISH" },
+							finalMessage: userSafeFinalMessage(
+								terminalMessageWithFailureAuthority(
+									trajectory,
+									settledFailureClarification,
+									userSafeFailureReport(
+										settledFailureClarification,
+										trajectory,
+									),
+								),
+								trajectory,
+							),
+						};
+					}
+
 					terminalOnlyContinuations++;
 					if (terminalOnlyContinuations > config.maxTerminalOnlyContinuations) {
 						const relay =
@@ -1771,6 +1814,27 @@ async function runPlannerLoopIterations(
 									terminalMessageWithFailureAuthority(trajectory, relay),
 									trajectory,
 								),
+							};
+						}
+						const evaluatorReply = userSafeEvaluatorContinuationReply(
+							evaluator,
+							trajectory,
+						);
+						if (evaluatorReply) {
+							params.runtime.logger?.warn?.(
+								{
+									iteration,
+									terminalOnlyContinuations,
+									maxTerminalOnlyContinuations:
+										config.maxTerminalOnlyContinuations,
+								},
+								"[planner-loop] terminal-only continuation limit reached; finishing with the evaluator's own reply instead of erroring the turn",
+							);
+							return {
+								status: "finished",
+								trajectory,
+								evaluator: { ...evaluator, decision: "FINISH" },
+								finalMessage: evaluatorReply,
 							};
 						}
 					}
@@ -2250,15 +2314,42 @@ async function runPlannerLoopIterations(
 			continue;
 		}
 
-		await executeQueuedToolCall({
-			params,
-			trajectory,
-			toolCall,
-			iteration,
-			config,
-			failures,
-			plannerCompleted: lastPlannerExplicitCompleted,
-		});
+		try {
+			await executeQueuedToolCall({
+				params,
+				trajectory,
+				toolCall,
+				iteration,
+				config,
+				failures,
+				plannerCompleted: lastPlannerExplicitCompleted,
+			});
+		} catch (error) {
+			// error-policy:J4 the repeated-failure limit is the loop's own stop
+			// signal. When the tool that kept failing owns a user-safe clarifying
+			// question, that question is the honest end of the turn — not the
+			// generic planner-exhaustion apology the message service renders for
+			// the thrown limit. Coding turns keep the error: their result feeds
+			// the orchestrator, which reads a thrown limit as incomplete work.
+			const clarification = codingMode
+				? undefined
+				: repeatedFailureClarificationRelay(error, trajectory);
+			if (clarification === undefined) throw error;
+			params.runtime.logger?.warn?.(
+				{ iteration, toolName: toolCall.name },
+				"[planner-loop] repeated-failure limit reached; finishing with the failed tool's own clarification instead of erroring the turn",
+			);
+			return {
+				status: "finished",
+				trajectory,
+				evaluator: {
+					success: false,
+					decision: "FINISH",
+					thought: REPEATED_FAILURE_CLARIFICATION_THOUGHT,
+				},
+				finalMessage: clarification,
+			};
+		}
 
 		const latestResult = trajectory.steps[trajectory.steps.length - 1]?.result;
 		if (
@@ -2329,6 +2420,16 @@ async function runPlannerLoopIterations(
 			// the recorded error back to the planner so it can select an admitted
 			// name; keep the failure and normal iteration budgets intact.
 			continue;
+		}
+
+		if (
+			declaredIntentCount === 1 &&
+			latestResult?.success === true &&
+			latestResult.turnComplete === true &&
+			latestResult.verifiedUserFacing === true &&
+			trajectory.plannedQueue.length > 0
+		) {
+			dropRedundantQueuedCalls(trajectory, toolCall, iteration);
 		}
 
 		// Coding mode: keep executing the rest of this model-emitted tool-call
@@ -2453,7 +2554,12 @@ async function runPlannerLoopIterations(
 				declaredIntentCount,
 			}) ??
 			(requiresIntentEvaluation
-				? null
+				? tryVerifiedIntentGate({
+						trajectory,
+						failures,
+						lastPlannerExplicitCompleted,
+						declaredIntents,
+					})
 				: tryGateEvaluator({
 						trajectory,
 						failures,
@@ -2631,7 +2737,7 @@ async function runPlannerLoopIterations(
 						trajectory,
 						preferredFinalMessageFromToolOrModel(
 							trajectory,
-							evaluator.messageToUser,
+							evaluatorFinishProse(trajectory, evaluator),
 							evaluator.success === false
 								? failedToolFallbackMessage(trajectory)
 								: undefined,
@@ -2711,6 +2817,83 @@ function appendPlannerToolStepToModelHistory(
 	trajectory.modelHistory.push(
 		...trajectoryStepsToMessages([step], { redactText }),
 	);
+}
+
+/**
+ * A verified, turn-completing result fulfils the single declared intent; any
+ * remaining queued calls of the same action are the planner's hedge (live
+ * 2026-09-12: `MEMORY_DELETE {confirm}` then `MEMORY_DELETE {confirm, query}`
+ * in one response — the first succeeded through the action's own fallback and
+ * the second found nothing left, dragging in an evaluator round, a replan and
+ * three rate-limited retries). They leave the queue as skipped evidence so the
+ * queue-drained gates can settle the turn on the verified result.
+ */
+function comparableToolParams(
+	params: Record<string, unknown> | undefined,
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(params ?? {})) {
+		if (key === "eliza_turn_scope" || value === undefined) continue;
+		out[key] = JSON.stringify(value);
+	}
+	return out;
+}
+
+/** True when every entry of `a` appears with the same value in `b`. */
+function paramsSubset(
+	a: Record<string, string>,
+	b: Record<string, string>,
+): boolean {
+	return Object.entries(a).every(([key, value]) => b[key] === value);
+}
+
+function dropRedundantQueuedCalls(
+	trajectory: PlannerTrajectory,
+	executed: PlannerToolCall,
+	iteration: number,
+): number {
+	const actionName = executed.name;
+	const key = actionName.trim().toUpperCase();
+	const executedParams = comparableToolParams(executed.params);
+	// Only a hedge is redundant: same action, and one call's operative
+	// arguments contained in the other's ({confirm} against {confirm, query}).
+	// Distinct arguments are distinct work ("remember X" and "remember Y").
+	const isHedge = (queued: PlannerToolCall): boolean => {
+		if (queued.name.trim().toUpperCase() !== key) return false;
+		const queuedParams = comparableToolParams(queued.params);
+		return (
+			paramsSubset(queuedParams, executedParams) ||
+			paramsSubset(executedParams, queuedParams)
+		);
+	};
+	const dropped = trajectory.plannedQueue.filter(isHedge);
+	if (dropped.length === 0) return 0;
+	const kept = trajectory.plannedQueue.filter((queued) => !isHedge(queued));
+	trajectory.plannedQueue.splice(0, trajectory.plannedQueue.length, ...kept);
+	const droppedIds = new Set(dropped.map((queued) => queued.id ?? queued.name));
+	trajectory.context = appendContextEvent(
+		{
+			...trajectory.context,
+			plannedQueue: (trajectory.context.plannedQueue ?? []).map((entry) =>
+				entry.status === "queued" && droppedIds.has(entry.id ?? entry.name)
+					? { ...entry, status: "skipped" as const }
+					: entry,
+			),
+		},
+		{
+			id: `queue-drop:${iteration}`,
+			type: "planned_tool_call",
+			source: "planner-loop",
+			createdAt: Date.now(),
+			metadata: {
+				iteration,
+				name: actionName,
+				droppedToolCallIds: [...droppedIds],
+				reason: "redundant_after_verified_completion",
+			},
+		},
+	);
+	return dropped.length;
 }
 
 function appendPendingToolQueueFeedbackEvent(
@@ -2989,12 +3172,20 @@ const ROUTING_HINTS_MEMO = new WeakMap<
 	string | null
 >();
 
+// The batch-scope rule belongs to every planner prompt: an optimized or custom
+// template that omits it would otherwise make `withTurnScopeToolArg` repeat
+// the full protocol on every exposed tool (~405 chars per tool per planner
+// call, 2026-09-13). Derived from the shared constant so it cannot drift from
+// `plannerTemplate`.
+const plannerBatchScopeRule = `- Batch scope: ${plannerBatchScopeDescription}`;
+
 function appendMandatoryPlannerPolicy(instructions: string): string {
 	// Match complete canonical rules, not introductory fragments: a partial or
 	// stale custom template must not disable the rest of a required policy.
-	const missing = Object.values(plannerRequiredPolicy).filter(
-		(rule) => !instructions.includes(rule),
-	);
+	const missing = [
+		...Object.values(plannerRequiredPolicy),
+		plannerBatchScopeRule,
+	].filter((rule) => !instructions.includes(rule));
 	return missing.length === 0
 		? instructions
 		: `${instructions}\n\nmandatory planner policy:\n${missing.join("\n")}`;
@@ -3099,6 +3290,10 @@ export const TURN_SCOPE_ARG = "eliza_turn_scope";
 export const TURN_SCOPE_FINAL = "final";
 export const TURN_SCOPE_MORE_WORK_PENDING = "more_work_pending";
 
+// Full protocol text for standalone callers. `withTurnScopeToolArg` swaps it
+// for a short pointer whenever the shared system instructions already state
+// the batch-scope rule (the planner path always does, via the template or the
+// mandatory-policy backstop), so the rule is never repeated per tool there.
 const TURN_SCOPE_ARG_SCHEMA: JSONSchema = {
 	type: "string",
 	enum: [TURN_SCOPE_FINAL, TURN_SCOPE_MORE_WORK_PENDING],
@@ -3911,16 +4106,27 @@ async function callPlanner(
 		// Record the original request above, but execute none of its proposed
 		// actions. Removing the selector makes restoration one-shot and preserves
 		// complete sources for subsequent rounds and the completion evaluator.
+		const restoredMetadata = (source: ContextObject) => ({
+			...source.metadata,
+			...(readHistory
+				? { completionContext: undefined, plannerQueryTokensRestored: true }
+				: {}),
+			...(readProviders ? { providerDiscoveryEnabled: false } : {}),
+		});
+		// The evaluator renders its own composition (pipeline.ts); a restore the
+		// planner requested must reach it too, or the completion evaluator keeps
+		// reading the references and provider bodies this restore replaced.
+		if (params.trajectory.evaluatorBaseContext) {
+			const evaluatorOriginal = params.trajectory.evaluatorBaseContext;
+			params.trajectory.evaluatorBaseContext = {
+				...restoreEvaluatorProviders(evaluatorOriginal, original, restored),
+				metadata: restoredMetadata(evaluatorOriginal),
+			};
+		}
 		params.trajectory.modelBaseContext = appendContextEvent(
 			{
 				...restored,
-				metadata: {
-					...original.metadata,
-					...(readHistory
-						? { completionContext: undefined, plannerQueryTokensRestored: true }
-						: {}),
-					...(readProviders ? { providerDiscoveryEnabled: false } : {}),
-				},
+				metadata: restoredMetadata(original),
 			},
 			{
 				id: "planner-context-restored",
@@ -4523,11 +4729,6 @@ async function executeQueuedToolCall(params: {
 	};
 	if (!result.success || result.error != null) {
 		params.failures.push(failure);
-		assertRepeatedFailureLimit({
-			failures: params.failures,
-			latestFailure: failure,
-			maxRepeatedFailures: params.config.maxRepeatedFailures,
-		});
 	}
 
 	const completedStep: PlannerStep = {
@@ -4588,9 +4789,11 @@ async function executeQueuedToolCall(params: {
 		logger: params.params.runtime.logger,
 		description: exposedTool?.description,
 	});
-	// A nested action model has the same hard limit as the planner model.
-	// Record the failed attempt and preserve earlier receipts before stopping;
-	// rephrasing tool arguments cannot make its unchanged history fit.
+
+	// A nested action model has the same hard limit as the planner model. The
+	// failed attempt is recorded and earlier receipts are preserved above;
+	// rephrasing tool arguments cannot make its unchanged history fit, so the
+	// overflow terminates the turn ahead of the generic repeated-failure limit.
 	if (!result.success) {
 		const overflow = [result.error, result.data?.error].find(
 			isProviderContextOverflowFailure,
@@ -4610,6 +4813,20 @@ async function executeQueuedToolCall(params: {
 				recovery: "typed_boundary_terminal",
 			});
 		}
+	}
+
+	// The repeated-failure limit is asserted AFTER the step is recorded so the
+	// failed result that tripped it is part of the trajectory (live
+	// tj-f1579f952d5d21 shows only two of the three MEMORY_DELETE failures:
+	// the third threw before this bookkeeping ran) and so the loop can relay
+	// that result's own clarification (`repeatedFailureClarificationRelay`)
+	// instead of erroring the turn.
+	if (!result.success || result.error != null) {
+		assertRepeatedFailureLimit({
+			failures: params.failures,
+			latestFailure: failure,
+			maxRepeatedFailures: params.config.maxRepeatedFailures,
+		});
 	}
 }
 
@@ -5704,9 +5921,71 @@ function latestUnresolvedFailedNonTerminalToolStep(
 			unresolvedByOperation.delete(operationKey);
 			resolveShellFailuresSubsumedBy(step, unresolvedByOperation);
 			resolveMalformedCallsSupersededBy(step, unresolvedByOperation);
+			resolveFailedEffectsSupersededBy(step, unresolvedByOperation);
 		}
 	}
 	return [...unresolvedByOperation.values()].at(-1);
+}
+
+/**
+ * A failed effect receipt is superseded once the same tool applies the same
+ * effect operation later in the turn. The operation key carries every
+ * argument, so a retry that reaches the target another way (by title after a
+ * rejected event id) never matches the failed call and the stale failure kept
+ * authority over the final message: live 2026-09-14 a calendar move was
+ * applied on the fourth call and the user was told it could not be moved.
+ * The receipt's namespaced operation ("calendar.event.update") is the
+ * tool's own statement of what it did; an applied receipt for it says the
+ * failed attempt's outcome no longer stands.
+ */
+/**
+ * Two receipt operation names denote the same effect when they carry the
+ * same words in any order and joiner: the personal-assistant wrapper names
+ * a failed calendar update `calendar.update_event` (its subaction) while the
+ * calendar handler names the applied mutation `calendar.event.update`, so an
+ * exact comparison never matched on the live path and the failed step kept
+ * authority over "Done — moved to 4pm" (live 2026-09-14, tj-5657e3e32de5da:
+ * a forced "do not claim success" compose pass after the move applied).
+ */
+export function effectOperationKey(operation: string): string {
+	return operation
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((token) => token.length > 0)
+		.sort()
+		.join(" ");
+}
+
+function resolveFailedEffectsSupersededBy(
+	step: PlannerStep,
+	unresolvedByOperation: Map<string, PlannerStep>,
+): void {
+	const call = step.toolCall;
+	if (!call) return;
+	const applied = new Set(
+		(step.result?.effectReceipts ?? [])
+			.filter((receipt) => receipt.outcome === "applied")
+			.map((receipt) => effectOperationKey(receipt.operation)),
+	);
+	if (applied.size === 0) return;
+	for (const [key, failed] of [...unresolvedByOperation.entries()]) {
+		const failedCall = failed.toolCall;
+		if (
+			!failedCall ||
+			failedCall.name.toUpperCase() !== call.name.toUpperCase()
+		) {
+			continue;
+		}
+		const failedOperations = (failed.result?.effectReceipts ?? [])
+			.filter((receipt) => receipt.outcome === "failed")
+			.map((receipt) => effectOperationKey(receipt.operation));
+		if (
+			failedOperations.length > 0 &&
+			failedOperations.every((operation) => applied.has(operation))
+		) {
+			unresolvedByOperation.delete(key);
+		}
+	}
 }
 
 const MALFORMED_CALL_FAILURE_PATTERN =
@@ -7632,6 +7911,33 @@ function deterministicEvaluatorProtocolFailureRelay(
 	return deterministicSuccessfulToolRelay(trajectory);
 }
 
+/**
+ * After a settled, non-retryable tool failure (a calendar not-found no-op:
+ * success:false, data.retryable:false) the planner's clarifying question is
+ * the turn's honest end. The evaluator kept answering CONTINUE to that
+ * question until the terminal-only limit errored the turn and the user got
+ * the planner-exhaustion apology instead of the question (live 2026-09-12,
+ * tj-00000f20dab904: 5 planner + 5 evaluator calls, ~220K tokens).
+ */
+function deterministicSettledFailureClarificationRelay(
+	trajectory: PlannerTrajectory,
+	plannerMessage: string | undefined,
+): string | undefined {
+	for (let index = trajectory.steps.length - 1; index >= 0; index--) {
+		const step = trajectory.steps[index];
+		if (!step?.toolCall || isTerminalToolCall(step.toolCall) || !step.result)
+			continue;
+		if (step.result.success !== false) return undefined;
+		if (
+			(step.result.data as { retryable?: unknown } | undefined)?.retryable !==
+			false
+		)
+			return undefined;
+		return userSafeClarificationReplyCandidate(plannerMessage);
+	}
+	return undefined;
+}
+
 function deterministicTerminalContinuationLimitRelay(
 	trajectory: PlannerTrajectory,
 ): string | undefined {
@@ -7642,6 +7948,129 @@ function deterministicTerminalContinuationLimitRelay(
 		deterministicNoopClarificationRelay(trajectory) ??
 		deterministicMissingInputPlannerClarificationRelay(trajectory)
 	);
+}
+
+/**
+ * A relayed final message is usable only when it is real text, not one of
+ * the loop's own placeholders — those mean "nothing user-safe was found" and
+ * must keep the error path (the message service then explains the failure).
+ */
+function isUsableRelayMessage(message: string | undefined): message is string {
+	return (
+		message !== undefined &&
+		message.trim() !== "" &&
+		message !== HANDLED_STEP_FALLBACK_MESSAGE &&
+		message !== FAILED_TOOL_FALLBACK_MESSAGE
+	);
+}
+
+/**
+ * Terminal-only continuation limit: the evaluator's own reply. The verdict
+ * that exhausted the budget kept answering CONTINUE, but its `messageToUser`
+ * is the reply it would have shipped on FINISH — the evaluator has seen the
+ * whole trajectory — and a user-safe one is the closest thing to an answer
+ * the turn has. Before this relay the limit threw and the message service
+ * rendered the generic planner-exhaustion apology over a usable reply.
+ * Same egress gates as a FINISH reply: no leaked tool syntax, deliberation,
+ * in-flight promise, bare progress ack, meta-narration, or raw-tool-text
+ * echo; a success:false verdict passes through the failure-report gate and
+ * an unresolved failed step keeps its authority over the final text.
+ */
+function userSafeEvaluatorContinuationReply(
+	evaluator: EvaluatorOutput,
+	trajectory: PlannerTrajectory,
+): string | undefined {
+	const candidate = userSafeCapturedAnswerCandidate(evaluator.messageToUser);
+	if (!candidate) return undefined;
+	if (isToolMetaNarration(candidate)) return undefined;
+	if (isEchoOfPlannerFacingToolText(candidate, trajectory)) return undefined;
+	const finalMessage = userSafeFinalMessage(
+		terminalMessageWithFailureAuthority(
+			trajectory,
+			preferredFinalMessageFromToolOrModel(trajectory, candidate),
+			evaluator.success === false
+				? userSafeFailureReport(candidate, trajectory)
+				: undefined,
+		),
+		trajectory,
+	);
+	return isUsableRelayMessage(finalMessage) ? finalMessage : undefined;
+}
+
+// Internal-identifier residue a relayed tool clarification must never carry:
+// record uuids and long hex ids, id-shaped field names, stack frames, and
+// error-class prefixes. Applied on top of the model-text gates because
+// tool-owned failure text is written for the planner and lists ids on purpose.
+const INTERNAL_IDENTIFIER_RESIDUE = [
+	/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,
+	/\b[0-9a-f]{16,}\b/i,
+	/\b(?:memoryId|entityId|roomId|agentId|worldId|messageId|receiptId)\b/,
+	/^\s*at\s+\S.*:\d+:\d+\)?\s*$/m,
+	/\b[A-Z][A-Za-z]+(?:Error|Exception)\s*:/,
+];
+
+function hasInternalIdentifierResidue(text: string): boolean {
+	return INTERNAL_IDENTIFIER_RESIDUE.some((pattern) => pattern.test(text));
+}
+
+/**
+ * A failed tool's own clarifying question, when it is safe to show verbatim:
+ * the opt-in `userFacingText` — or `text` only under an awaiting-input /
+ * confirmation marker, the licence {@link groundedFailedToolMessage} already
+ * grants — accepted only when it reads as a request to the user
+ * ({@link userSafeClarificationReplyCandidate}) and carries no internal
+ * identifiers. Planner-facing diagnostics that list record ids ("Delete by
+ * memoryId instead: - [facts] <uuid>: …") never qualify: a tool that wants
+ * the user to choose must phrase the choice in the user's terms.
+ */
+function failedToolOwnedClarification(
+	result: PlannerToolResult | undefined,
+): string | undefined {
+	if (result?.success !== false) return undefined;
+	const owned =
+		hasRequiresConfirmationMarker(result) || hasAwaitingUserInputMarker(result)
+			? (result.userFacingText ?? result.text)
+			: result.userFacingText;
+	const candidate = userSafeClarificationReplyCandidate(owned);
+	if (!candidate || hasInternalIdentifierResidue(candidate)) return undefined;
+	return candidate;
+}
+
+/**
+ * Repeated-failure limit: the failed tool's own clarifying question. When the
+ * planner re-sends the same failing call until `assertRepeatedFailureLimit`
+ * throws, the message service renders a generic planner-exhaustion apology
+ * (live 2026-09-13 22:44Z, tj-f1579f952d5d21: MEMORY_DELETE answered
+ * MEMORY_AMBIGUOUS_QUERY three times for the same query and the user got
+ * "i had a hiccup with the last request"). A tool that failed because it
+ * needs the user to choose has already written the honest end of the turn
+ * — the rule `deterministicSettledFailureClarificationRelay` applies to the
+ * planner's clarification — so surface that question instead. Anything else
+ * (no owned text, a refusal, diagnostics, ids) keeps the error path.
+ */
+function repeatedFailureClarificationRelay(
+	error: unknown,
+	trajectory: PlannerTrajectory,
+): string | undefined {
+	if (
+		!(error instanceof TrajectoryLimitExceeded) ||
+		error.kind !== "repeated_failures"
+	) {
+		return undefined;
+	}
+	const step = trajectory.steps[trajectory.steps.length - 1];
+	if (!step?.toolCall || isTerminalToolCall(step.toolCall)) return undefined;
+	const clarification = failedToolOwnedClarification(step.result);
+	if (!clarification) return undefined;
+	const finalMessage = userSafeFinalMessage(
+		terminalMessageWithFailureAuthority(
+			trajectory,
+			clarification,
+			clarification,
+		),
+		trajectory,
+	);
+	return isUsableRelayMessage(finalMessage) ? finalMessage : undefined;
 }
 
 /**
@@ -7868,6 +8297,20 @@ export function singleVerifiedUserFacingToolResultText(
 		}
 	}
 
+	const text =
+		singleVerifiedUserFacingToolResult(trajectory)?.userFacingText?.trim();
+	return text || undefined;
+}
+
+/**
+ * The one successful tool result that opted into `verifiedUserFacing`, with
+ * no later failed non-terminal step and (when it carries receipts) applied
+ * user-facing effect proof; undefined when the opt-in is ambiguous.
+ */
+function singleVerifiedUserFacingToolResult(
+	trajectory: PlannerTrajectory,
+): PlannerToolResult | undefined {
+	const steps = allTrajectorySteps(trajectory);
 	const successfulToolSteps = steps.filter(
 		(step) => step.toolCall && step.result?.success === true,
 	);
@@ -7893,8 +8336,31 @@ export function singleVerifiedUserFacingToolResultText(
 	) {
 		return undefined;
 	}
-	const text = result.userFacingText?.trim();
-	return text || undefined;
+	return result;
+}
+
+/**
+ * The evaluator's FINISH prose, or undefined when it has nothing to add: a
+ * single verified tool result that completed the turn (`turnComplete`) IS
+ * the reply, and a `success:false` FINISH after it only restates the outcome
+ * the tool already stated. Live 2026-09-14: the attachment action posted
+ * "I couldn't generate a readable description for that image." through its
+ * own callback, the evaluator finished with success:false and "I couldn't
+ * read that image, so I have no description to give…", and the user got both
+ * as two messages. Prose after a success verdict still combines with the
+ * verified text (a second intent answered from context).
+ */
+function evaluatorFinishProse(
+	trajectory: PlannerTrajectory,
+	evaluator: { success?: boolean; messageToUser?: unknown },
+): unknown {
+	if (
+		evaluator.success === false &&
+		singleVerifiedUserFacingToolResult(trajectory)?.turnComplete === true
+	) {
+		return undefined;
+	}
+	return evaluator.messageToUser;
 }
 
 /**
@@ -8094,11 +8560,101 @@ function combinedVerifiedToolTextAndProse(
 	// Prose that adds nothing over the verified output (a restatement or
 	// fragment of it) keeps the verbatim-echo behavior unchanged.
 	if (normalize(verified).includes(normalize(prose))) return undefined;
+	if (proseRestatesVerifiedText(prose, verified)) return undefined;
 	const fenced =
 		verified.includes("\n") && !verified.includes("```")
 			? `\`\`\`\n${verified}\n\`\`\``
 			: verified;
 	return `${fenced}\n\n${prose}`;
+}
+
+const RESTATEMENT_FUNCTION_WORDS = new Set([
+	"a",
+	"an",
+	"the",
+	"and",
+	"or",
+	"to",
+	"of",
+	"in",
+	"on",
+	"at",
+	"for",
+	"by",
+	"with",
+	"from",
+	"into",
+	"is",
+	"are",
+	"was",
+	"were",
+	"be",
+	"been",
+	"has",
+	"have",
+	"had",
+	"it",
+	"its",
+	"it's",
+	"this",
+	"that",
+	"these",
+	"those",
+	"now",
+	"your",
+	"you",
+	"i",
+	"i've",
+	"i'd",
+	"we",
+	"all",
+	"set",
+	"done",
+	"ok",
+	"okay",
+	"so",
+	"as",
+	"up",
+	"just",
+	"also",
+	"already",
+	"then",
+	"there",
+	"here",
+]);
+
+function restatementContentWords(text: string): Set<string> {
+	const words = new Set<string>();
+	for (const raw of text
+		.toLowerCase()
+		.replace(/[\u201c\u201d"\u2018\u2019']/g, "")
+		.split(/[^a-z0-9%$.:/-]+/)) {
+		const word = raw.replace(/^[.:/-]+|[.:/-]+$/g, "");
+		if (word.length === 0 || RESTATEMENT_FUNCTION_WORDS.has(word)) continue;
+		words.add(word);
+	}
+	return words;
+}
+
+/**
+ * Prose whose every content word already appears in the verified text adds no
+ * substance: it is the verified outcome said again ("Moved it. Vet appointment
+ * is now Friday, Sep 18 at 4pm EDT." after "Moved “Vet appointment” to Friday,
+ * Sep 18 at 4pm EDT."; live 2026-09-15, both delivered as one message).
+ * A single new content word (a value, a unit, a qualifier) keeps the prose.
+ */
+export function proseRestatesVerifiedText(
+	prose: string,
+	verified: string,
+): boolean {
+	const proseWords = restatementContentWords(prose);
+	if (proseWords.size === 0) return false;
+	const verifiedWords = restatementContentWords(verified);
+	if (verifiedWords.size < 3) return false;
+	for (const word of proseWords) {
+		if (!verifiedWords.has(word)) return false;
+	}
+	return true;
 }
 
 function latestToolResultIsGenericNoop(trajectory: PlannerTrajectory): boolean {
@@ -8404,8 +8960,160 @@ type GatedEvaluatorDecision = {
 		| "action_terminal_result"
 		| "action_terminal_failure"
 		| "post_tool_model_reply"
-		| "sub_planner_evaluator_finish";
+		| "sub_planner_evaluator_finish"
+		| "verified_intent_result";
 };
+
+export const VERIFIED_INTENT_GATED_EVALUATOR_THOUGHT =
+	"Gated FINISH: the single declared intent is fulfilled by the sole verified action-owned result (its own user-facing text names the intent's content and it carries an applied receipt); evaluator LLM call skipped.";
+
+const INTENT_STOP_WORDS = new Set([
+	"a",
+	"an",
+	"the",
+	"my",
+	"your",
+	"our",
+	"me",
+	"you",
+	"i",
+	"we",
+	"it",
+	"its",
+	"is",
+	"are",
+	"was",
+	"be",
+	"to",
+	"of",
+	"in",
+	"on",
+	"at",
+	"for",
+	"and",
+	"or",
+	"that",
+	"this",
+	"with",
+	"about",
+	"from",
+	"into",
+	"as",
+	"so",
+	"up",
+	"now",
+	"please",
+	"remember",
+	"recall",
+	"forget",
+	"note",
+	"save",
+	"store",
+	"set",
+	"create",
+	"make",
+	"add",
+	"remove",
+	"delete",
+	"cancel",
+	"update",
+	"change",
+	"move",
+	"reschedule",
+	"put",
+	"get",
+	"do",
+	"did",
+	"have",
+	"has",
+	"user",
+	"users",
+	"again",
+	"then",
+	"just",
+	"also",
+]);
+
+function intentContentTokens(text: string): string[] {
+	return text
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u)
+		.filter((token) => token.length >= 2 && !INTENT_STOP_WORDS.has(token));
+}
+
+/**
+ * Deterministic fulfillment check: every content word of the declared intent
+ * that survives stop-word removal must appear in the action-owned reply
+ * (60% coverage, at least one word). "remember favorite tea is matcha" →
+ * "Saved: your favorite tea is matcha." matches; "forget my favorite tea" →
+ * "Forgot: your dog is named Rex." does not, and the evaluator still runs.
+ */
+export function intentFulfilledByResultText(
+	intent: string,
+	resultText: string,
+): boolean {
+	const intentTokens = [...new Set(intentContentTokens(intent))];
+	if (intentTokens.length === 0) return false;
+	const resultTokens = new Set(intentContentTokens(resultText));
+	const matched = intentTokens.filter((token) =>
+		resultTokens.has(token),
+	).length;
+	return matched >= 1 && matched / intentTokens.length >= 0.6;
+}
+
+/**
+ * Intent-aware sibling of {@link tryGateEvaluator}. Stage 1 declared exactly
+ * one intent and the sole executed tool completed it on its own terms:
+ * `success`, `turnComplete`, `verifiedUserFacing`, a safe `userFacingText`
+ * that names the intent's content, and an applied effect receipt. The
+ * evaluator would re-read that same result to author prose (live VPS:
+ * 1.3–2.5 s and ~15K prompt tokens per memory turn, and it rephrased
+ * "Forgot: your favorite tea…" into slang). Anything else — several intents,
+ * pending work, a failure, no receipt, or text that does not cover the
+ * intent — still evaluates.
+ */
+function tryVerifiedIntentGate(args: {
+	trajectory: PlannerTrajectory;
+	failures: readonly FailureLike[];
+	lastPlannerExplicitCompleted: boolean | undefined;
+	declaredIntents: readonly string[];
+}): GatedEvaluatorDecision | null {
+	const { trajectory, failures } = args;
+	if (args.declaredIntents.length !== 1) return null;
+	if (args.lastPlannerExplicitCompleted === false) return null;
+	if (trajectory.plannedQueue.length > 0) return null;
+	if (failures.length > 0) return null;
+	if (completedToolStepCount(trajectory) !== 1) return null;
+	if (latestUnresolvedFailedNonTerminalToolStep(trajectory)) return null;
+	const latestStep = trajectory.steps[trajectory.steps.length - 1];
+	const result = latestStep?.result;
+	if (!latestStep?.toolCall || !result) return null;
+	if (result.success !== true) return null;
+	if (result.turnComplete !== true || result.verifiedUserFacing !== true)
+		return null;
+	if (
+		hasAwaitingUserInputMarker(result) ||
+		hasRequiresConfirmationMarker(result)
+	)
+		return null;
+	const applied = (result.effectReceipts ?? []).some(
+		(receipt) => receipt?.outcome === "applied",
+	);
+	if (!applied) return null;
+	const message = result.userFacingText?.trim();
+	if (!message || isUnsafeUserVisibleText(message)) return null;
+	if (!intentFulfilledByResultText(args.declaredIntents[0], message))
+		return null;
+	return {
+		reason: "verified_intent_result",
+		output: {
+			success: true,
+			decision: "FINISH",
+			thought: VERIFIED_INTENT_GATED_EVALUATOR_THOUGHT,
+			messageToUser: message,
+		},
+	};
+}
 
 export const SUB_PLANNER_VERDICT_GATED_EVALUATOR_THOUGHT =
 	"Gated FINISH: the umbrella action's sub-planner evaluator already judged these results against the declared intents; second evaluator LLM call skipped.";
@@ -8725,6 +9433,9 @@ const TERMINAL_TOOL_CALL_FINISH_THOUGHT =
 
 const TERMINAL_AFTER_FAILED_TOOL_THOUGHT =
 	"Terminal FINISH: planner ended the loop after a failed tool; the tool-owned failure remains authoritative.";
+
+const REPEATED_FAILURE_CLARIFICATION_THOUGHT =
+	"Terminal FINISH: the repeated-failure limit ended the loop; the failed tool's own clarifying question is the reply.";
 
 function groundedFailedToolMessage(
 	step: PlannerStep,

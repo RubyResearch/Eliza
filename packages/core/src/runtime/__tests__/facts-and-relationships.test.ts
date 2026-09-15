@@ -430,6 +430,97 @@ describe("runFactsAndRelationshipsStage", () => {
 		expect(runtime.createMemory).not.toHaveBeenCalled();
 	});
 
+	it("credits a fact to the author when the model names the author's connector display name shared by another participant", async () => {
+		const runtime = makeRuntime(
+			JSON.stringify({
+				facts: [{ subject: "nubs-e2e", fact: "favorite tea is assam" }],
+				relationships: [],
+				thought: "the author stated a preference",
+			}),
+		);
+		runtime.getEntitiesForRoom = vi.fn(async () => [
+			{
+				id: "00000000-0000-0000-0000-0000000000a1" as UUID,
+				names: ["nubs-e2e", "eliza-e2e"],
+				components: [],
+				metadata: {},
+			},
+		]);
+		const message = {
+			...makeMessage(),
+			content: {
+				text: "remember that my favorite tea is assam",
+				source: "discord",
+				name: "nubs-e2e",
+			},
+			metadata: { type: "message", entityName: "nubs-e2e" },
+		} as Memory;
+
+		const result = await runFactsAndRelationshipsStage({
+			runtime,
+			message,
+			state: makeState(),
+			extract: { facts: ["favorite tea is assam"] },
+		});
+
+		expect(result.written.facts).toBe(1);
+		expect(runtime.createMemory).toHaveBeenCalledWith(
+			expect.objectContaining({
+				entityId: message.entityId,
+				metadata: expect.objectContaining({
+					subject: "nubs-e2e",
+					subjectResolved: true,
+				}),
+			}),
+			"facts",
+			true,
+		);
+	});
+
+	it("leaves a subject unresolved when several bystanders share the alias instead of crediting the first", async () => {
+		const runtime = makeRuntime(
+			JSON.stringify({
+				facts: [{ subject: "Sam", fact: "moved to Lisbon" }],
+				relationships: [],
+				thought: "a third party",
+			}),
+		);
+		runtime.getEntitiesForRoom = vi.fn(async () => [
+			{
+				id: "00000000-0000-0000-0000-0000000000a1" as UUID,
+				names: ["Sam"],
+				components: [],
+				metadata: {},
+			},
+			{
+				id: "00000000-0000-0000-0000-0000000000b2" as UUID,
+				names: ["Sam", "Samantha"],
+				components: [],
+				metadata: {},
+			},
+		]);
+		const message = makeMessage();
+
+		await runFactsAndRelationshipsStage({
+			runtime,
+			message,
+			state: makeState(),
+			extract: { facts: ["Sam moved to Lisbon"] },
+		});
+
+		expect(runtime.createMemory).toHaveBeenCalledWith(
+			expect.objectContaining({
+				entityId: message.entityId,
+				metadata: expect.objectContaining({
+					subject: "Sam",
+					subjectResolved: false,
+				}),
+			}),
+			"facts",
+			true,
+		);
+	});
+
 	it("suppresses only the author's own fact: a third-person fact in the same message persists under that participant", async () => {
 		const runtime = makeRuntime(
 			JSON.stringify({

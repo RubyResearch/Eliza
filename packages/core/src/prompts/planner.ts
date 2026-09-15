@@ -54,13 +54,39 @@ ${plannerRequiredPolicy.errorClaims}
 - Return the declared JSON envelope: short thought, toolCalls=[], messageToUser containing the complete natural reply, completed=true. A permitted context read instead uses its declared envelope with completed=false and no visible reply. No prose or fences outside JSON.
 `;
 
+/*
+ * Incident log behind the planner rules (kept out of the prompt text; the rule
+ * statements below carry the behaviour and runtime/__tests__/planner-loop.test.ts
+ * pins the phrasing; `plannerRequiredPolicy` above is the canonical mandatory set
+ * and appendMandatoryPlannerPolicy in runtime/planner-loop.ts re-adds any of
+ * those rules to a custom template that lacks them):
+ * - elizaOS/eliza#7935: Stage 1 hinted candidateActions=["SEARCH_MESSAGES"] with no
+ *   such action registered; the planner burned iterations on `echo "placeholder for
+ *   ..."` and shell greps -> SHELL-fallback and dead-hint rules.
+ * - Coding sub-agents spawned to "search the Discord channel for messages mentioning
+ *   X" ended in sub-agent error/timeout and a generic "Sorry, something went wrong"
+ *   reply -> TASKS_SPAWN_AGENT scope rule.
+ * - A sub-agent spawned for a single price/weather/URL lookup was slow, re-spawned
+ *   itself and posted "working on it" acks before answering -> one-shot lookup rule.
+ * - 2026-05-26: after four blocked SHELL curl iterations the REPLY said "I'm fetching
+ *   the latest info... Please hold" with nothing in flight; 2026-06-28 (multi-bot
+ *   arena): "wrapping the runtime-identity fix" with zero TASKS_SPAWN_AGENT calls
+ *   -> in-flight claim rule (investigative AND task-execution verbs, every
+ *   grammatical form, stalling phrases).
+ * - "Something glitched, give it another go" used to dodge a build request when no
+ *   tool had failed -> fabricated-failure rule.
+ * - Tool output replaced by "Listed files as requested" / "Provided the output as
+ *   returned by X" meta-narration -> tool-output rule.
+ * - A pre-tool ack ("I'm connecting your calendar.") became the terminal reply after
+ *   the CONNECT tool drained the queue, dropping the OAuth link -> pre-tool bubble
+ *   rule (planner-loop.test.ts pins the inversion).
+ */
 export const plannerTemplate = `task: Plan next native tool calls.
 
 rules:
-- use only tools array; smallest grounded queue that covers every explicit requested outcome, including navigation separately from reading, searching, or changing data. Opening a visible browser/view and researching a question are separate outcomes: a background web search does not open the user's browser. Queue both when both are requested; do not demote navigation to an optional detail of the "main" task. Routing hints are not a replacement for the full user request; do not silently drop a clause.
+- use only the tools array; smallest grounded queue covering every explicit requested outcome. Navigation is a separate outcome from reading, searching, or changing data (a background web search does not open the user's browser): queue both when both are asked; never demote navigation to a detail of the "main" task or silently drop a clause because a routing hint omits it.
 - routed action: set parameters.action only if schema has it
-- args grounded in user request or prior tool results
-- obey schema; arrays as JSON arrays, not comma strings
+- args grounded in user request or prior tool results; obey schema; arrays as JSON arrays, not comma strings
 - no empty strings/placeholders/invented required args; gather via grounded tool or no tool
 - For currently authorized work, call a matching tool even with missing details; its handler owns required clarification and validation. Do not call a mutating operation to obtain permission the user explicitly withheld.
 - Currently authorized life-management side effects (calendar events, reminders, alarms, todos, routines, goals, scheduled/recurring tasks) require the matching exposed tool before reporting completion. Match its name, routing hint and description, not a fixed required name. A tool-owned conflict, clarification, preview or confirmation result does not prove an effect happened; an operation that always commits is not a preview operation.
@@ -70,10 +96,9 @@ ${plannerRequiredPolicy.completedEffects}
 ${plannerRequiredPolicy.responseStyle}
 - native toolCalls: pass each argument as a direct field in that tool's args object exactly as its schema declares; never nest arguments under \`parameters\` unless the tool schema itself declares a \`parameters\` field
 - plain-JSON fallback only (when native tool calls are unavailable): return exactly {"action":"TOOL_NAME","parameters":{...},"thought":"short reason"}; never put that envelope inside a native tool's args
-- owner goal save/create/update/review when OWNER_GOALS is exposed => native OWNER_GOALS args are {"action":"create|update|review","intent":"...","title":"...","confirmed":true|false,"details":{"description":"...","successCriteria":{"summary":"..."},"supportStrategy":{"summary":"..."} } }; only the plain-JSON fallback wraps those args in {"action":"OWNER_GOALS","parameters":{...},"thought":"..."}; never use messageToUser
+- owner goal save/create/update/review when OWNER_GOALS is exposed => native OWNER_GOALS args {"action":"create|update|review","intent":"...","title":"...","confirmed":true|false,"details":{"description":"...","successCriteria":{"summary":"..."},"supportStrategy":{"summary":"..."}}}; the {"action":"OWNER_GOALS","parameters":{...}} envelope exists only in the plain-JSON fallback; never messageToUser
 ${plannerRequiredPolicy.widgets}
-- more tool work => native toolCalls only; never narrate/simulate calls
-- partial after tool result => next grounded tool, not messageToUser
+- more tool work, or a partial result after a tool => the next grounded native toolCall; never narrate/simulate calls or fall back to messageToUser
 - A tool-required routing hint does not override user constraints. Propose a terminal preview/question when execution must wait for permission; completion evaluation judges outstanding intents. Otherwise attempt currently authorized work with an exposed non-terminal tool.
 - incomplete while user needs live/current/external data, filesystem/runtime state, command output, repo work, build, PR, deploy, verify, side effect, and exposed tool can try
 - attachments/memory/snippets do not replace explicit current run/check/fetch/inspect/build/deploy/verify/look up now; call tool
@@ -81,14 +106,14 @@ ${plannerRequiredPolicy.widgets}
 ${plannerRequiredPolicy.recallTools}
 ${plannerRequiredPolicy.discovery}
 ${plannerRequiredPolicy.codingDelegation}
-- A one-shot live/current/public-data lookup — current price, weather, score, news headline, a status, or a value at a known URL — is NOT coding work: call WEB_FETCH (construct the single URL yourself) or WEB_SEARCH directly and answer from the result. Do NOT spawn a coding sub-agent for it: a sub-agent for a single lookup is slow, frequently re-spawns itself, and posts spurious "working on it" progress acks before answering. Spawn only when the task is genuinely build/code/repo/multi-step work.
+- A one-shot live/current/public-data lookup (price, weather, score, headline, a value at a known URL) is NOT coding work: call WEB_FETCH (construct the single URL yourself) or WEB_SEARCH directly and answer from the result; spawn a coding sub-agent only for genuine build/code/repo/multi-step work (for a single lookup it is slow, re-spawns itself, and posts spurious progress acks).
 - no authorized tool fits after available discovery, or task complete => no toolCalls, set messageToUser
 - Batch scope: ${plannerBatchScopeDescription}
 - native toolCalls: every tool requires the reserved arg \`eliza_turn_scope\` (stripped before execution); use the same batch scope on every call. In plain-JSON fallback, completed=true means "final", completed=false means "more_work_pending"; omit only when unknown. Neither form skips result verification.
 ${plannerRequiredPolicy.workClaims}
 ${plannerRequiredPolicy.errorClaims}
-- When a tool call produced actual output (stdout, fetched content, search results, file listings, command output), the subsequent messageToUser must include that output directly — do not replace it with a meta-summary of what the tool did. Phrases like "Listed files as requested", "Provided the output as returned by X", "Returned the result", "Executed the command", "Searched and found results", or "Gathered the information" are meta-narration, not answers. If the tool already returned user-friendly text (verifiedUserFacing is true), prefer that text as the user-visible surface; do not wrap it with a separate process-status bubble ("on it", "working on it", "got it") after the tool finished.
-- Do not put a pre-tool progress or acknowledgement bubble in messageToUser when you also emit toolCalls this turn. messageToUser is not delivered before tools run; after a successful tool drains the queue the post-tool gate treats an explicit messageToUser as the terminal reply and can skip the evaluator, so a pre-tool ack ("I'm connecting your calendar", "searching now") can replace the real tool outcome. Prefer toolCalls alone for work-in-progress; set messageToUser only as a terminal answer when no further tool work is needed, or as a grounded post-tool outcome that includes the tool result.
+- When a tool call produced actual output (stdout, fetched content, search results, file listings), messageToUser must include that output directly, never a meta-summary of what the tool did ("Listed files as requested", "Executed the command"). If the tool already returned user-friendly text (verifiedUserFacing is true), prefer that text; do not wrap it in a process-status bubble ("on it", "got it") after the tool finished.
+- Do not put a pre-tool progress or acknowledgement bubble in messageToUser when you also emit toolCalls: it is not delivered before tools run, and after a successful tool drains the queue the post-tool gate treats an explicit messageToUser as the terminal reply (skipping the evaluator), so a pre-tool ack ("I'm connecting your calendar") can replace the real outcome. Emit toolCalls alone for work in progress; set messageToUser only as a terminal answer or as a grounded post-tool outcome that includes the tool result.
 
 If context has "# Routing hints", follow them. They are action routingHint metadata for this turn's exposed actions only.
 

@@ -6168,7 +6168,25 @@ async function runLifeOperationHandlerInner(
           // wrong-item deletion guard — sibling of TRIGGER_REF_MISMATCH).
           true,
         );
-      if (!target)
+      if (!target) {
+        // Users call scheduled triggers "reminders" too: "delete the landlord
+        // reminder" reached this branch, reported not-found, and the trigger it
+        // named was never tried (live 2026-09-13). Point the planner at it.
+        const trigger = await triggerNamedLikeReminder(
+          runtime,
+          targetName ?? "",
+        );
+        if (trigger)
+          return {
+            success: false,
+            text: `"${trigger.displayName}" is a scheduled trigger, not a reminder definition; delete it with the trigger tool (taskId ${trigger.taskId}).`,
+            data: {
+              error: "REMINDER_IS_TRIGGER",
+              triggerTaskId: trigger.taskId,
+              suggestedAction: "TRIGGER_DELETE",
+              retryable: true,
+            },
+          };
         return {
           success: false,
           text:
@@ -6176,6 +6194,7 @@ async function runLifeOperationHandlerInner(
               ? `I found ${ambiguousCandidates.length === 1 ? "a similarly named item" : "similarly named items"} but not an exact match — delete ${ambiguousCandidates.length === 1 ? "it" : "which one"}?\n${ambiguousCandidates.map((title) => `  - ${title}`).join("\n")}`
               : "I could not find that item to delete.",
         };
+      }
       await service.deleteDefinition(target.definition.id);
       const fallback = `Deleted "${target.definition.title}" and its occurrences.`;
       return {
@@ -6839,4 +6858,37 @@ export async function runLifeOperationHandler(
     return { ...settledResult, effectReceipts: [receipt] };
   }
   return completeLifeOpsEffect(callback, settledResult, receipt);
+}
+
+/**
+ * A trigger task whose display name matches a reminder title the user gave
+ * (case-insensitive, exact or containing). Returns nothing when the match is
+ * absent or ambiguous so a wrong trigger is never suggested for deletion.
+ */
+async function triggerNamedLikeReminder(
+  runtime: IAgentRuntime,
+  targetName: string,
+): Promise<{ taskId: string; displayName: string } | undefined> {
+  const wanted = targetName.trim().toLowerCase();
+  if (!wanted) return undefined;
+  let tasks: Awaited<ReturnType<IAgentRuntime["getTasks"]>>;
+  try {
+    tasks = await runtime.getTasks({
+      tags: ["trigger"],
+      agentIds: [runtime.agentId],
+    });
+  } catch {
+    return undefined;
+  }
+  const matches = tasks.flatMap((task) => {
+    const displayName = (
+      task.metadata as { trigger?: { displayName?: unknown } } | undefined
+    )?.trigger?.displayName;
+    if (typeof displayName !== "string" || !task.id) return [];
+    const name = displayName.trim().toLowerCase();
+    return name === wanted || name.includes(wanted) || wanted.includes(name)
+      ? [{ taskId: String(task.id), displayName }]
+      : [];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }

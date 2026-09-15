@@ -8,6 +8,7 @@ import { recordInferenceSpan, timeInferenceSpan } from "../../inference-timing";
 import { getCandidateActionBackstopRules } from "../../runtime/candidate-action-backstop";
 import { withRequiredCompletionSourceIdentity } from "../../runtime/completion-context";
 import { computePrefixHashes, hashString } from "../../runtime/context-hash";
+import { getUserMessageText } from "../../utils/message-text";
 import { getMessageHandlerReply } from "../../runtime/message-handler";
 import {
 	buildModelInputBudget,
@@ -68,6 +69,7 @@ import {
 import {
 	getStage1RetryReason,
 	getStage1RoutingRepair,
+	getStage1UnusableDecisionRepair,
 	isEmptyStage1Result,
 	parseMessageHandlerModelOutput,
 	readStage1EmptyRetryLimit,
@@ -277,15 +279,18 @@ export async function generateStage1Decision(
 		];
 	};
 	let messageHandlerTools = createMessageHandlerTools();
+	// Keep shared-room agents and pipeline stages on separate cache slots, and
+	// keep this slot's identity across the discovery re-render: a read or
+	// repair continues the same scoped workflow even as its input expands.
+	const stage1ConversationId = args.message.roomId
+		? JSON.stringify([args.runtime.agentId, args.message.roomId, "stage1"])
+		: undefined;
 	const messageHandlerProviderOptions = withModelInputBudgetProviderOptions(
 		cacheProviderOptions({
 			prefixHash: stage1PrefixHash,
 			segmentHashes: stage1PrefixHashes.map((entry) => entry.segmentHash),
 			promptSegments: messageHandlerInput.promptSegments,
-			// Keep shared-room agents and pipeline stages on separate cache slots.
-			conversationId: args.message.roomId
-				? JSON.stringify([args.runtime.agentId, args.message.roomId, "stage1"])
-				: undefined,
+			conversationId: stage1ConversationId,
 		}),
 		buildModelInputBudget({
 			messages: messageHandlerInput.messages,
@@ -449,6 +454,71 @@ export async function generateStage1Decision(
 			stage1ModelParams,
 		)) as string | GenerateTextResult;
 		stage1RetryReason = getStage1RetryReason(rawMessageHandler);
+	}
+	// A parseable decision that ends an addressed turn without an answer gets
+	// one repaired re-ask on every channel (the discovery loop below is direct
+	// text only). An unusable re-ask keeps the original decision so the
+	// deferral contract (#11504) is unchanged.
+	// Voice keeps its complete path: its spoken answer need not sit in replyText.
+	if (!args.codingMode && !voiceDirectMessageChannel) {
+		const unusableRepair = getStage1UnusableDecisionRepair(
+			extractMessageHandlerRawParsed(rawMessageHandler),
+			getUserMessageText(args.message),
+		);
+		if (
+			unusableRepair &&
+			shouldUseStage1PlannerFallback(args.runtime, args.message)
+		) {
+			args.runtime.logger?.warn?.(
+				{ src: "service:message", roomId: args.message.roomId },
+				"[message] Stage 1 ended an addressed turn without an answer — one repaired re-ask",
+			);
+			const repairedInput = {
+				...messageHandlerInput,
+				messages: [
+					...messageHandlerInput.messages,
+					{ role: "user" as const, content: unusableRepair },
+				],
+				promptSegments: [
+					...messageHandlerInput.promptSegments,
+					{ content: unusableRepair, stable: false },
+				],
+			};
+			const repairedHashes = computePrefixHashes(repairedInput.promptSegments);
+			const repairedCacheOptions = cacheProviderOptions({
+				prefixHash: stage1PrefixHash,
+				segmentHashes: repairedHashes.map((entry) => entry.segmentHash),
+				promptSegments: repairedInput.promptSegments,
+				conversationId: stage1ConversationId,
+			});
+			stage1TurnSignal.throwIfAborted();
+			const repaired = (await args.runtime.useModel(
+				ModelType.RESPONSE_HANDLER,
+				{
+					...stage1ModelParams,
+					messages: repairedInput.messages,
+					promptSegments: repairedInput.promptSegments,
+					providerOptions: withModelInputBudgetProviderOptions(
+						{
+							...stage1ProviderOptions,
+							...repairedCacheOptions,
+							eliza: {
+								...(stage1ProviderOptions.eliza as object),
+								...(repairedCacheOptions.eliza as object),
+							},
+						},
+						buildModelInputBudget({
+							messages: repairedInput.messages,
+							promptSegments: repairedInput.promptSegments,
+							tools: messageHandlerTools,
+						}),
+					),
+				},
+			)) as string | GenerateTextResult;
+			if (extractMessageHandlerRawParsed(repaired)) {
+				rawMessageHandler = repaired;
+			}
+		}
 	}
 	// A context request is an incomplete decision. Recompose through the same
 	// permission/disclosure gates before another model call, and never dispatch
@@ -626,9 +696,7 @@ export async function generateStage1Decision(
 			prefixHash: stage1PrefixHash,
 			segmentHashes: stage1PrefixHashes.map((entry) => entry.segmentHash),
 			promptSegments: messageHandlerInput.promptSegments,
-			conversationId: args.message.roomId
-				? String(args.message.roomId)
-				: undefined,
+			conversationId: stage1ConversationId,
 		});
 		// Full restoration returns to the ordinary selection contract. Keep the
 		// actual tool schema aligned with the newly rendered history policy.

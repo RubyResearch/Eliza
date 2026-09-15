@@ -34,7 +34,7 @@ function makeRuntime(): AgentRuntime {
 		character: {
 			name: "EvaluatorMiddleAgent",
 			bio: "test",
-			settings: {},
+			settings: { POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS: "1000000" },
 		} as Character,
 		adapter: new InMemoryDatabaseAdapter(),
 		logLevel: "fatal",

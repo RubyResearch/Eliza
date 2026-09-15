@@ -16,6 +16,7 @@ import { isReadView } from "../types/content";
 import type { ChatMessage, ChatMessageContentPart } from "../types/model";
 import type { JsonValue } from "../types/primitives.ts";
 import { getActionResultActionName } from "../utils/action-results";
+import { truncateWellFormed } from "../utils/well-formed";
 import { stringifyForModel } from "./json-output";
 import type { PlannerStep, PlannerToolResult } from "./planner-types";
 import {
@@ -61,6 +62,11 @@ export function renderActionResultsForModel(
 	options: {
 		header?: string;
 		redactText?: ToolDiagnosticTextRedactor;
+		/**
+		 * Head-preserving cap on each serialized result body; the cut is marked
+		 * with the omitted count. Omit for the complete projection.
+		 */
+		maxCharsPerResult?: number;
 	} = {},
 ): RenderedActionResultsForModel {
 	if (results.length === 0) {
@@ -89,7 +95,7 @@ export function renderActionResultsForModel(
 		}
 		const body = toolMessageContent(safeResult);
 		const status = result.success === false ? "failed" : "succeeded";
-		return `${index + 1}. ${getActionResultActionName(result)} - ${status}\n${JSON.stringify(JSON.parse(body))}`;
+		return `${index + 1}. ${getActionResultActionName(result)} - ${status}\n${capResultBody(JSON.stringify(JSON.parse(body)), options.maxCharsPerResult)}`;
 	});
 	return {
 		text: [options.header ?? "# Current Chain Action Results", ...rendered]
@@ -102,6 +108,24 @@ export function renderActionResultsForModel(
 			omissionReasons: {},
 		},
 	};
+}
+
+/**
+ * Keeps the head of an over-long serialized result and marks the cut, so a
+ * prompt that only needs the outcome (the post-turn evaluator) does not carry
+ * every receipt and row of a large result. Never splits a surrogate pair.
+ */
+function capResultBody(body: string, maxChars: number | undefined): string {
+	if (
+		maxChars === undefined ||
+		!Number.isFinite(maxChars) ||
+		maxChars < 1 ||
+		body.length <= maxChars
+	) {
+		return body;
+	}
+	const head = truncateWellFormed(body, maxChars);
+	return `${head}\n[truncated: ${body.length - head.length} of ${body.length} chars omitted]`;
 }
 
 /**

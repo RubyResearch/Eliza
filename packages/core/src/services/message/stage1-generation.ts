@@ -1,6 +1,9 @@
 /** Classifies Stage 1 retry conditions and recovers complete direct or planner responses from model output. */
 
-import { parseMessageHandlerOutput } from "../../runtime/message-handler";
+import {
+	isStopRequestText,
+	parseMessageHandlerOutput,
+} from "../../runtime/message-handler";
 import type { Action, MessageHandlerResult } from "../../types/components";
 import type { Memory } from "../../types/memory";
 import { MESSAGE_SOURCE_CLIENT_CHAT } from "../../types/message-source";
@@ -30,7 +33,8 @@ export function getStage1RoutingRepair(
 ): string | undefined {
 	if (
 		parsed?.shouldRespond !== "RESPOND" ||
-		parsed.replyEffectStatus !== "none" ||
+		(parsed.replyEffectStatus !== "none" &&
+			parsed.replyEffectStatus !== "non_applied") ||
 		parsed.requiresTool === true ||
 		typeof parsed.replyText !== "string" ||
 		parsed.replyText.trim().length === 0 ||
@@ -45,8 +49,58 @@ export function getStage1RoutingRepair(
 		return undefined;
 	return [
 		"response_contract_repair:",
-		"Your previous HANDLE_RESPONSE conflicts: simple context with a reply and replyEffectStatus=none declares a completed conversational answer, but nonempty intents declare pending runtime work. This is validation of that response, not a new user request. Nothing in it has been delivered or executed.",
-		'Return HANDLE_RESPONSE with a consistent decision for the original request. If the supplied context and reply complete it, preserve the answer and use intents=[], candidateActionNames=[], contexts=["simple"], replyEffectStatus="none". If any action or external-state read remains, retain every pending outcome and route to the applicable planning contexts and known action candidates; mark a promised action reply pending. Do not discard pending actions to make the reply terminal, invent tool names, or claim an unverified effect. Use contextRequests if an advertised reference is needed.',
+		"Your previous HANDLE_RESPONSE conflicts: simple context with a reply and replyEffectStatus=none or non_applied declares a completed conversational answer or a turn-ending preview, but nonempty intents declare pending runtime work. This is validation of that response, not a new user request. Nothing in it has been delivered or executed.",
+		'Return HANDLE_RESPONSE with a consistent decision for the original request. If the supplied context and reply complete it, preserve the answer and use intents=[], candidateActionNames=[], contexts=["simple"], replyEffectStatus="none". A preview that must wait for the user keeps replyEffectStatus="non_applied" with intents=[]; a directive whose details the user already stated is not waiting on anything. If any action or external-state read remains, retain every pending outcome and route to the applicable planning contexts and known action candidates; mark a promised action reply pending. Do not discard pending actions to make the reply terminal, invent tool names, or claim an unverified effect. Use contextRequests if an advertised reference is needed.',
+		"previous_model_response:",
+		JSON.stringify(parsed),
+	].join("\n");
+}
+
+/**
+ * A parseable decision that ends an addressed turn without an answer: STOP or
+ * IGNORE when the user's text asks for no disengagement, or a simple route with
+ * an empty reply and no pending work. One repaired re-ask precedes the
+ * unusable-reply deferral; a second unusable decision keeps that deferral.
+ * Live 2026-09-15 (tj-ed320c8d542cac): "one line: what's the capital of
+ * chile?" returned STOP with an empty plan and shipped "I'm not sure how to
+ * answer that." Rejections and refusal stubs are not covered here: they carry
+ * a reply, and the deferral owns them (#11504).
+ */
+export function getStage1UnusableDecisionRepair(
+	parsed: Record<string, unknown> | null,
+	messageText: string | undefined,
+): string | undefined {
+	if (!parsed) return undefined;
+	const shouldRespond = parsed.shouldRespond;
+	const replyText =
+		typeof parsed.replyText === "string" ? parsed.replyText.trim() : "";
+	const contexts = Array.isArray(parsed.contexts) ? parsed.contexts : [];
+	const intents = Array.isArray(parsed.intents)
+		? parsed.intents.filter(
+				(intent) => typeof intent === "string" && intent.trim().length > 0,
+			)
+		: [];
+	const candidates = Array.isArray(parsed.candidateActionNames)
+		? parsed.candidateActionNames
+		: [];
+	const contextRequests = Array.isArray(parsed.contextRequests)
+		? parsed.contextRequests
+		: [];
+	const endedWithoutAnswer =
+		((shouldRespond === "STOP" || shouldRespond === "IGNORE") &&
+			!isStopRequestText(messageText)) ||
+		(shouldRespond === "RESPOND" &&
+			replyText.length === 0 &&
+			parsed.requiresTool !== true &&
+			contexts.every((context) => context === "simple") &&
+			intents.length === 0 &&
+			candidates.length === 0 &&
+			contextRequests.length === 0);
+	if (!endedWithoutAnswer) return undefined;
+	return [
+		"response_contract_repair:",
+		"Your previous HANDLE_RESPONSE ended the turn without answering. STOP and IGNORE apply only to an explicit request to disengage or to overheard talk, and a simple reply must be the complete nonempty answer; the user addressed you directly with a request. This is validation of that response, not a new user request. Nothing in it has been delivered or executed.",
+		'Return HANDLE_RESPONSE with a consistent decision for the original request: either answer it simply with a nonempty replyText, intents=[], candidateActionNames=[], contexts=["simple"], replyEffectStatus="none", or route it to the applicable planning contexts with the known action candidates and a pending reply. Do not end the turn with an empty reply, invent tool names, or claim an unverified effect.',
 		"previous_model_response:",
 		JSON.stringify(parsed),
 	].join("\n");

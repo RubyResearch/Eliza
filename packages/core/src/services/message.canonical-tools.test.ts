@@ -91,7 +91,7 @@ describe("canonical promoted-family planner surface", () => {
 			disableBasicCapabilities: true,
 		});
 		for (const action of actions) runtime.registerAction(action);
-		expect(collectCanonicalPlannerActions(actions, [])).toEqual([actions[0]]);
+		expect(collectCanonicalPlannerActions(actions)).toEqual([actions[0]]);
 		for (const action of ["create", "update"]) {
 			const params = { action, id: "record", text: `${action}: ${text}` };
 			const errors: string[] = [];
@@ -117,17 +117,27 @@ describe("canonical promoted-family planner surface", () => {
 		expect(collectActionsFromContext(context)).toEqual(actions);
 	});
 
-	it("keeps an explicitly selected generated alias callable with its implicit operation", async () => {
+	it("represents an explicitly selected generated alias through its umbrella and keeps it executable", async () => {
 		const { actions, context, stored } = fixture();
+		// Stage 1 naming RECORDS_CREATE adds no second native tool: the umbrella
+		// is always exposed beside a named alias, and a direct alias tool repeated
+		// the umbrella's complete parameter schema on every planner round.
 		const tools = collectPlannerTools(context, undefined, {
 			canonicalFamilies: true,
-			candidateActions: ["RECORDS_CREATE"],
 		});
-		expect(tools.some((tool) => tool.name === "RECORDS_CREATE")).toBe(true);
-		const selected = collectCanonicalPlannerActions(actions, [
-			"RECORDS_CREATE",
+		expect(tools.map((tool) => tool.name)).toEqual([
+			"RECORDS",
+			"REPLY",
+			"IGNORE",
+			"STOP",
 		]);
-		const alias = selected.find((action) => action.name === "RECORDS_CREATE");
+		expect(tools[0]?.description).toContain('"name":"RECORDS_CREATE"');
+		expect(collectCanonicalPlannerActions(actions)).toEqual([actions[0]]);
+		// Execution keeps every context action, so the alias still dispatches
+		// with its implicit operation when called by name.
+		const alias = collectActionsFromContext(context).find(
+			(action) => action.name === "RECORDS_CREATE",
+		);
 		const runtime = new AgentRuntime({
 			character: { name: "Alias dispatch" },
 			disableBasicCapabilities: true,
@@ -150,7 +160,7 @@ describe("canonical promoted-family planner surface", () => {
 	it("does not hide an authorized alias when its umbrella is denied", () => {
 		const { actions } = fixture();
 		const authorized = actions.filter((action) => action.name !== "RECORDS");
-		expect(collectCanonicalPlannerActions(authorized, [])).toEqual(authorized);
+		expect(collectCanonicalPlannerActions(authorized)).toEqual(authorized);
 	});
 
 	it("keeps independently implemented children even when named like generated aliases", () => {
@@ -161,21 +171,21 @@ describe("canonical promoted-family planner surface", () => {
 		};
 		const { actions } = fixture();
 		actions[0].subActions?.push(child);
-		const retained = collectCanonicalPlannerActions([...actions, child], []);
+		const retained = collectCanonicalPlannerActions([...actions, child]);
 		expect(retained).toEqual([actions[0], child]);
 	});
 
 	it("retains an alias if the admitted parent no longer declares its dispatch relation", () => {
 		const { actions } = fixture();
 		actions[0].subActions = [];
-		expect(collectCanonicalPlannerActions(actions, [])).toEqual(actions);
+		expect(collectCanonicalPlannerActions(actions)).toEqual(actions);
 	});
 	it("does not consolidate a family with an unauthorized sibling", () => {
 		const { actions } = fixture();
 		const authorized = actions.filter(
 			(action) => action.name !== "RECORDS_UPDATE",
 		);
-		expect(collectCanonicalPlannerActions(authorized, [])).toEqual(authorized);
+		expect(collectCanonicalPlannerActions(authorized)).toEqual(authorized);
 	});
 	it("reconstructs each alias parameter contract from complete parent schemas and retained guidance", () => {
 		const { actions, context } = fixture();
@@ -184,27 +194,56 @@ describe("canonical promoted-family planner surface", () => {
 		})[0];
 		const contracts: Array<{
 			name: string;
-			description: string;
-			parameters: JsonSchema & {
-				parentParameterNames: string[];
-				propertyOverrides: Record<string, JsonSchema>;
+			description?: string;
+			descriptionSuffix?: string;
+			pins?: Record<string, string>;
+			parameters?: JsonSchema & {
+				parentParameterNames?: string[];
+				propertyOverrides?: Record<string, JsonSchema>;
 			};
 		}> = JSON.parse(tool.description.split("\n").at(-1) ?? "invalid");
 		for (const contract of contracts) {
 			const original = actions.find((action) => action.name === contract.name);
 			if (!original)
 				throw new Error("Alias action missing from dispatch context");
-			expect(contract.description).toBe(original.description);
-			const { parentParameterNames, propertyOverrides, ...outerSchema } =
-				contract.parameters;
+			// The alias description extends the umbrella's, so the contract
+			// carries at most the suffix (create's override blurb; update's
+			// default " — subaction = update" is implied by its pin); every
+			// RECORDS alias accepts the complete umbrella property list, so the
+			// contract omits the names and spells out only its own `required`.
+			expect(contract.description).toBeUndefined();
+			const pin = Object.values(contract.pins ?? {})[0];
+			const suffix = contract.descriptionSuffix ?? ` — subaction = ${pin}`;
+			expect(`${actions[0].description}${suffix}`).toBe(original.description);
+			const {
+				parentParameterNames,
+				propertyOverrides = {},
+				...outerSchema
+			} = contract.parameters ?? {};
+			expect(parentParameterNames).toBeUndefined();
+			expect(propertyOverrides).toEqual({});
 			const parentSchema = actionToJsonSchema(actions[0]);
 			const schema = {
+				type: "object",
+				required: [],
+				additionalProperties: parentSchema.additionalProperties,
 				...outerSchema,
 				properties: Object.fromEntries(
-					parentParameterNames.map((name) => [
-						name,
-						propertyOverrides[name] ?? parentSchema.properties[name],
-					]),
+					Object.keys(parentSchema.properties).map((name) => {
+						const parentProperty = parentSchema.properties[name];
+						const pinned = contract.pins?.[name];
+						return [
+							name,
+							pinned === undefined
+								? parentProperty
+								: {
+										...parentProperty,
+										description: `Subaction discriminator (auto-set to "${pinned}" for this virtual; do not change).`,
+										enum: [pinned],
+										default: pinned,
+									},
+						];
+					}),
 				),
 			};
 			expect(schema).toEqual(actionToJsonSchema(original));
@@ -255,7 +294,7 @@ describe("canonical promoted-family planner surface", () => {
 		};
 		const actions = [...promoteSubactionsToActions(parent)];
 		expect(
-			collectCanonicalPlannerActions(actions, []).map((action) => action.name),
+			collectCanonicalPlannerActions(actions).map((action) => action.name),
 		).toContain("FILES_LIST");
 	});
 });

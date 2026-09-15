@@ -4,7 +4,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { normalizeCalendarAttendees } from "./calendar-handler.ts";
+import {
+  attendeeEmailAccepted,
+  normalizeCalendarAttendees,
+} from "./calendar-handler.ts";
 
 describe("normalizeCalendarAttendees (planner-arg sanitization)", () => {
   it("drops a planner-invented bare-name attendee instead of failing the create (live regression)", () => {
@@ -18,15 +21,34 @@ describe("normalizeCalendarAttendees (planner-arg sanitization)", () => {
     const out = normalizeCalendarAttendees({
       attendees: [
         { email: "dana", displayName: "Dana" },
-        { email: "sam@example.com", displayName: "Sam" },
+        { email: "sam@acme.co", displayName: "Sam" },
         "marco",
-        "polo@example.com",
+        "polo@acme.co",
       ],
     });
     expect(out).toEqual([
-      { email: "sam@example.com", displayName: "Sam" },
-      { email: "polo@example.com" },
+      { email: "sam@acme.co", displayName: "Sam" },
+      { email: "polo@acme.co" },
     ]);
+  });
+
+  it("drops guests on reserved documentation domains the planner fabricates (live regression)", () => {
+    // "add a vet appointment friday at 3pm" named nobody; the planner still
+    // emitted sam@example.com, and the follow-up move then 400'd on the
+    // built-in calendar's attendee-notification boundary.
+    expect(
+      normalizeCalendarAttendees({
+        attendees: [
+          { email: "sam@example.com", displayName: "Sam" },
+          "guest@Example.ORG",
+          "qa@team.test",
+          "dev@localhost",
+        ],
+      }),
+    ).toBeUndefined();
+    expect(attendeeEmailAccepted("sam@example.com")).toBe(false);
+    expect(attendeeEmailAccepted("sam@examples.com")).toBe(true);
+    expect(attendeeEmailAccepted("sam@acme.co")).toBe(true);
   });
 
   it("returns undefined when the details carry no attendees", () => {

@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types/model";
+import { toWellFormedUnicode } from "../../utils/well-formed";
 import {
 	projectToolResultForModel,
 	renderActionResultsForModel,
@@ -180,6 +181,46 @@ describe("renderActionResultsForModel", () => {
 		expect(rendered.text).not.toContain("sk-test-secret-value");
 		expect(rendered.text).not.toContain("must-not-leak");
 		expect(rendered.text).toContain("[REDACTED]");
+	});
+
+	it("keeps the head of each result and marks the cut when maxCharsPerResult is set", () => {
+		const text = `HEAD${"x".repeat(20_000)}TAIL`;
+		const rendered = renderActionResultsForModel(
+			[
+				{ success: true, text, data: { actionName: "BASH" } },
+				{
+					success: false,
+					error: "short failure",
+					data: { actionName: "FETCH" },
+				},
+			],
+			{ maxCharsPerResult: 2_000 },
+		);
+
+		const [heading, body, marker] =
+			rendered.text.split("\n\n")[1]?.split("\n") ?? [];
+		expect(heading).toBe("1. BASH - succeeded");
+		expect(body).toHaveLength(2_000);
+		expect(body).toContain("HEAD");
+		expect(rendered.text).not.toContain("TAIL");
+		expect(marker).toMatch(/^\[truncated: \d+ of \d+ chars omitted\]$/);
+		expect(rendered.text).toContain(
+			'2. FETCH - failed\n{"success":false,"error":"short failure","data":{"actionName":"FETCH"}}',
+		);
+		expect(rendered.text.split("[truncated:")).toHaveLength(2);
+		expect(rendered.stats.resultCount).toBe(2);
+	});
+
+	it("never splits a surrogate pair at the cap", () => {
+		const text = "🧭".repeat(3_000);
+		for (const maxCharsPerResult of [2_000, 2_001]) {
+			const rendered = renderActionResultsForModel(
+				[{ success: true, text, data: { actionName: "BASH" } }],
+				{ maxCharsPerResult },
+			);
+			expect(toWellFormedUnicode(rendered.text)).toBe(rendered.text);
+			expect(rendered.text).toContain("[truncated:");
+		}
 	});
 });
 

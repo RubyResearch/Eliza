@@ -137,6 +137,22 @@ export interface PlannerRuntime {
 	};
 }
 
+/**
+ * Evidence that the executor ran an umbrella call which omitted its
+ * discriminator as the promoted child the umbrella's `inferSubaction` named,
+ * pinning `discriminator: value` into the executed arguments instead of
+ * delegating to the sub-planner. The planner's recorded call keeps its
+ * original arguments; the trajectory's tool stage carries this on the result.
+ */
+export interface InferredSubactionDispatch {
+	/** Promoted child the arguments resolved to, e.g. `MEMORY_CREATE`. */
+	child: string;
+	/** Umbrella discriminator parameter that was pinned, e.g. `action`. */
+	discriminator: string;
+	/** Pinned discriminator value, e.g. `create`. */
+	value: string;
+}
+
 export interface PlannerToolResult {
 	success: boolean;
 	/**
@@ -150,6 +166,8 @@ export interface PlannerToolResult {
 		success: boolean;
 		messageToUser?: string;
 	};
+	/** Set when an umbrella call was dispatched through `inferSubaction`. */
+	inferredSubaction?: InferredSubactionDispatch;
 	/**
 	 * Diagnostic / log-shaped projection of the tool's output. Goes into
 	 * the trajectory and the planner's tool-result message. Used by the
@@ -255,6 +273,12 @@ export interface PlannerTrajectory {
 	context: ContextObject;
 	/** Immutable turn context used as the byte-stable model prefix. */
 	modelBaseContext?: ContextObject;
+	/**
+	 * Immutable evaluator prefix: the same turn context composed without the
+	 * providers the evaluator never reads (EVALUATOR_STAGE_PROVIDER_EXCLUSIONS).
+	 * Absent, the evaluator renders modelBaseContext exactly as before.
+	 */
+	evaluatorBaseContext?: ContextObject;
 	/** Complete append-only assistant/tool/feedback suffix sent to the model. */
 	modelHistory?: ChatMessage[];
 	/** Internal execution-mode provenance for mode-specific terminal handling. */
@@ -316,6 +340,8 @@ export interface PlannerLoopResult {
 export interface PlannerLoopParams {
 	runtime: PlannerRuntime;
 	context: ContextObject;
+	/** Evaluator-scoped composition of `context`; see PlannerTrajectory.evaluatorBaseContext. */
+	evaluatorContext?: ContextObject;
 	/**
 	 * A sole tool result that already completed outside the planner loop and
 	 * explicitly requested a model-authored final reply. The loop starts from

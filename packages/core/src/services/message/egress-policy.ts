@@ -53,11 +53,16 @@ import {
 	replyClaimsCompletedSideEffect,
 	replyClaimsEmptyTrackedWorkState,
 } from "./side-effect-claims.ts";
+import {
+	groundedCurrentTimeReply,
+	statedTimeIsUngrounded,
+} from "./time-observations";
 
 export type PlannedReplyClaimKind =
 	| "completed_side_effect"
 	| "financial_completion"
 	| "financial_holding"
+	| "stated_time"
 	| "empty_tracked_state";
 
 /** Capture the same complete evidence for immediate and durable reply-only recovery. */
@@ -88,6 +93,27 @@ export function capturePlannerReplyRecovery(
 		) as JsonValue[],
 		ownerExclusiveDisclosureUsed: ownerExclusiveDisclosureWasUsed(message),
 	};
+}
+
+/**
+ * The validator's evidence contract for a rejected reply: the financial
+ * observation providers that ground a corrected quantity, plus the
+ * CURRENT_TIME observation when a stated date or clock time was rejected.
+ * Never the entire provider store, which is the turn's whole composed context
+ * (live 2026-09-11 05:35Z: ~380K chars of room history rode along on a
+ * completed_side_effect recovery and the rewrite request exceeded the
+ * provider's context limit, failing the turn after the effect had applied).
+ */
+function recoveryEvidenceProviders(
+	reason: PlannedReplyClaimKind | "missing_reply",
+	providers: StateData["providers"],
+): StateData["providers"] {
+	const evidence = financialObservationProviders(providers);
+	const currentTime = providers?.CURRENT_TIME;
+	if (reason === "stated_time" && currentTime) {
+		return { ...evidence, CURRENT_TIME: currentTime };
+	}
+	return evidence;
 }
 
 export function appliedEffectReceiptIdsForReply(
@@ -233,6 +259,15 @@ export function evaluatePlannedReplyEgress(args: {
 	if (financialHoldingIsUngrounded(args)) {
 		return { verdict: "reject", kind: "financial_holding" };
 	}
+	if (
+		statedTimeIsUngrounded({
+			reply,
+			request: args.request,
+			providers: args.providers,
+		})
+	) {
+		return { verdict: "reject", kind: "stated_time" };
+	}
 	if (replyClaimsCompletedSideEffect(reply)) {
 		if (
 			plannedReplyHasClaimGroundingReceipt({
@@ -301,10 +336,19 @@ export async function resolvePlannedReplyEgress(args: {
 			),
 		};
 	}
+	const reason =
+		decision.verdict === "reject" ? decision.kind : "missing_reply";
+	if (reason === "stated_time") {
+		// The provider's own rendering is the complete answer to "what time is
+		// it"; no model is needed to restate it, and a second model pass could
+		// invent a second date.
+		const grounded = groundedCurrentTimeReply(args.providers);
+		if (grounded) return { text: grounded, effectReceiptIds: [] };
+	}
 	const text = JSON.stringify({
 		request: args.message.content,
 		rejectedReply: args.reply,
-		reason: decision.verdict === "reject" ? decision.kind : "missing_reply",
+		reason,
 		results: renderActionResultsForModel([...args.actionResults], {
 			redactText: composeToolDiagnosticRedactor(args.runtime),
 		}).text,
@@ -321,7 +365,7 @@ export async function resolvePlannedReplyEgress(args: {
 			: {}),
 		// Match the validator's evidence contract; do not serialize the entire
 		// runtime provider store alongside the complete recovery context above.
-		providers: financialObservationProviders(args.providers),
+		providers: recoveryEvidenceProviders(reason, args.providers),
 	});
 	const rewritten = await rewriteActionCallbackInCharacter({
 		runtime: args.runtime,
@@ -330,8 +374,7 @@ export async function resolvePlannedReplyEgress(args: {
 		text,
 		// Preserve the existing JSON normalization, without quoting that JSON again.
 		jsonPayload: JSON.parse(text) as JsonValue,
-		groundingFailure:
-			decision.verdict === "reject" ? decision.kind : "missing_reply",
+		groundingFailure: reason,
 	});
 	const reply = rewritten?.text;
 	// The renderer selects proof for its own prose, not an action's canned

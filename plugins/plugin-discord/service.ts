@@ -15,6 +15,7 @@ import {
 	ChannelType,
 	type Character,
 	type Content,
+	ContentType,
 	createUniqueUuid,
 	ElizaError,
 	type EventPayload,
@@ -85,6 +86,7 @@ import {
  */
 import {
 	ActivityType,
+	type Attachment,
 	type AttachmentBuilder,
 	type BaseGuildVoiceChannel,
 	type Channel,
@@ -609,6 +611,35 @@ function scoreDiscordConnectorMatch(
 		}
 	}
 	return bestScore;
+}
+
+/** Attachment records for a history read: identity, url, name and kind only. */
+export function historyAttachmentMedia(
+	attachments: Iterable<
+		Pick<Attachment, "id" | "url" | "name" | "contentType">
+	>,
+): Media[] {
+	const media: Media[] = [];
+	for (const attachment of attachments) {
+		const mime = (attachment.contentType ?? "").toLowerCase();
+		const contentType = mime.startsWith("image/")
+			? ContentType.IMAGE
+			: mime.startsWith("video/")
+				? ContentType.VIDEO
+				: mime.startsWith("audio/")
+					? ContentType.AUDIO
+					: ContentType.DOCUMENT;
+		media.push({
+			id: attachment.id,
+			url: attachment.url,
+			title: attachment.name ?? "attachment",
+			source: "discord",
+			contentType,
+			description: "",
+			text: "",
+		});
+	}
+	return media;
 }
 
 function isDiscordTextTarget(channel: unknown): boolean {
@@ -3119,8 +3150,16 @@ export class DiscordService extends Service implements IDiscordService {
 				? page.filter((message) => BigInt(message.id) > BigInt(afterBoundary))
 				: page;
 			for (const discordMessage of eligible) {
+				// A history read returns what was said; describing every historical
+				// image and transcribing every clip through the models (one provider
+				// call per attachment) turned a 3-message read into a minutes-long
+				// turn (live 2026-09-15). Attachments are listed, not processed.
 				const memory = await this.buildMemoryFromMessage(discordMessage, {
 					accountId,
+					processedContent: discordMessage.content,
+					processedAttachments: historyAttachmentMedia(
+						discordMessage.attachments.values(),
+					),
 				});
 				if (memory) memories.push(memory);
 			}

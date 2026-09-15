@@ -28,6 +28,11 @@ import {
 } from "../../runtime/trajectory-provider-attribution";
 import type { RecordedStage } from "../../runtime/trajectory-recorder";
 import {
+	resolveTrajectoryDir,
+	resolveTrajectoryRetentionDays,
+	sweepTrajectoryFiles,
+} from "../../runtime/trajectory-recorder";
+import {
 	composeToolDiagnosticRedactor,
 	projectProtectedModelCallValue,
 	projectToolDiagnosticValue,
@@ -1058,6 +1063,8 @@ export class TrajectoriesService extends Service {
 	private enabled = true;
 	private initialized = false;
 	private stopping = false;
+	private retentionTimer: ReturnType<typeof setInterval> | null = null;
+	private retentionKickoff: ReturnType<typeof setTimeout> | null = null;
 	private stopPromise: Promise<void> | null = null;
 	// Routing can include another service's same-agent trajectory. Only a
 	// successful start grants this service shutdown ownership, even before a step.
@@ -1215,11 +1222,44 @@ export class TrajectoriesService extends Service {
 	static async start(runtime: IAgentRuntime): Promise<Service> {
 		const service = new TrajectoriesService(runtime);
 		await service.initialize();
+		service.startRetentionSweep();
 		return service;
+	}
+
+	/** Prune on-disk trajectory files a minute after boot and every six hours. */
+	private startRetentionSweep(): void {
+		const days = resolveTrajectoryRetentionDays();
+		if (days <= 0) return;
+		const maxAgeMs = days * 24 * 60 * 60 * 1000;
+		const sweep = async () => {
+			try {
+				const outcome = await sweepTrajectoryFiles(resolveTrajectoryDir(), {
+					maxAgeMs,
+				});
+				if (outcome.removed > 0 || outcome.tmpRemoved > 0) {
+					logger.info(
+						{ ...outcome, retentionDays: days },
+						"[trajectory-logger] pruned trajectory files",
+					);
+				}
+			} catch (error) {
+				this.runtime.reportError("TrajectoriesService.retentionSweep", error, {
+					diagnosticOnly: true,
+				});
+			}
+		};
+		this.retentionKickoff = setTimeout(() => void sweep(), 60_000);
+		this.retentionKickoff.unref?.();
+		this.retentionTimer = setInterval(() => void sweep(), 6 * 60 * 60 * 1000);
+		this.retentionTimer.unref?.();
 	}
 
 	async stop(): Promise<void> {
 		if (this.stopPromise) return this.stopPromise;
+		if (this.retentionKickoff) clearTimeout(this.retentionKickoff);
+		if (this.retentionTimer) clearInterval(this.retentionTimer);
+		this.retentionKickoff = null;
+		this.retentionTimer = null;
 		this.stopping = true;
 		this.stopPromise = this.finishStop();
 		try {

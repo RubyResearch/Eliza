@@ -1,7 +1,11 @@
 /** Adapts planner tool calls to the existing action executor and settles stream events and evidence-sensitive provider caches. */
 
 import { normalizeActionJsonSchema } from "../../actions/action-schema";
-import { promotedSubactionParent } from "../../actions/promote-subactions";
+import {
+	pinnedDiscriminatorDescription,
+	pinnedDiscriminatorForPromotedChild,
+	promotedSubactionParent,
+} from "../../actions/promote-subactions";
 import {
 	buildPlannerToolsFromTieredActions,
 	CORE_PLANNER_TERMINALS,
@@ -28,6 +32,7 @@ import {
 	type PlannerTrajectory,
 	summarizeActionResultForPlanner,
 } from "../../runtime/planner-loop";
+import type { InferredSubactionDispatch } from "../../runtime/planner-types";
 import {
 	actionHasSubActions,
 	runSubPlanner,
@@ -56,7 +61,7 @@ import {
 	resolveUserFacingEffectReceipts,
 } from "../../types/effects";
 import type { Memory } from "../../types/memory";
-import type { ToolDefinition } from "../../types/model";
+import type { JSONSchema, ToolDefinition } from "../../types/model";
 import type { JsonValue } from "../../types/primitives";
 import type { IAgentRuntime } from "../../types/runtime";
 import type { State } from "../../types/state";
@@ -272,7 +277,31 @@ export async function executeV5PlannedToolCall(
 
 	const hasDispatcherActionParameter =
 		plannerToolCallHasActionParameter(toolCall);
-	if (action && actionHasSubActions(action) && !hasDispatcherActionParameter) {
+	// An umbrella called without its discriminator is delegated to the
+	// sub-planner: a second planner model call over the child tools before any
+	// handler runs (live 2026-09-14, tj-22eb87cbbbfac0: `MEMORY {text, kind,
+	// tags}` with no `action` spent 1.3 s there ahead of a 95 ms create; the
+	// qwen-3.8-27b planner drops the discriminator now that a Stage-1-named
+	// alias is represented through its umbrella). When the umbrella's own
+	// `inferSubaction` proves the arguments can only mean one promoted child,
+	// pin that child's discriminator and run the umbrella directly — the call
+	// the planner would have made by passing it.
+	const inferred =
+		action && actionHasSubActions(action) && !hasDispatcherActionParameter
+			? inferPromotedSubactionDispatch(
+					action,
+					toolCall,
+					(name) =>
+						executionActions.find((candidate) => candidate.name === name) ??
+						args.runtime.actions.find((candidate) => candidate.name === name),
+				)
+			: undefined;
+	if (
+		action &&
+		actionHasSubActions(action) &&
+		!hasDispatcherActionParameter &&
+		!inferred
+	) {
 		const subResult = await runSubPlanner({
 			runtime: args.runtime as IAgentRuntime & PlannerRuntime,
 			action,
@@ -289,20 +318,25 @@ export async function executeV5PlannedToolCall(
 		return subPlannerResultToPlannerToolResult(subResult);
 	}
 
+	const dispatchCall = inferred?.toolCall ?? toolCall;
 	if (args.announceDirectExecution) {
-		await announceDirectToolCallToStream(args.runtime, toolCall);
+		await announceDirectToolCallToStream(args.runtime, dispatchCall);
 	}
 	let rawActionResult: ActionResult;
 	try {
 		rawActionResult = await executePlannedToolCall(
 			args.runtime,
 			executorCtx,
-			toolCall,
+			dispatchCall,
 			{ ...(args.executorOptions ?? {}), actions: executionActions },
 		);
 	} catch (error) {
 		if (args.announceDirectExecution) {
-			await settleFailedDirectToolCallOnStream(args.runtime, toolCall, error);
+			await settleFailedDirectToolCallOnStream(
+				args.runtime,
+				dispatchCall,
+				error,
+			);
 		}
 		throw error;
 	}
@@ -314,16 +348,52 @@ export async function executeV5PlannedToolCall(
 	const actionResult = projectActionResultForClipboard(
 		action,
 		rawActionResult,
-		toolCall.name,
+		dispatchCall.name,
 	);
-	return actionResultToPlannerToolResult(actionResult, {
+	const plannerResult = actionResultToPlannerToolResult(actionResult, {
 		summary: summarizeActionResultForPlanner(
 			action,
 			actionResult,
-			toolCall.params,
+			dispatchCall.params,
 			args.runtime,
 		),
 	});
+	return inferred
+		? { ...plannerResult, inferredSubaction: inferred.record }
+		: plannerResult;
+}
+
+/**
+ * Resolves an umbrella call that omitted its discriminator into the direct
+ * call the planner would have made by passing it, when the umbrella's own
+ * `inferSubaction` names exactly one promoted child for these arguments. The
+ * name must be declared in the umbrella's `subActions` and resolve to a
+ * virtual carrying the pinned discriminator promotion gave it; no hook, an
+ * `undefined` verdict, or a name that is not such a child keep sub-planner
+ * routing. The planner's own call object is never mutated: the loop keys
+ * operation identity, hedge dropping and the trajectory's tool stage on it,
+ * so the inference is reported on the result instead.
+ */
+export function inferPromotedSubactionDispatch(
+	action: Action,
+	toolCall: PlannerToolCall,
+	lookup: (name: string) => Action | undefined,
+):
+	| { toolCall: PlannerToolCall; record: InferredSubactionDispatch }
+	| undefined {
+	if (typeof action.inferSubaction !== "function") return undefined;
+	const params = toolCall.params ?? {};
+	const child = action.inferSubaction(params);
+	if (typeof child !== "string" || child.trim().length === 0) return undefined;
+	const pinned = pinnedDiscriminatorForPromotedChild(action, child, lookup);
+	if (!pinned) return undefined;
+	return {
+		toolCall: {
+			...toolCall,
+			params: { ...params, [pinned.discriminator]: pinned.value },
+		},
+		record: pinned,
+	};
 }
 
 export function plannerToolCallHasActionParameter(
@@ -545,7 +615,6 @@ export function collectPlannerTools(
 	options: {
 		expandSubActions?: boolean;
 		canonicalFamilies?: boolean;
-		candidateActions?: readonly string[];
 	} = {},
 ): ToolDefinition[] {
 	const hasAnyAction = context.events.some(
@@ -560,7 +629,7 @@ export function collectPlannerTools(
 	const actions = narrowedActions ?? collectActionsFromContext(context);
 	const tierAParents = readTierAParentsFromContext(context);
 	const wireActions = options.canonicalFamilies
-		? collectCanonicalPlannerActions(actions, options.candidateActions ?? [])
+		? collectCanonicalPlannerActions(actions)
 		: actions;
 	const actionTools = buildPlannerToolsFromTieredActions(wireActions, {
 		tierAParents,
@@ -583,27 +652,122 @@ export function collectPlannerTools(
 			);
 			if (aliases.length === 0) continue;
 			const parentSchema = normalizeActionJsonSchema(parent);
+			const parentPropertyNames = Object.keys(parentSchema.properties ?? {});
+			const parentStrict = parent.toolSchemaStrict ?? true;
+			// Aliases promoted from an earlier umbrella description keep it as
+			// their common lead after the umbrella's own description changed
+			// (MESSAGE, live 2026-09-14: 27 aliases each restated the same
+			// 760-character base description — 17.7K of a 25K-character contract
+			// block on every planner round that exposed the family). Such a lead
+			// is stated once; each alias carries only its remainder as
+			// `descriptionTail`, or nothing when the remainder is the default
+			// blurb.
+			const sharedAliasPreamble = sharedDescriptionPreamble(
+				aliases
+					.filter((alias) => !alias.description.startsWith(parent.description))
+					.map((alias) => alias.description),
+			);
 			const aliasContracts = aliases.map((alias) => {
-				const { properties = {}, ...schema } = normalizeActionJsonSchema(alias);
+				const {
+					properties = {},
+					type: schemaType,
+					required = [],
+					additionalProperties,
+					...schema
+				} = normalizeActionJsonSchema(alias);
+				const propertyNames = Object.keys(properties);
+				// A generated alias composes `${parent.description} — ${blurb}`
+				// (promoteSubactionsToActions), so a complete alias description
+				// rendered the umbrella's own description once more per alias (live
+				// 2026-09-13, consolidated TASKS: 16,882 of the 30,722-char contract
+				// block was the 1,977-char umbrella description repeated 14 times;
+				// CALENDAR 3,702 of 8,270). The suffix appends verbatim to this
+				// tool's description.
+				const extendsParentDescription = alias.description.startsWith(
+					parent.description,
+				);
+				const extendsSharedPreamble =
+					!extendsParentDescription &&
+					sharedAliasPreamble !== undefined &&
+					alias.description.startsWith(sharedAliasPreamble);
+				// An alias accepting every umbrella property in order (no
+				// `subactions` applicability lists: TASKS, CONTACT, DATABASE)
+				// repeated the complete name list per alias (TASKS: 56 names × 14
+				// aliases, 9,198 chars). Omission means every property of this tool.
+				const usesEveryParentProperty =
+					propertyNames.length === parentPropertyNames.length &&
+					propertyNames.every(
+						(name, index) => parentPropertyNames[index] === name,
+					);
+				// A promoted alias differs from its umbrella only in the pinned
+				// discriminator (pinDiscriminatorForVirtual): the umbrella's own
+				// property with the auto-set description, a one-value enum and a
+				// matching default. Spelling that override out, plus the
+				// umbrella-equal strict/type/required/additionalProperties and the
+				// default " — subaction = x" suffix, repeated ~360 chars per alias
+				// (live 2026-09-14: 11 CALENDAR aliases, 5,014 of the 16,829-char
+				// tool). Each pin is carried as `pins[name] = value`; every other
+				// field is emitted only when it differs from the default the
+				// preamble states.
+				const pins: Record<string, string> = {};
+				const propertyOverrides: Record<string, JSONSchema> = {};
+				for (const [name, property] of Object.entries(properties)) {
+					const parentProperty = parentSchema.properties?.[name];
+					if (JSON.stringify(property) === JSON.stringify(parentProperty)) {
+						continue;
+					}
+					const pinned = pinnedDiscriminatorValue(property, parentProperty);
+					if (pinned === undefined) propertyOverrides[name] = property;
+					else pins[name] = pinned;
+				}
+				const pinValues = Object.values(pins);
+				const defaultSuffix =
+					pinValues.length === 1 ? ` — subaction = ${pinValues[0]}` : undefined;
+				const suffix = extendsParentDescription
+					? alias.description.slice(parent.description.length)
+					: undefined;
+				const tail =
+					extendsSharedPreamble && sharedAliasPreamble !== undefined
+						? alias.description.slice(sharedAliasPreamble.length)
+						: undefined;
+				const parameters = {
+					...schema,
+					...(schemaType === "object" ? {} : { type: schemaType }),
+					...(required.length > 0 ? { required } : {}),
+					...(additionalProperties === parentSchema.additionalProperties
+						? {}
+						: { additionalProperties }),
+					...(usesEveryParentProperty
+						? {}
+						: { parentParameterNames: propertyNames }),
+					...(Object.keys(propertyOverrides).length > 0
+						? { propertyOverrides }
+						: {}),
+				};
 				return {
 					name: alias.name,
-					description: alias.description,
+					...(suffix !== undefined
+						? suffix === defaultSuffix
+							? {}
+							: { descriptionSuffix: suffix }
+						: tail !== undefined
+							? tail === defaultSuffix
+								? {}
+								: { descriptionTail: tail }
+							: { description: alias.description }),
 					routingHint: alias.routingHint,
-					strict: alias.toolSchemaStrict ?? true,
-					parameters: {
-						...schema,
-						parentParameterNames: Object.keys(properties),
-						propertyOverrides: Object.fromEntries(
-							Object.entries(properties).filter(
-								([name, property]) =>
-									JSON.stringify(property) !==
-									JSON.stringify(parentSchema.properties?.[name]),
-							),
-						),
-					},
+					...((alias.toolSchemaStrict ?? true) === parentStrict
+						? {}
+						: { strict: alias.toolSchemaStrict ?? true }),
+					...(pinValues.length > 0 ? { pins } : {}),
+					...(Object.keys(parameters).length > 0 ? { parameters } : {}),
 				};
 			});
-			parentTool.description += `\nGenerated aliases represented by this umbrella: call this tool using the alias's pinned discriminator. Each alias parameter object uses exactly parentParameterNames from this tool's complete properties, including descriptions and defaults; propertyOverrides replaces only differing properties. Other schema fields (including required) are explicit. Complete alias contracts:\n${JSON.stringify(aliasContracts)}`;
+			const preambleNote =
+				sharedAliasPreamble !== undefined
+					? ` Aliases carrying descriptionTail (or neither description field) are described by this shared preamble followed by the tail (or by the default " — subaction = value"): ${JSON.stringify(sharedAliasPreamble)}.`
+					: "";
+			parentTool.description += `\nGenerated aliases represented by this umbrella: call this tool using the alias's pinned discriminator. Defaults for every alias unless its contract says otherwise: pins[name]=value pins that property of this tool to value (enum [value], default value, description 'Subaction discriminator (auto-set to "value" for this virtual; do not change).'); the alias description is this tool's description + " — subaction = value" (descriptionSuffix appends verbatim instead; description replaces it); the alias takes every property of this tool in order, including descriptions and defaults (parentParameterNames lists the exact subset; propertyOverrides replaces only differing properties); type object, nothing required, and this tool's strict and additionalProperties.${preambleNote} Complete alias contracts:\n${JSON.stringify(aliasContracts)}`;
 		}
 	}
 	const terminalNames = new Set(
@@ -621,22 +785,89 @@ export function collectPlannerTools(
 	];
 }
 
+/** Word-boundary common lead of two or more texts when it is long enough to be worth stating once. */
+export function sharedDescriptionPreamble(
+	texts: readonly string[],
+): string | undefined {
+	if (texts.length < 2) return undefined;
+	const [first, ...rest] = texts;
+	if (first === undefined) return undefined;
+	let end = first.length;
+	for (const text of rest) {
+		let index = 0;
+		while (index < end && index < text.length && first[index] === text[index]) {
+			index++;
+		}
+		end = index;
+	}
+	const boundary = first.slice(0, end).search(/[^\s]*$/);
+	// The default " — subaction = value" blurb shares its lead across aliases;
+	// keep it out of the preamble so each alias's tail stays the whole blurb.
+	const preamble = first
+		.slice(0, boundary)
+		.replace(/\s*—(?:\s*subaction(?:\s*=)?)?\s*$/, "")
+		.trimEnd();
+	return preamble.length >= 80 ? preamble : undefined;
+}
+
+/**
+ * The value an alias pins its discriminator to when `property` is exactly the
+ * umbrella's `parentProperty` carrying the pinned description, one-value enum
+ * and matching default that `pinDiscriminatorForVirtual` writes; undefined
+ * for any other override, which the contract then spells out in full.
+ */
+function pinnedDiscriminatorValue(
+	property: JSONSchema,
+	parentProperty: JSONSchema | undefined,
+): string | undefined {
+	if (!parentProperty) return undefined;
+	const enumValues = property.enum;
+	if (!Array.isArray(enumValues) || enumValues.length !== 1) return undefined;
+	const value = enumValues[0];
+	if (typeof value !== "string" || property.default !== value) return undefined;
+	const expected: JSONSchema = {
+		...parentProperty,
+		description: pinnedDiscriminatorDescription(value),
+		enum: [value],
+		default: value,
+	};
+	return canonicalJson(property) === canonicalJson(expected)
+		? value
+		: undefined;
+}
+
+/** JSON with object keys sorted at every level, for order-insensitive equality. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, nested: unknown) => {
+		if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+			return Object.fromEntries(
+				Object.entries(nested as Record<string, unknown>).sort(([a], [b]) =>
+					a < b ? -1 : a > b ? 1 : 0,
+				),
+			);
+		}
+		return nested;
+	});
+}
+
 /**
  * Represents generated aliases once through their complete authorized umbrella.
- * Independent child actions and explicitly requested aliases remain direct. The
- * caller retains every original context action for execution and trajectories.
+ * Independent child actions remain direct, as does an alias whose umbrella is
+ * absent, incomplete, or lossy for it. A Stage-1 candidate alias gets no
+ * exemption: its umbrella is always loaded beside it
+ * (collectBudgetedStageOneCandidateActions), so a direct alias tool repeated
+ * the umbrella's complete parameter schema on every planner round (live
+ * 2026-09-13, one calendar move: CALENDAR 23,471 chars plus
+ * CALENDAR_SEARCH_EVENTS 12,786 and CALENDAR_UPDATE_EVENT 13,232, the same
+ * `details` schema three times). The umbrella's alias contract (~750 chars)
+ * still names the candidate with its pinned discriminator, and the caller
+ * retains every original context action for execution and trajectories.
  */
 export function collectCanonicalPlannerActions(
 	actions: readonly Action[],
-	candidateActions: readonly string[],
 ): Action[] {
-	const lookup = buildRuntimeActionLookup({ actions });
-	const directCandidates = new Set(
-		candidateActions.map((name) => resolveRuntimeAction(lookup, name)?.name),
-	);
 	const authorized = new Map(actions.map((action) => [action.name, action]));
 	return actions.filter((action) => {
-		if (directCandidates.has(action.name)) return true;
 		const parentName = promotedSubactionParent(action);
 		if (!parentName) return true;
 		const parent = authorized.get(parentName);

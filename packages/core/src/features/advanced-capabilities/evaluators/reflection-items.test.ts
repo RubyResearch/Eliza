@@ -938,3 +938,102 @@ describe("reflection context preserves the complete room entity set", () => {
 		expect(runtime.getMemories).toHaveBeenCalledTimes(3);
 	});
 });
+
+describe("relationship and identity prompt context stays compact", () => {
+	// Live 2026-09-14: both sections embedded the room entity list (922 chars
+	// each) and the relationship section listed 18 pretty-printed JSON edges
+	// (3,472 chars), 17 of them addressed-only bookkeeping.
+	const colleagueId = "00000000-0000-0000-0000-0000000000c1" as UUID;
+	const entities: Entity[] = [
+		{ id: entityId, agentId, names: ["zoe-sender"], metadata: {} },
+		{ id: colleagueId, agentId, names: ["cal-colleague"], metadata: {} },
+	];
+	const entityList = `- zoe-sender (ID: ${entityId})\n- cal-colleague (ID: ${colleagueId})`;
+	type Existing = Awaited<ReturnType<IAgentRuntime["getRelationships"]>>;
+	const shared = { roomTranscriptRendered: true };
+
+	function targetId(index: number): UUID {
+		return `00000000-0000-0000-0000-${String(index).padStart(12, "0")}` as UUID;
+	}
+
+	function edge(
+		index: number,
+		tags: string[],
+		relationshipType?: string,
+	): Existing[number] {
+		return {
+			id: `00000000-0000-0000-0001-${String(index).padStart(12, "0")}` as UUID,
+			sourceEntityId: entityId,
+			targetEntityId: targetId(index),
+			agentId,
+			tags,
+			...(relationshipType ? { metadata: { relationshipType } } : {}),
+		};
+	}
+
+	function context(existingRelationships: Existing = []) {
+		return {
+			runtime: makeRuntime(),
+			message: message(),
+			state: { values: {}, data: {}, text: "" },
+			options: {},
+			prepared: { recentMessages: [], entities, existingRelationships },
+		};
+	}
+
+	it("declares the room entity list as a shared block and references the shared copy", () => {
+		const base = context();
+		const blocks = relationshipEvaluator.sharedBlocks?.(base);
+		expect(blocks).toEqual({ "Entities in Room": entityList });
+		expect(identityEvaluator.sharedBlocks?.(base)).toEqual(blocks);
+		for (const evaluator of [relationshipEvaluator, identityEvaluator]) {
+			const referenced = evaluator.prompt({
+				...base,
+				shared: { ...shared, blocks },
+			});
+			expect(referenced).toContain(
+				'Entities in Room: see "Entities in Room" in the Shared Turn Context above.',
+			);
+			expect(referenced).not.toContain("- zoe-sender (ID:");
+			const own = evaluator.prompt({ ...base, shared });
+			expect(own).toContain(`Entities in Room:\n${entityList}`);
+			expect(own).not.toContain('Entities in Room: see "Entities in Room"');
+		}
+	});
+
+	it("lists only semantic edges, one compact line each, capped at 20", () => {
+		const existing: Existing = [
+			...Array.from({ length: 17 }, (_, index) =>
+				edge(index, ["addressed", "addressed:auto"]),
+			),
+			edge(100, ["addressed"], "colleague"),
+			...Array.from({ length: 24 }, (_, index) =>
+				edge(200 + index, ["supports_agent_business"]),
+			),
+		];
+		const prompt = relationshipEvaluator.prompt({
+			...context(existing),
+			shared,
+		});
+		const section = prompt.slice(prompt.indexOf("Existing relationships:"));
+		expect(section).not.toContain('"sourceEntityId"');
+		expect(section).not.toContain("addressed");
+		expect(section).toContain(
+			`- ${entityId} -> ${targetId(100)} (colleague)\n`,
+		);
+		expect(section).toContain(
+			`- ${entityId} -> ${targetId(200)} [supports_agent_business]\n`,
+		);
+		expect(section.match(/^- /gm)).toHaveLength(20);
+		expect(section).toContain("(5 more not shown)");
+		expect(section.length).toBeLessThan(2_400);
+	});
+
+	it("shows (none) when only addressed bookkeeping edges exist", () => {
+		const prompt = relationshipEvaluator.prompt({
+			...context([edge(1, ["addressed", "addressed:auto"])]),
+			shared,
+		});
+		expect(prompt).toContain("Existing relationships:\n(none)");
+	});
+});

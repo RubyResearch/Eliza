@@ -103,6 +103,26 @@ export const MODEL_CONTEXT_PROVIDER_EXCLUSION_SET = new Set<string>(
 
 export const AMBIENT_TURN_PROVIDER_EXCLUSIONS = ["RECENT_ERRORS"] as const;
 
+/**
+ * Providers the evaluator's template never relies on. The evaluator judges
+ * tool results against the request and the dialogue; the room roster and the
+ * platform user record only add ~7K characters to every evaluator call
+ * (audit 2026-09-13: evaluator user message byte-identical to the planner's).
+ */
+export const EVALUATOR_STAGE_PROVIDER_EXCLUSIONS = [
+	"ENTITIES",
+	"PLATFORM_USER_CONTEXT",
+	// The widget syntax catalog, the cross-room manifest, the withheld-recall
+	// notice, channel topics and the first-run notice describe what a reply
+	// may do, not whether a tool result satisfied the request (live
+	// 2026-09-14: ~7.6K chars of every in-loop evaluation call).
+	"uiWidgets",
+	"recent-conversations",
+	"relevant-conversations",
+	"CHANNEL_TOPICS",
+	"firstRun",
+] as const;
+
 export function ambientTurnProviderExclusions(
 	runtime: IAgentRuntime,
 	message: Memory,

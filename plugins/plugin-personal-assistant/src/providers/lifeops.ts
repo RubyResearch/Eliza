@@ -53,6 +53,7 @@ import {
   redactTextForEgress,
 } from "../lifeops/privacy-egress.js";
 import { LifeOpsService } from "../lifeops/service.js";
+import { formatConnectorDegradationLines } from "./lifeops-connector-lines.js";
 
 const INTERNAL_URL = new URL("http://127.0.0.1/");
 
@@ -98,15 +99,13 @@ async function summarizeConnectorDegradation(
       }
     }),
   );
-  const lines: string[] = [];
-  for (const { contribution, status } of statuses) {
-    if (status.state === "ok") continue;
-    const detail = status.message ? `: ${status.message}` : "";
-    lines.push(
-      `Connector ${contribution.describe.label} ${status.state}${detail}`,
-    );
-  }
-  return lines;
+  return formatConnectorDegradationLines(
+    statuses.map(({ contribution, status }) => ({
+      label: contribution.describe.label,
+      state: status.state,
+      message: status.message,
+    })),
+  );
 }
 
 export function normalizeGoalTitle(title: string): string {
@@ -373,34 +372,91 @@ export const lifeOpsProvider: Provider = {
 
     try {
       const service = new LifeOpsService(runtime);
-      const ownerProfile = await readLifeOpsOwnerProfile(runtime);
-      const ownerFacts = await resolveOwnerFactStore(runtime).read();
-      const overview = await service.getOverview();
+      const accountManager = getConnectorAccountManager(runtime);
+      const now = new Date();
+      // These reads have no data dependency on each other, so they go out
+      // together instead of one await at a time (0.55-1.1 s of serial round
+      // trips per planner recompose, live 2026-09-13). Failure handling is
+      // per read and unchanged: reads that used to throw out of `get()`
+      // still reject here and reach the provider boundary below; reads that
+      // used to degrade in place still degrade in place. Only
+      // `listOwnerOccurrencesCompletedToday` stays chained after
+      // `getOverview()`, which materializes occurrences before it reads them,
+      // so the completed-today query observes the same post-refresh rows it
+      // did when the two ran back to back. The calendar/gmail reads further
+      // down depend on the connector status resolved here and stay ordered
+      // after it.
+      const [
+        ownerProfile,
+        ownerFacts,
+        { overview, completedToday },
+        connectorAccounts,
+        privacyPolicies,
+        googleAccountsRead,
+        connectorDegradationLines,
+      ] = await Promise.all([
+        readLifeOpsOwnerProfile(runtime),
+        resolveOwnerFactStore(runtime).read(),
+        service.getOverview().then(async (refreshed) => ({
+          overview: refreshed,
+          completedToday: await service.listOwnerOccurrencesCompletedToday(now),
+        })),
+        (async () => {
+          try {
+            return await accountManager.listAccounts("google");
+          } catch (cause) {
+            // error-policy:J2 context-adding rethrow — a failed
+            // connector-account read must not silently shrink the privacy
+            // metadata to an empty set; the provider boundary below reports it
+            // and renders the explicit unavailable state instead of a
+            // healthy-looking overview.
+            runtime.reportError("LifeOpsProvider.connectorAccounts", cause, {
+              provider: "google",
+            });
+            throw new ElizaError("Google connector account read failed.", {
+              code: "LIFEOPS_CONNECTOR_ACCOUNTS_READ_FAILED",
+              cause,
+              context: { provider: "google" },
+            });
+          }
+        })(),
+        (async () => {
+          try {
+            return mapConnectorAccountPrivacyPolicies(
+              await service.repository.listConnectorAccountPrivacy(
+                service.agentId(),
+              ),
+            );
+          } catch (cause) {
+            // error-policy:J4 fail closed — with the per-account privacy
+            // table unreadable every account stays owner-only (the most
+            // restrictive policy); reportError surfaces the broken read
+            // instead of letting the degrade look healthy.
+            runtime.reportError("LifeOpsProvider.accountPrivacy", cause, {
+              agentId: runtime.agentId,
+            });
+            return mapConnectorAccountPrivacyPolicies([]);
+          }
+        })(),
+        (async () => {
+          // Captured, not thrown: the Google block below re-raises a failure
+          // into its own catch so the degrade path stays exactly as it was.
+          try {
+            return {
+              ok: true as const,
+              accounts: await service.getGoogleConnectorAccounts(INTERNAL_URL),
+            };
+          } catch (cause) {
+            return { ok: false as const, cause };
+          }
+        })(),
+        summarizeConnectorDegradation(runtime),
+      ]);
       const egressContext = createLifeOpsEgressContext({
         isOwner: true,
         agentId: runtime.agentId,
         entityId: message.entityId,
       });
-      const accountManager = getConnectorAccountManager(runtime);
-      let connectorAccounts: Awaited<
-        ReturnType<typeof accountManager.listAccounts>
-      >;
-      try {
-        connectorAccounts = await accountManager.listAccounts("google");
-      } catch (cause) {
-        // error-policy:J2 context-adding rethrow — a failed connector-account
-        // read must not silently shrink the privacy metadata to an empty set;
-        // the provider boundary below reports it and renders the explicit
-        // unavailable state instead of a healthy-looking overview.
-        runtime.reportError("LifeOpsProvider.connectorAccounts", cause, {
-          provider: "google",
-        });
-        throw new ElizaError("Google connector account read failed.", {
-          code: "LIFEOPS_CONNECTOR_ACCOUNTS_READ_FAILED",
-          cause,
-          context: { provider: "google" },
-        });
-      }
       const privacyByAccountKey = new Map<
         string,
         ReturnType<typeof getAccountPrivacy>
@@ -438,29 +494,10 @@ export const lifeOpsProvider: Provider = {
       };
 
       let privacyFilteredCount = 0;
-      let privacyPolicies = mapConnectorAccountPrivacyPolicies([]);
-      try {
-        privacyPolicies = mapConnectorAccountPrivacyPolicies(
-          await service.repository.listConnectorAccountPrivacy(
-            service.agentId(),
-          ),
-        );
-      } catch (cause) {
-        // error-policy:J4 fail closed — with the per-account privacy table
-        // unreadable every account stays owner-only (the most restrictive
-        // policy); reportError surfaces the broken read instead of letting the
-        // degrade look healthy.
-        runtime.reportError("LifeOpsProvider.accountPrivacy", cause, {
-          agentId: runtime.agentId,
-        });
-      }
-      const now = new Date();
       const ownerLines = summarizeOccurrences(
         "Owner active items:",
         overview.owner.occurrences,
       );
-      const completedToday =
-        await service.listOwnerOccurrencesCompletedToday(now);
       const completedTodayLines = summarizeCompletedToday(completedToday);
       const ownerGoalLines = summarizeActiveGoals(overview.owner.goals, now);
       const agentLines = summarizeOccurrences(
@@ -475,7 +512,10 @@ export const lifeOpsProvider: Provider = {
       let gmailSummary: LifeOpsGmailTriageSummary | null = null;
 
       try {
-        const accounts = await service.getGoogleConnectorAccounts(INTERNAL_URL);
+        if (!googleAccountsRead.ok) {
+          throw googleAccountsRead.cause;
+        }
+        const accounts = googleAccountsRead.accounts;
         const connectedAccounts = accounts.filter((a) => a.connected);
 
         if (connectedAccounts.length > 1) {
@@ -667,9 +707,6 @@ export const lifeOpsProvider: Provider = {
           `[LifeOpsPrivacy] filtered ${privacyFilteredCount} accounts of provider google for audience ${audience}`,
         );
       }
-
-      const connectorDegradationLines =
-        await summarizeConnectorDegradation(runtime);
 
       return {
         text: [

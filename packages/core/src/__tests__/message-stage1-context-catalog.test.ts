@@ -248,13 +248,42 @@ describe("client-chat model context preserves executor transport state", () => {
 });
 
 describe("formatAvailableContextsForPrompt", () => {
-	it("renders id, metadata, and description per line", () => {
+	it("renders id, routing metadata, and description per line", () => {
 		const block = formatAvailableContextsForPrompt(FIXTURE_CONTEXTS);
 		expect(block).toContain("- general [label=General]: Normal conversation.");
 		expect(block).toContain(
 			"- calendar [label=Calendar]: Manage calendar events.",
 		);
 		expect(block).toContain("- memory [label=Memory]: Long-term agent memory.");
+	});
+
+	it("omits role-gate and cache metadata while retaining routing metadata", () => {
+		// The catalog is role-filtered before it renders, so the gate suffix had
+		// no reader and cost ~3.3K chars per Stage-1 call on the owner catalog
+		// (2026-09-13). Cache policy is enforcement metadata, not routing input.
+		// Label, aliases, hierarchy and sensitivity stay: they are the routing
+		// metadata a CONTEXT_CATALOG read is documented to return.
+		const block = formatAvailableContextsForPrompt([
+			{
+				id: "terminal",
+				label: "Terminal",
+				aliases: ["shell"],
+				parent: "code",
+				description: "Execute shell commands.",
+				roleGate: { minRole: "OWNER" },
+				sensitivity: "private",
+				cacheScope: "turn",
+			},
+			{ id: "wallet", parents: ["finance"], roleGate: { anyOf: ["OWNER"] } },
+		]);
+		expect(block).toBe(
+			[
+				"- terminal [label=Terminal; aliases=shell; parent=code; sensitivity=private]: Execute shell commands.",
+				"- wallet [parents=finance]",
+			].join("\n"),
+		);
+		expect(block).not.toContain("role");
+		expect(block).not.toContain("cache");
 	});
 
 	it("falls back to a placeholder when no contexts are registered", () => {
@@ -319,8 +348,8 @@ describe("Stage 1 prompt — available contexts catalog", () => {
 		)?.[1];
 		expect(catalog).toBeDefined();
 		// `general` (no gate) and `memory` (USER) are visible to USER role.
-		expect(catalog).toContain("- general ");
-		expect(catalog).toContain("- memory ");
+		expect(catalog).toContain("- general [label=General]:");
+		expect(catalog).toContain("- memory [label=Memory]:");
 		// `wallet` (OWNER-only) and `calendar` (ADMIN-only) must NOT appear.
 		expect(catalog).not.toMatch(/^- wallet\b/m);
 		expect(catalog).not.toMatch(/^- calendar\b/m);

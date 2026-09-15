@@ -280,3 +280,17 @@ describe("resolveRuntimeBootstrapFailure lastError extraction", () => {
     expect(resolve({ err: new Error("") }).lastError).toBe("");
   });
 });
+
+describe("blocked destructive migrations", () => {
+  it("halts immediately instead of retrying", () => {
+    const result = resolve({
+      err: new Error(
+        "1 migration(s) failed: Destructive migration blocked for @elizaos/plugin-sql. Set ELIZA_ALLOW_DESTRUCTIVE_MIGRATIONS=true to proceed.",
+      ),
+    });
+    expect(result.shouldRetry).toBe(false);
+    expect(result.phase).toBe("runtime-error");
+    expect(result.state).toBe("error");
+    expect(result.delayMs).toBeUndefined();
+  });
+});

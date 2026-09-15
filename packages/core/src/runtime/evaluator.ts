@@ -611,11 +611,14 @@ export async function runEvaluator(
 	) {
 		const scope = output.raw?.contextRequest;
 		const original = params.trajectory.modelBaseContext ?? params.context;
+		// The sources this call rendered: the loop's evaluator-scoped
+		// composition when supplied, otherwise the planner base context.
+		const rendered = params.trajectory.evaluatorBaseContext ?? original;
 		const readHistory = scope === "history" || scope === "full";
 		const readProviders = scope === "providers" || scope === "full";
 		if (
-			(readHistory && selectCompletionContext(original).applied) ||
-			(readProviders && projectDeferredProviders(original).available.length)
+			(readHistory && selectCompletionContext(rendered).applied) ||
+			(readProviders && projectDeferredProviders(rendered).available.length)
 		) {
 			// This is a read of the original in-memory sources, not another
 			// planner turn. No callbacks or tools run before the full-context
@@ -623,20 +626,29 @@ export async function runEvaluator(
 			await recordOutput();
 			const restored =
 				readProviders &&
-				projectDeferredProviders(original).available.length &&
+				projectDeferredProviders(rendered).available.length &&
 				params.runtime.restoreProviderContext
 					? await params.runtime.restoreProviderContext(original)
 					: original;
+			const restoredMetadata = (source: ContextObject) => ({
+				...source.metadata,
+				...(readHistory ? { completionContext: undefined } : {}),
+				...(readProviders ? { providerDiscoveryEnabled: false } : {}),
+			});
 			// Keep the restored sources for subsequent planner/evaluator rounds,
 			// including CONTINUE outcomes. The original context events are intact.
 			params.trajectory.modelBaseContext = {
 				...restored,
-				metadata: {
-					...original.metadata,
-					...(readHistory ? { completionContext: undefined } : {}),
-					...(readProviders ? { providerDiscoveryEnabled: false } : {}),
-				},
+				metadata: restoredMetadata(original),
 			};
+			if (params.trajectory.evaluatorBaseContext) {
+				// The evaluator re-run reads its own composition; carry the fresh
+				// planner provider bodies onto it so the read is honored there too.
+				params.trajectory.evaluatorBaseContext = {
+					...restoreEvaluatorProviders(rendered, original, restored),
+					metadata: restoredMetadata(rendered),
+				};
+			}
 			return runEvaluator(params);
 		}
 		output = {
@@ -661,6 +673,48 @@ export async function runEvaluator(
 	await recordOutput();
 
 	return output;
+}
+
+/**
+ * The loop's evaluator base context is the planner context composed without
+ * the providers this stage never reads. A provider restoration re-composes the
+ * planner's providers once, with their currently authorized bodies; carry
+ * those bodies onto the evaluator context while keeping its exclusions, so the
+ * re-run reads the same authorized sources without a second composition.
+ */
+export function restoreEvaluatorProviders(
+	evaluatorOriginal: ContextObject,
+	original: ContextObject,
+	restored: ContextObject,
+): ContextObject {
+	if (restored === original) return evaluatorOriginal;
+	const isComposedProvider = (event: ContextEvent): boolean =>
+		event.type === "provider" && event.source === "composeState";
+	const composedProviderName = (event: ContextEvent): string | undefined =>
+		isComposedProvider(event) &&
+		"name" in event &&
+		typeof event.name === "string"
+			? event.name
+			: undefined;
+	const evaluatorNames = new Set(
+		evaluatorOriginal.events.map(composedProviderName),
+	);
+	const excluded = new Set(
+		original.events
+			.map(composedProviderName)
+			.filter((name) => name !== undefined && !evaluatorNames.has(name)),
+	);
+	return {
+		...evaluatorOriginal,
+		events: [
+			...evaluatorOriginal.events.filter((event) => !isComposedProvider(event)),
+			...restored.events.filter(
+				(event) =>
+					isComposedProvider(event) &&
+					!excluded.has(composedProviderName(event)),
+			),
+		],
+	};
 }
 
 async function recordEvaluationStage(args: {
@@ -836,15 +890,22 @@ function renderEvaluatorModelInput(params: {
 	cacheKeySegments: PromptSegment[];
 	completionSelectionApplied: boolean;
 } {
-	const completion = selectCompletionContext(
-		params.trajectory.modelBaseContext ?? params.context,
-	);
+	// The loop may supply an evaluator-scoped composition of the planner base
+	// context (the same run state without the providers this stage never
+	// reads); without it the planner base context renders exactly as before.
+	// Stage-1 source selection, deferred provider references and repeated
+	// history references apply to whichever composition is rendered.
+	const original =
+		params.trajectory.evaluatorBaseContext ??
+		params.trajectory.modelBaseContext ??
+		params.context;
+	const completion = selectCompletionContext(original);
 	const deferred = projectDeferredProviders(completion.context);
 	const renderedContext = renderContextObject(
 		projectEvaluatorContext(deferred.context),
 	);
 	renderedContext.promptSegments = referenceRepeatedHistory(
-		params.trajectory.modelBaseContext ?? params.context,
+		original,
 		renderedContext.promptSegments,
 	);
 	if (deferred.available.length)

@@ -231,8 +231,9 @@ describe("calendar create anchors planner timestamps to the owner's zone", () =>
       // The action hands internal evidence to the evaluator (no user text of
       // its own); the rendered time in that evidence must carry the zone.
       const evidence = JSON.stringify(result.data ?? {}) + (result.text ?? "");
-      expect(evidence).toContain("7:00 AM PDT");
-      expect(evidence).not.toContain("AM UTC");
+      // A self-verified receipt spells the time compactly ("7am PDT").
+      expect(evidence).toMatch(/\b7(?::00 AM|am) PDT\b/);
+      expect(evidence).not.toMatch(/(?:AM|am) UTC\b/);
     },
   );
 

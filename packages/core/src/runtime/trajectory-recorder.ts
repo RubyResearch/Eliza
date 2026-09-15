@@ -262,6 +262,9 @@ export interface RecordedFactsAndRelationshipsStage {
 	};
 	written: { facts: number; relationships: number };
 	thought: string;
+	/** Mirrors the gated evaluation stage: a deterministic gate answered without a model call. */
+	llmCallSkipped?: boolean;
+	reason?: string;
 }
 
 export interface RecordedCacheStage {
@@ -410,6 +413,65 @@ function envFlagEnabled(key: string, defaultValue = false): boolean {
  *   ELIZA_STATE_DIR/trajectories
  *   XDG state-dir/trajectories
  */
+/** Days to keep on-disk trajectory files; 0 disables the sweep. */
+export function resolveTrajectoryRetentionDays(): number {
+	const raw = process.env.ELIZA_TRAJECTORY_RETENTION_DAYS?.trim();
+	if (raw === undefined || raw === "") return 14;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 14;
+}
+
+/**
+ * Remove trajectory files older than the retention window and orphaned
+ * `.tmp` writes older than a day. Files grew ~50–65 MB/day with no retention
+ * (3.5 GB, 23K files on the live VPS at 93% disk, audit 2026-09-13). Only
+ * `tj-*.json` and `*.tmp` under `<dir>/<agentId>/` are touched.
+ */
+export async function sweepTrajectoryFiles(
+	dir: string,
+	options: { maxAgeMs: number; tmpMaxAgeMs?: number; now?: number },
+): Promise<{ removed: number; tmpRemoved: number; scanned: number }> {
+	const now = options.now ?? Date.now();
+	const tmpMaxAgeMs = options.tmpMaxAgeMs ?? 24 * 60 * 60 * 1000;
+	const result = { removed: 0, tmpRemoved: 0, scanned: 0 };
+	let agentDirs: string[];
+	try {
+		agentDirs = await fs.readdir(dir);
+	} catch {
+		return result;
+	}
+	for (const agentDir of agentDirs) {
+		const agentPath = path.join(dir, agentDir);
+		let entries: string[];
+		try {
+			const stat = await fs.stat(agentPath);
+			if (!stat.isDirectory()) continue;
+			entries = await fs.readdir(agentPath);
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			const isTrajectory = entry.startsWith("tj-") && entry.endsWith(".json");
+			const isTmp = entry.endsWith(".tmp");
+			if (!isTrajectory && !isTmp) continue;
+			result.scanned++;
+			const filePath = path.join(agentPath, entry);
+			try {
+				const stat = await fs.stat(filePath);
+				const ageMs = now - stat.mtimeMs;
+				if (isTmp ? ageMs > tmpMaxAgeMs : ageMs > options.maxAgeMs) {
+					await fs.unlink(filePath);
+					if (isTmp) result.tmpRemoved++;
+					else result.removed++;
+				}
+			} catch {
+				// A file that vanished or cannot be read is not this sweep's problem.
+			}
+		}
+	}
+	return result;
+}
+
 export function resolveTrajectoryDir(): string {
 	const explicit = process.env.ELIZA_TRAJECTORY_DIR?.trim();
 	if (explicit) return explicit;

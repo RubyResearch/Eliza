@@ -35,7 +35,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriggerTaskMetadata } from "../triggers/types.ts";
-import { triggerAction } from "./trigger.ts";
+import { impliedTriggerQuery, triggerAction } from "./trigger.ts";
 
 const AGENT_ID = stringToUuid("trigger-create-test-agent");
 const USER_ID = stringToUuid("trigger-create-test-user");
@@ -310,6 +310,143 @@ describe("TRIGGER create — prompt-kind reminders", () => {
     expect(second?.success).toBe(true);
     expect(second?.data?.duplicateTaskId).toBeDefined();
     expect(createdTasks).toHaveLength(1);
+  });
+});
+
+describe("TRIGGER delete — target resolution", () => {
+  it("resolves a display name passed as taskId instead of failing the delete (live regression)", async () => {
+    // Live 2026-09-13: the planner sent {action:"delete", taskId:"Email landlord (nubs)"};
+    // the miss cost a replan and the failure text became the delivered reply.
+    const { runtime, createdTasks } = makeRuntime({ enableAutonomy: false });
+    const created = await create(runtime, {
+      instructions: "email the landlord",
+      delaySeconds: 3600,
+    });
+    expect(created?.success).toBe(true);
+    const stored = createdTasks[0];
+    const task = {
+      ...stored,
+      id: stringToUuid("created-1"),
+      tags: stored.tags ?? [],
+    } as unknown as Task;
+    (
+      runtime.getTasks as unknown as { mockResolvedValue: (v: Task[]) => void }
+    ).mockResolvedValue([task]);
+    (runtime as unknown as { deleteTask: unknown }).deleteTask = vi.fn(
+      async () => undefined,
+    );
+    const displayName = String(stored.metadata.trigger?.displayName ?? "");
+    expect(displayName).not.toBe("");
+
+    const result = await triggerAction.handler(
+      runtime,
+      makeMessage("delete the landlord trigger"),
+      undefined,
+      { parameters: { action: "delete", taskId: displayName } },
+    );
+
+    expect(result?.success).toBe(true);
+    expect(
+      (runtime as unknown as { deleteTask: { mock: { calls: unknown[][] } } })
+        .deleteTask.mock.calls[0]?.[0],
+    ).toBe(task.id);
+  });
+
+  it("resolves a target-less delete from the user's own words (live regression)", async () => {
+    // Live 2026-09-14: "delete the landlord trigger" arrived as
+    // {action:"delete"}; the not-found text became the delivered reply
+    // although the retry deleted the trigger.
+    const { runtime, createdTasks } = makeRuntime({ enableAutonomy: false });
+    const created = await create(runtime, {
+      instructions: "email the landlord",
+      delaySeconds: 3600,
+    });
+    expect(created?.success).toBe(true);
+    const stored = createdTasks[0];
+    const task = {
+      ...stored,
+      id: stringToUuid("created-2"),
+      tags: stored.tags ?? [],
+    } as unknown as Task;
+    (
+      runtime.getTasks as unknown as { mockResolvedValue: (v: Task[]) => void }
+    ).mockResolvedValue([task]);
+    (runtime as unknown as { deleteTask: unknown }).deleteTask = vi.fn(
+      async () => undefined,
+    );
+
+    const result = await triggerAction.handler(
+      runtime,
+      makeMessage("delete the landlord trigger"),
+      undefined,
+      { parameters: { action: "delete" } },
+    );
+
+    expect(result?.success, JSON.stringify(result)).toBe(true);
+    expect(
+      (runtime as unknown as { deleteTask: { mock: { calls: unknown[][] } } })
+        .deleteTask.mock.calls[0]?.[0],
+    ).toBe(task.id);
+  });
+
+  it("reports a missing target as read-only when the words name no trigger", async () => {
+    const { runtime, createdTasks } = makeRuntime({ enableAutonomy: false });
+    const created = await create(runtime, {
+      instructions: "email the landlord",
+      delaySeconds: 3600,
+    });
+    expect(created?.success).toBe(true);
+    const stored = createdTasks[0];
+    (
+      runtime.getTasks as unknown as { mockResolvedValue: (v: Task[]) => void }
+    ).mockResolvedValue([
+      {
+        ...stored,
+        id: stringToUuid("created-3"),
+        tags: stored.tags ?? [],
+      } as unknown as Task,
+    ]);
+    (runtime as unknown as { deleteTask: unknown }).deleteTask = vi.fn(
+      async () => undefined,
+    );
+
+    const result = await triggerAction.handler(
+      runtime,
+      makeMessage("delete the trigger"),
+      undefined,
+      { parameters: { action: "delete" } },
+    );
+
+    expect(result?.success).toBe(false);
+    expect(result?.data).toMatchObject({
+      error: "TRIGGER_MISSING_TARGET",
+      readOnlyOperation: true,
+    });
+    expect(result?.userFacingText).toContain("Which reminder do you mean?");
+    expect(
+      (runtime as unknown as { deleteTask: { mock: { calls: unknown[][] } } })
+        .deleteTask,
+    ).not.toHaveBeenCalled();
+  });
+});
+
+describe("impliedTriggerQuery", () => {
+  it("keeps the named trigger and drops the generic nouns", () => {
+    const msg = (text: string) => makeMessage(text);
+    expect(impliedTriggerQuery(msg("delete the landlord trigger"))).toBe(
+      "landlord",
+    );
+    expect(impliedTriggerQuery(msg("cancel my vitamins reminder"))).toBe(
+      "vitamins",
+    );
+    expect(impliedTriggerQuery(msg("turn off the oven alarm please"))).toBe(
+      "oven",
+    );
+    expect(impliedTriggerQuery(msg("delete the trigger"))).toBe(undefined);
+    expect(impliedTriggerQuery(msg("what triggers do I have?"))).toBe(
+      undefined,
+    );
+    expect(impliedTriggerQuery(undefined)).toBe(undefined);
   });
 });
 
@@ -1145,6 +1282,10 @@ describe("TRIGGER update / delete / toggle — lifecycle ops (#16863)", () => {
     });
     expect(missing?.success).toBe(false);
     expect(missing?.error).toBe("TRIGGER_NOT_FOUND");
+    expect(missing?.data).toMatchObject({
+      error: "TRIGGER_NOT_FOUND",
+      readOnlyOperation: true,
+    });
 
     const noId = await dispatch(runtime, {
       action: "update",
@@ -1152,6 +1293,10 @@ describe("TRIGGER update / delete / toggle — lifecycle ops (#16863)", () => {
     });
     expect(noId?.success).toBe(false);
     expect(noId?.error).toBe("MISSING_TASK_ID");
+    expect(noId?.data).toMatchObject({
+      error: "MISSING_TASK_ID",
+      readOnlyOperation: true,
+    });
     expect(updates).toHaveLength(0);
   });
 

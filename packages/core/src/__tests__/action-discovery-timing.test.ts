@@ -124,6 +124,75 @@ describe("action discovery latency attribution", () => {
 			}
 		},
 	);
+	it("admits a context-validated family under its own contexts in discovery mode and keeps state identity for contextless actions", async () => {
+		const message: Memory = {
+			entityId: "00000000-0000-0000-0000-000000000001",
+			agentId: "00000000-0000-0000-0000-000000000002",
+			roomId: "00000000-0000-0000-0000-000000000003",
+			content: {
+				text: "read the last 3 messages in the #general discord channel",
+			},
+		};
+		const state: State = {
+			text: "",
+			values: { __contextRouting: { primaryContext: "general" } },
+			data: {},
+		};
+		const { hasActionContext } = await import("../utils/action-validation");
+		const messaging: Action = {
+			name: "MESSAGE",
+			description: "Messaging",
+			similes: [],
+			examples: [],
+			contexts: ["messaging"],
+			validate: async (_runtime, receivedMessage, receivedState) =>
+				hasActionContext(receivedMessage, receivedState, {
+					contexts: ["messaging"],
+				}),
+			handler: async () => {
+				throw new Error("Discovery must never execute actions");
+			},
+		};
+		const contextless: Action = {
+			name: "AVAILABLE",
+			description: "Available",
+			similes: [],
+			examples: [],
+			validate: async (_runtime, _message, receivedState) => {
+				expect(receivedState).toBe(state);
+				return true;
+			},
+			handler: async () => {
+				throw new Error("Discovery must never execute actions");
+			},
+		};
+		const runtime = {
+			actions: [contextless, messaging],
+			reportError: vi.fn(),
+			logger: { warn: vi.fn() },
+		} as unknown as IAgentRuntime;
+		const discovered = await collectV5PlannerCandidateActions({
+			runtime,
+			message,
+			state,
+			selectedContexts: ["general"],
+			discoverActions: true,
+			userRoles: ["ADMIN"],
+		});
+		expect(discovered.map((action) => action.name)).toEqual([
+			"AVAILABLE",
+			"MESSAGE",
+		]);
+		const routed = await collectV5PlannerCandidateActions({
+			runtime,
+			message,
+			state,
+			selectedContexts: ["general"],
+			userRoles: ["ADMIN"],
+		});
+		expect(routed.map((action) => action.name)).toEqual(["AVAILABLE"]);
+	});
+
 	it.each([undefined, "0", "1"])(
 		"keeps default diagnostics small and complete checks opt-in (%s)",
 		async (flag) => {

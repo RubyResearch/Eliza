@@ -236,6 +236,38 @@ describe("coding-tools WEB_FETCH", () => {
     expect(result.text?.isWellFormed()).toBe(true);
   });
 
+  it("names the WEB_SEARCH fallback on an upstream 5xx (live sweep: wttr.in HTTP 500)", async () => {
+    usePinnedRoutes({
+      "https://wttr.in/Austin,Texas?format=j1": new Response("boom", {
+        status: 500,
+        headers: { "content-type": "text/plain" },
+      }),
+    });
+    const result = await runFetch({
+      url: "https://wttr.in/Austin,Texas?format=j1",
+    });
+    expect(result.success).toBe(false);
+    expect(result.text).toContain("HTTP 500");
+    expect(result.text).toContain("wttr.in failed upstream");
+    expect(result.text).toContain("WEB_SEARCH");
+    expect(result.data).toMatchObject({ status: 500 });
+  });
+
+  it("carries no fallback hint on a plain 4xx", async () => {
+    usePinnedRoutes({
+      "https://public.example.test/missing": new Response("nope", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      }),
+    });
+    const result = await runFetch({
+      url: "https://public.example.test/missing",
+    });
+    expect(result.success).toBe(false);
+    expect(result.text).toContain("HTTP 404");
+    expect(result.text).not.toContain("WEB_SEARCH");
+  });
+
   it("surfaces timeout-style fetch errors honestly", async () => {
     __setWebHttpLookupFnForTests(async () => [
       { address: PUBLIC_IP, family: 4 },
@@ -248,6 +280,7 @@ describe("coding-tools WEB_FETCH", () => {
 
     expect(result.success).toBe(false);
     expect(result.text).toContain("request aborted by timeout");
+    expect(result.text).toContain("WEB_SEARCH");
   });
 
   it("extracts useful readable text from HTML instead of raw markup", async () => {

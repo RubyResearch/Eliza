@@ -32,12 +32,12 @@ import { getRoomTranscript } from "./evaluator-transcript";
 
 const LARGE_PROMPT_SECTION_CHARS = 130_000;
 
-function makeRuntime(): AgentRuntime {
+function makeRuntime(settings: Character["settings"] = {}): AgentRuntime {
 	const runtime = new AgentRuntime({
 		character: {
 			name: "EvaluatorTestAgent",
 			bio: "test",
-			settings: {},
+			settings,
 		} as Character,
 		adapter: new InMemoryDatabaseAdapter(),
 		logLevel: "fatal",
@@ -1415,7 +1415,10 @@ describe("EvaluatorService", () => {
 
 describe("lossless evaluator prefix and processing", () => {
 	it("preserves large independent room context through every fallback and persists each result", async () => {
-		const runtime = makeRuntime();
+		// 280K characters of untrimmable current-turn text sit above the default input budget.
+		const runtime = makeRuntime({
+			POST_TURN_EVALUATOR_MAX_PROMPT_TOKENS: "1000000",
+		});
 		const captured: Array<{
 			prompt: string;
 			prefix: string;
