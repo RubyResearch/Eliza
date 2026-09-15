@@ -56,7 +56,10 @@ export type LifeOpsHealthServicePublic = {
     request?: GetLifeOpsHealthSummaryRequest,
   ): Promise<LifeOpsHealthSummaryResponse>;
   getHealthDailySummary(date: string): Promise<HealthDailySummary>;
-  getHealthTrend(days: number): Promise<HealthDailySummary[]>;
+  getHealthTrend(
+    days: number,
+    window: { timeZone: string },
+  ): Promise<HealthDailySummary[]>;
   getHealthDataPoints(opts: {
     metric: HealthDataPoint["metric"];
     startAt: string;

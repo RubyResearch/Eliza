@@ -571,7 +571,9 @@ describe("HealthDomain connector lifecycle and summaries", () => {
     await expect(
       domain.getHealthDailySummary("2026-07-10"),
     ).rejects.toMatchObject({ status: 503 });
-    await expect(domain.getHealthTrend(7)).rejects.toMatchObject({
+    await expect(
+      domain.getHealthTrend(7, { timeZone: "UTC" }),
+    ).rejects.toMatchObject({
       status: 503,
     });
     await expect(

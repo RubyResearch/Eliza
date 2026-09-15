@@ -2149,8 +2149,11 @@ export class LifeOpsService extends LifeOpsServiceBase {
     return this.healthDomain.getHealthDailySummary(date);
   }
 
-  getHealthTrend(days: number): Promise<HealthDailySummary[]> {
-    return this.healthDomain.getHealthTrend(days);
+  getHealthTrend(
+    days: number,
+    window: { timeZone: string },
+  ): Promise<HealthDailySummary[]> {
+    return this.healthDomain.getHealthTrend(days, window);
   }
 
   getHealthDataPoints(opts: {

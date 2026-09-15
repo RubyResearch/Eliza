@@ -11,6 +11,11 @@
  *   - Google Fit REST API as a cross-platform fallback, authenticated via an
  *     OAuth access token supplied through config.
  *
+ * Day keys (`YYYY-MM-DD`) are calendar days in `HealthBridgeConfig.timeZone`,
+ * defaulting to the process zone: the HealthKit helper interprets `--date` as
+ * a device-local day, so "today" and the trend window must never be derived
+ * from the UTC instant.
+ *
  * Never log raw health values in plaintext.
  */
 
@@ -18,6 +23,12 @@ import { execFile } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { promisify } from "node:util";
 import { logger } from "@elizaos/core";
+import { normalizeTimeZone } from "@elizaos/shared";
+import {
+  addDaysToLocalDate,
+  getLocalDateKey,
+  getZonedDateParts,
+} from "../util/time.js";
 
 const execFileAsync = promisify(execFile);
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -83,6 +94,11 @@ export interface HealthBridgeConfig {
   healthKitCliPath?: string;
   /** OAuth2 access token for Google Fit. */
   googleFitAccessToken?: string;
+  /**
+   * IANA zone whose calendar day defines "today" and the trend window.
+   * Defaults to the process zone when absent.
+   */
+  timeZone?: string;
 }
 
 export class HealthBridgeError extends Error {
@@ -136,18 +152,25 @@ function utcMidnightMs(date: string): number {
   return ms;
 }
 
-function todayDateKeyUtc(): string {
-  return new Date().toISOString().slice(0, 10);
+function resolveDayTimeZone(config?: HealthBridgeConfig): string {
+  return normalizeTimeZone(config?.timeZone);
 }
 
-function fixtureDayOffset(date: string): number {
-  return Math.round(
-    (utcMidnightMs(date) - utcMidnightMs(todayDateKeyUtc())) / ONE_DAY_MS,
-  );
+function localTodayParts(timeZone: string) {
+  const { year, month, day } = getZonedDateParts(new Date(), timeZone);
+  return { year, month, day };
 }
 
-function fixtureSummaryForDate(date: string): HealthDailySummary {
-  const offset = fixtureDayOffset(date);
+function fixtureDayOffset(date: string, timeZone: string): number {
+  const today = getLocalDateKey(localTodayParts(timeZone));
+  return Math.round((utcMidnightMs(date) - utcMidnightMs(today)) / ONE_DAY_MS);
+}
+
+function fixtureSummaryForDate(
+  date: string,
+  timeZone: string,
+): HealthDailySummary {
+  const offset = fixtureDayOffset(date, timeZone);
   const distance = Math.abs(offset);
   const direction = offset < 0 ? 1 : -1;
   const steps = Math.max(
@@ -249,13 +272,16 @@ function fixturePointValue(
   };
 }
 
-function fixtureDataPoints(opts: {
-  metric: HealthDataPoint["metric"];
-  startAt: string;
-  endAt: string;
-}): HealthDataPoint[] {
+function fixtureDataPoints(
+  opts: {
+    metric: HealthDataPoint["metric"];
+    startAt: string;
+    endAt: string;
+  },
+  timeZone: string,
+): HealthDataPoint[] {
   return enumerateFixtureDates(opts.startAt, opts.endAt)
-    .map((date) => fixtureSummaryForDate(date))
+    .map((date) => fixtureSummaryForDate(date, timeZone))
     .map((summary) => {
       const point = fixturePointValue(summary, opts.metric);
       return {
@@ -790,7 +816,7 @@ export async function getDailySummary(
 ): Promise<HealthDailySummary> {
   const backend = await detectHealthBackend(config);
   if (backend === "fixture") {
-    return fixtureSummaryForDate(date);
+    return fixtureSummaryForDate(date, resolveDayTimeZone(config));
   }
   if (backend === "healthkit") {
     const cliPath = resolveHealthKitCliPath(config);
@@ -821,7 +847,7 @@ export async function getDataPoints(
 ): Promise<HealthDataPoint[]> {
   const backend = await detectHealthBackend(config);
   if (backend === "fixture") {
-    return fixtureDataPoints(opts);
+    return fixtureDataPoints(opts, resolveDayTimeZone(config));
   }
   if (backend === "healthkit") {
     const cliPath = resolveHealthKitCliPath(config);
@@ -854,11 +880,9 @@ export async function getRecentSummaries(
     return [];
   }
   const out: HealthDailySummary[] = [];
-  const today = new Date();
+  const today = localTodayParts(resolveDayTimeZone(config));
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setUTCDate(today.getUTCDate() - i);
-    const date = d.toISOString().slice(0, 10);
+    const date = getLocalDateKey(addDaysToLocalDate(today, -i));
     const summary = await getDailySummary(date, config);
     out.push(summary);
   }

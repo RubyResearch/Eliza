@@ -3,6 +3,11 @@
  * formatting, and response shaping for the owner's health/sleep queries. Host
  * plugins register this through the factories in `./index.ts`; the owner-scoped
  * runtime registration and LifeOps persistence stay in the host plugin.
+ *
+ * "Today" and the trend window are calendar days in the zone the host's
+ * `resolveTimeZone` adapter returns (the owner's configured zone, or the
+ * process zone), because HealthKit and connector day keys are device-local
+ * days and the UTC day is already tomorrow or still yesterday for most owners.
  */
 import type {
   Action,
@@ -21,12 +26,14 @@ import {
   ModelType,
   resolveOptimizedPromptForRuntime,
 } from "@elizaos/core";
+import { normalizeTimeZone } from "@elizaos/shared";
 import type { LifeOpsHealthSummaryResponse } from "../contracts/health.js";
 import type {
   HealthBackend,
   HealthDailySummary,
   HealthDataPoint,
 } from "../health-bridge/health-bridge.js";
+import { getLocalDateKey, getZonedDateParts } from "../util/time.js";
 import { HEALTH_PLAN_INSTRUCTIONS } from "./optimized-prompt-instructions.js";
 
 export { HEALTH_PLAN_INSTRUCTIONS } from "./optimized-prompt-instructions.js";
@@ -67,7 +74,11 @@ export interface HealthActionService {
   getHealthSummary(request?: {
     days?: number;
   }): Promise<LifeOpsHealthSummaryResponse>;
-  getHealthTrend(days: number): Promise<HealthDailySummary[]>;
+  /** Walks `days` local calendar days ending on today in `window.timeZone`. */
+  getHealthTrend(
+    days: number,
+    window: { timeZone: string },
+  ): Promise<HealthDailySummary[]>;
   getHealthDataPoints(opts: {
     metric: HealthDataPoint["metric"];
     startAt: string;
@@ -90,6 +101,8 @@ export interface CreateHealthActionRunnerOptions {
   hasAccess: (runtime: IAgentRuntime, message: Memory) => Promise<boolean>;
   createService: (runtime: IAgentRuntime) => HealthActionService;
   messageText: (message: Memory) => string;
+  /** IANA zone whose calendar day is the owner's "today". */
+  resolveTimeZone: (runtime: IAgentRuntime) => string | Promise<string>;
   renderReply: (args: {
     runtime: IAgentRuntime;
     message: Memory;
@@ -118,8 +131,8 @@ function getParams(
   return params ?? {};
 }
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+function localTodayKey(timeZone: string): string {
+  return getLocalDateKey(getZonedDateParts(new Date(), timeZone));
 }
 
 function normalizeHealthSubaction(value: unknown): Subaction | null {
@@ -524,6 +537,7 @@ export function createHealthActionRunner(
       }
     }
     const service = adapters.createService(runtime);
+    const timeZone = normalizeTimeZone(await adapters.resolveTimeZone(runtime));
 
     const connectorStatus = await service.getHealthConnectorStatus();
     let healthSummary: LifeOpsHealthSummaryResponse | null = null;
@@ -647,7 +661,7 @@ export function createHealthActionRunner(
         }
         const daily = latestConnectorSummaryForDate(
           healthSummary,
-          params.date ?? todayIso(),
+          params.date ?? localTodayKey(timeZone),
         );
         const fallback = daily
           ? `Health summary for ${formatConnectorDailySummary(daily)}`
@@ -684,7 +698,7 @@ export function createHealthActionRunner(
         params.days && params.days > 0
           ? Math.floor(params.days)
           : (plannedDays ?? 7);
-      const trend = await service.getHealthTrend(days);
+      const trend = await service.getHealthTrend(days, { timeZone });
       const fallback =
         trend.length === 0
           ? `No health data recorded in the last ${days} days.`
@@ -760,7 +774,7 @@ export function createHealthActionRunner(
       });
     }
 
-    const date = params.date ?? todayIso();
+    const date = params.date ?? localTodayKey(timeZone);
     const summary = await service.getHealthDailySummary(date);
     const fallback = `Health summary for ${formatSummary(summary)}`;
     return respond({

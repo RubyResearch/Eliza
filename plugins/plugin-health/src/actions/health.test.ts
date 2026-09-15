@@ -45,6 +45,7 @@ function makeRunner(
     renderReply,
     recentConversationTexts: async () => [],
     runJsonModel: async () => null,
+    resolveTimeZone: () => "UTC",
   });
 }
 
@@ -221,6 +222,7 @@ describe("health action runner", () => {
       renderReply: async ({ fallback }) => ({ kind: "model", text: fallback }),
       recentConversationTexts,
       runJsonModel,
+      resolveTimeZone: () => "UTC",
     });
 
     // resolveHealthPlanWithLlm short-circuits unless runtime.useModel exists.
@@ -259,6 +261,7 @@ describe("health action runner", () => {
       getHealthDailySummary: vi.fn(),
     } satisfies HealthActionService;
     const runner = createHealthActionRunner({
+      resolveTimeZone: () => "UTC",
       hasAccess: async () => false,
       createService: () => service,
       messageText: (m) =>
@@ -303,6 +306,7 @@ describe("health action runner", () => {
       }),
     );
     const runner = createHealthActionRunner({
+      resolveTimeZone: () => "UTC",
       hasAccess: async () => true,
       createService: () => service,
       messageText: (m) =>

@@ -2,6 +2,8 @@
  * OWNER_SCREENTIME action implementation — planning, parameter parsing, and
  * recap shaping for screen-time queries. Registered by host plugins via the
  * factories in `./index.ts`; owner access checks and persistence stay in the host.
+ * "Today" is the calendar day in the zone the host's `resolveTimeZone` adapter
+ * returns, matching the local-day keys screen-time rows are stored under.
  */
 import type {
   Action,
@@ -19,11 +21,13 @@ import {
   resolveOptimizedPromptForRuntime,
   runWithTrajectoryPurpose,
 } from "@elizaos/core";
+import { normalizeTimeZone } from "@elizaos/shared";
 import type {
   LifeOpsScreenTimeDaily,
   LifeOpsScreenTimeSource,
   LifeOpsScreenTimeSummary,
 } from "../contracts/lifeops.js";
+import { getLocalDateKey, getZonedDateParts } from "../util/time.js";
 import { SCREENTIME_RECAP_INSTRUCTIONS } from "./optimized-prompt-instructions.js";
 
 export { SCREENTIME_RECAP_INSTRUCTIONS } from "./optimized-prompt-instructions.js";
@@ -148,6 +152,8 @@ export interface CreateScreenTimeActionRunnerOptions {
   hasAccess: (runtime: IAgentRuntime, message: Memory) => Promise<boolean>;
   createService: (runtime: IAgentRuntime) => ScreenTimeActionService;
   messageText: (message: Memory) => string;
+  /** IANA zone whose calendar day is the owner's "today". */
+  resolveTimeZone: (runtime: IAgentRuntime) => string | Promise<string>;
   renderReply: (args: {
     runtime: IAgentRuntime;
     message: Memory;
@@ -260,8 +266,8 @@ const SUBACTIONS: SubactionsMap<Subaction> = {
   },
 };
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+function localTodayKey(timeZone: string): string {
+  return getLocalDateKey(getZonedDateParts(new Date(), timeZone));
 }
 
 function daysAgoIso(days: number): string {
@@ -585,7 +591,11 @@ export function createScreenTimeActionRunner(
     switch (subaction) {
       case "today": {
         const service = adapters.createService(runtime);
-        const date = params.date ?? todayIso();
+        const date =
+          params.date ??
+          localTodayKey(
+            normalizeTimeZone(await adapters.resolveTimeZone(runtime)),
+          );
         const daily = await service.getScreenTimeDaily({
           date,
           source: params.source,

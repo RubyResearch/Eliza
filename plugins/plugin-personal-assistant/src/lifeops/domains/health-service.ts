@@ -738,9 +738,15 @@ export class HealthDomain {
     }
   }
 
-  async getHealthTrend(days: number): Promise<HealthDailySummary[]> {
+  async getHealthTrend(
+    days: number,
+    window: { timeZone: string },
+  ): Promise<HealthDailySummary[]> {
     try {
-      return await getRecentSummaries(days, resolveHealthConfig());
+      return await getRecentSummaries(days, {
+        ...resolveHealthConfig(),
+        timeZone: window.timeZone,
+      });
     } catch (error) {
       translateHealthError(error);
     }

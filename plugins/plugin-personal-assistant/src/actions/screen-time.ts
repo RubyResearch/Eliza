@@ -20,6 +20,7 @@ import {
   getBrowserActivitySnapshot,
   getBrowserDomainActivity,
 } from "../lifeops/browser-extension-store.js";
+import { resolveOwnerTimeZone } from "../lifeops/owner/fact-store.js";
 import { LifeOpsService } from "../lifeops/service.js";
 import {
   messageText,
@@ -37,6 +38,7 @@ export const runScreenTimeHandler = createScreenTimeActionRunner({
   hasAccess: hasLifeOpsAccess,
   createService: (runtime) => new LifeOpsService(runtime),
   messageText,
+  resolveTimeZone: (runtime) => resolveOwnerTimeZone(runtime, new Date()),
   renderReply: renderLifeOpsActionReply,
   resolveActionArgs,
   isDarwin,

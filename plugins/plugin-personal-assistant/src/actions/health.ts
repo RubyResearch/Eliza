@@ -16,6 +16,7 @@ import {
   type LifeOpsModelType,
   runLifeOpsJsonModel,
 } from "../lifeops/google/format-helpers.js";
+import { resolveOwnerTimeZone } from "../lifeops/owner/fact-store.js";
 import { LifeOpsService } from "../lifeops/service.js";
 import {
   messageText,
@@ -28,6 +29,7 @@ export const runHealthHandler = createHealthActionRunner({
   hasAccess: hasLifeOpsAccess,
   createService: (runtime) => new LifeOpsService(runtime),
   messageText,
+  resolveTimeZone: (runtime) => resolveOwnerTimeZone(runtime, new Date()),
   renderReply: renderLifeOpsActionReply,
   recentConversationTexts,
   // The runner types modelType as the broad ModelTypeName; LifeOps's call args
