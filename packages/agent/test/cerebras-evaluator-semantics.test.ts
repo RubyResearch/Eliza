@@ -104,6 +104,7 @@ it("persists both owned semantic fixtures and rejects incomplete replay without 
               entityId: fixture.entityId,
               platform: "github",
               [handleField]: fixture.handle,
+              sourceMessageId: fixture.messageId,
               confidence: 0.99,
             },
           ],

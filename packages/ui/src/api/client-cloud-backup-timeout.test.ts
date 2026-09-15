@@ -10,9 +10,25 @@ let server: Server;
 let baseUrl: string;
 let requests = 0;
 let fail = false;
+let restoreRequests = 0;
+let failRestore = false;
 
 beforeAll(async () => {
   server = createServer(async (request, response) => {
+    if (request.method === "POST" && request.url === "/api/backups/restore") {
+      restoreRequests += 1;
+      if (failRestore) {
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({ error: "Archive integrity check failed" }),
+        );
+        return;
+      }
+      await delay(11_000);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ restored: true, requiresRestart: true }));
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/api/backups") {
       response.writeHead(404).end();
       return;
@@ -58,4 +74,24 @@ it("surfaces a creation failure without retrying an uncertain operation", async 
     new ElizaClient(baseUrl).createLocalAgentBackup(),
   ).rejects.toThrow("Snapshot encryption failed");
   expect(requests).toBe(1);
+});
+
+it("returns the restart receipt after the generic deadline without restoring twice", async () => {
+  restoreRequests = 0;
+  const receipt = await new ElizaClient(baseUrl).restoreLocalAgentBackup(
+    "existing.agent-backup.json",
+  );
+  expect(receipt).toEqual({ restored: true, requiresRestart: true });
+  expect(restoreRequests).toBe(1);
+}, 25_000);
+
+it("surfaces a restore failure without repeating an uncertain operation", async () => {
+  failRestore = true;
+  restoreRequests = 0;
+  await expect(
+    new ElizaClient(baseUrl).restoreLocalAgentBackup(
+      "existing.agent-backup.json",
+    ),
+  ).rejects.toThrow("Archive integrity check failed");
+  expect(restoreRequests).toBe(1);
 });

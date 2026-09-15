@@ -43,6 +43,9 @@ const AGENT_RESET_FETCH_TIMEOUT_MS = 60_000;
 // exceed the ordinary REST budget. Keep creation bounded while allowing the
 // server to return its receipt before the owner can start another backup.
 const LOCAL_BACKUP_CREATE_FETCH_TIMEOUT_MS = 120_000;
+// Restore verifies and decrypts the archive, stops the runtime and replaces
+// database files before returning the required-restart receipt.
+const LOCAL_BACKUP_RESTORE_FETCH_TIMEOUT_MS = 120_000;
 
 function requestPathname(path: string): string {
   try {
@@ -84,6 +87,9 @@ export function defaultFetchTimeoutMs(
   }
   if (pathname === "/api/backups") {
     return LOCAL_BACKUP_CREATE_FETCH_TIMEOUT_MS;
+  }
+  if (pathname === "/api/backups/restore") {
+    return LOCAL_BACKUP_RESTORE_FETCH_TIMEOUT_MS;
   }
   if (pathname === "/api/conversations") {
     return CONVERSATION_CREATE_FETCH_TIMEOUT_MS;

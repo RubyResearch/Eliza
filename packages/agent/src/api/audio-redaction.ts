@@ -348,9 +348,13 @@ interface SpawnResult {
   stderr: string;
 }
 
-async function run(bin: string, args: readonly string[]): Promise<SpawnResult> {
+async function run(
+  bin: string,
+  args: readonly string[],
+  stdoutFd?: number,
+): Promise<SpawnResult> {
   try {
-    return await runAudioRedactionChild(bin, args);
+    return await runAudioRedactionChild(bin, args, { stdoutFd });
   } catch (error) {
     // error-policy:J2 wrap the isolated child failure as the typed domain error
     // the redaction lanes already surface to callers.
@@ -383,19 +387,27 @@ export async function probeAudioFile(filePath: string): Promise<ProbedAudio> {
   const outputPath = path.join(probeDir, "probe.json");
   let probeJson = "";
   try {
-    const result = await run(ffprobe, [
-      "-v",
-      "error",
-      "-select_streams",
-      "a:0",
-      "-show_entries",
-      "stream=sample_rate,channels:format=duration",
-      "-of",
-      "json",
-      "-o",
-      outputPath,
-      filePath,
-    ]);
+    const output = await fs.open(outputPath, "wx", 0o600);
+    let result: SpawnResult;
+    try {
+      result = await run(
+        ffprobe,
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "a:0",
+          "-show_entries",
+          "stream=sample_rate,channels:format=duration",
+          "-of",
+          "json",
+          filePath,
+        ],
+        output.fd,
+      );
+    } finally {
+      await output.close();
+    }
     if (result.code !== 0) {
       throw new ElizaError(`ffprobe failed: ${result.stderr.trim()}`, {
         code: "AUDIO_REDACTION_FFMPEG_FAILED",

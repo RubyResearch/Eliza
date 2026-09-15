@@ -3,6 +3,8 @@
  *
  * The timeout and combined stdio budget prevent malformed media or a stuck
  * binary from pinning the agent or growing its memory use without limit.
+ * Callers may redirect complete stdout to their own file descriptor; stderr
+ * remains bounded and this runner never closes the caller-owned descriptor.
  */
 
 import { spawn } from "node:child_process";
@@ -39,13 +41,20 @@ export class AudioRedactionChildError extends Error {
 export function runAudioRedactionChild(
   bin: string,
   args: readonly string[],
-  options: { timeoutMs?: number; maxStdioBytes?: number } = {},
+  options: {
+    timeoutMs?: number;
+    maxStdioBytes?: number;
+    stdoutFd?: number;
+  } = {},
 ): Promise<AudioRedactionChildResult> {
   const timeoutMs = options.timeoutMs ?? AUDIO_REDACTION_CHILD_TIMEOUT_MS;
   const maxStdioBytes =
     options.maxStdioBytes ?? MAX_AUDIO_REDACTION_STDIO_BYTES;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { windowsHide: true });
+    const child = spawn(bin, args, {
+      windowsHide: true,
+      stdio: ["ignore", options.stdoutFd ?? "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     let stdioBytes = 0;
@@ -84,9 +93,17 @@ export function runAudioRedactionChild(
       else stderr += text;
     };
 
-    child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
+    if (!child.stderr || (options.stdoutFd === undefined && !child.stdout)) {
+      fail(
+        new Error(
+          "audio redaction child did not expose its required stdio pipes",
+        ),
+      );
+      return;
+    }
+    child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
-    child.stdout.once("error", fail);
+    child.stdout?.once("error", fail);
     child.stderr.once("error", fail);
     child.once("error", fail);
     child.once("close", (code) => {

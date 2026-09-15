@@ -9,6 +9,7 @@ import {
   writeStoredStewardToken,
 } from "@elizaos/shared/steward-session-client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as persistence from "../state/persistence";
 
 // Captured once, before any test installs the storage-bridge proxy, so every
 // test can read/write "the raw disk" (bypassing whatever proxy state a prior
@@ -618,7 +619,6 @@ describe("native protected-storage bridge contract", () => {
 
   it("does not finish active-server teardown before native deletion commits", async () => {
     const bridge = await import("./storage-bridge");
-    const persistence = await import("../state/persistence");
     // Production installs the native storage proxy before any auth/runtime
     // state is published. Model that boot boundary so synchronous persistence
     // readers observe the verified secure-store cache rather than raw disk.

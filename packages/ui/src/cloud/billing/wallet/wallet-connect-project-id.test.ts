@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { buildStewardEvmConfig } from "./steward-wallet-providers";
 import {
   isConfiguredWalletConnectProjectId,
   resolveWalletConnectProjectId,
@@ -89,9 +90,6 @@ describe("resolveWalletConnectProjectId", () => {
 
 describe("buildStewardEvmConfig fail-closed paths", () => {
   it("registers only the injected connector when project id is null", async () => {
-    const { buildStewardEvmConfig } = await import(
-      "./steward-wallet-providers"
-    );
     const config = buildStewardEvmConfig({
       appUrl: "https://elizacloud.ai",
       walletConnectProjectId: null,
@@ -105,9 +103,6 @@ describe("buildStewardEvmConfig fail-closed paths", () => {
   });
 
   it("registers only injected and WalletConnect when a real project id is provided", async () => {
-    const { buildStewardEvmConfig } = await import(
-      "./steward-wallet-providers"
-    );
     const withProjectId = buildStewardEvmConfig({
       appUrl: "https://elizacloud.ai",
       walletConnectProjectId: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
