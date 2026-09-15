@@ -17,7 +17,9 @@
  * `analyzeMeetingGhostTranscript` already emits `ApprovalEnqueueInput[]` and
  * ledger records, so this is a routing pass: analyze, then write each side
  * effect. Failures surface (no swallow) so a broken approval or ledger pipeline
- * is observable.
+ * is observable. A transcript without a `timeZone` is stamped with the owner's
+ * zone first so relative due dates resolve on the owner's calendar day rather
+ * than the process zone of whatever host runs the consumer.
  */
 
 import type { IAgentRuntime } from "@elizaos/core";
@@ -27,6 +29,7 @@ import type {
   ApprovalEnqueueInput,
   ApprovalRequest,
 } from "../approval-queue.types.js";
+import { resolveOwnerTimeZone } from "../owner/fact-store.js";
 import { LifeOpsRepository } from "../repository.js";
 import {
   analyzeMeetingGhostTranscript,
@@ -95,6 +98,14 @@ async function enqueueOrReuseApproval(
   return queue.enqueue(request);
 }
 
+// The owner's zone is evaluated at the meeting instant so an active travel
+// window covers the meeting; an unparseable `startedAt` yields no relative due
+// dates anyway, so the current instant is only used to pick the zone.
+function ownerZoneInstant(startedAt: string): Date {
+  const at = new Date(startedAt);
+  return Number.isNaN(at.getTime()) ? new Date() : at;
+}
+
 /**
  * Analyze the transcript and enqueue every derived owner-approval request.
  * Follow-up emails enqueue before calendar-deadline events so the owner sees
@@ -105,9 +116,18 @@ export async function runMeetingGhostForTranscript(
   runtime: IAgentRuntime,
   input: RunMeetingGhostInput,
 ): Promise<MeetingGhostRunResult> {
+  const transcript = input.transcript.timeZone
+    ? input.transcript
+    : {
+        ...input.transcript,
+        timeZone: await resolveOwnerTimeZone(
+          runtime,
+          ownerZoneInstant(input.transcript.startedAt),
+        ),
+      };
   const analysis = analyzeMeetingGhostTranscript({
     agentId: input.agentId,
-    transcript: input.transcript,
+    transcript,
     owner: input.owner,
   });
 

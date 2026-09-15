@@ -15,15 +15,37 @@
  * extraction against a realistic diarized fixture without mocking connectors.
  * Extraction is heuristic (regex over natural utterances); a model-driven pass
  * is out of scope here (tracked by #14870 for ASR that these rules miss).
+ *
+ * Relative due dates ("tomorrow", "by Friday") resolve on the meeting's local
+ * calendar day, and the 17:00 ledger `dueAt` and 09:00 calendar deadline are
+ * wall times in that zone. Zone precedence: `MeetingGhostTranscript.timeZone`
+ * when the transcript carries one; otherwise the runtime's owner-configured
+ * zone, which `./consumer.ts` resolves and stamps onto the transcript before
+ * analysis; otherwise the process zone, the only fallback this pure function
+ * can see.
  */
 
 import type { TranscriptSegment } from "@elizaos/shared";
+import { normalizeTimeZone } from "@elizaos/shared";
 import type {
   ApprovalEnqueueInput,
   ApprovalPayload,
 } from "../approval-queue.types.js";
 import type { LifeOpsCommitmentLedgerRecord } from "../commitments/index.js";
 import { createLifeOpsCommitmentLedgerRecord } from "../commitments/index.js";
+import {
+  addDaysToLocalDate,
+  buildUtcDateFromLocalParts,
+  getLocalDateKey,
+  getWeekdayForLocalDate,
+  getZonedDateParts,
+  type ZonedDateParts,
+} from "../time.js";
+
+/** Local wall-clock hour a dated commitment falls due in the ledger. */
+const LEDGER_DUE_HOUR = 17;
+/** Local wall-clock hour the calendar deadline block starts. */
+const CALENDAR_DEADLINE_HOUR = 9;
 
 export interface MeetingGhostAttendee {
   readonly name: string;
@@ -35,6 +57,12 @@ export interface MeetingGhostTranscript {
   readonly meetingId: string;
   readonly title: string;
   readonly startedAt: string;
+  /**
+   * IANA zone of the meeting's local calendar day. Absent means the caller
+   * did not know it; `runMeetingGhostForTranscript` fills in the owner's zone
+   * and the pure analyzer falls back to the process zone.
+   */
+  readonly timeZone?: string;
   readonly attendees: readonly MeetingGhostAttendee[];
   readonly segments: readonly TranscriptSegment[];
 }
@@ -333,19 +361,34 @@ function parseCommitmentBody(text: string): {
   return null;
 }
 
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date.getTime());
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
+type LocalDate = Pick<ZonedDateParts, "year" | "month" | "day">;
+
+function resolveTranscriptTimeZone(transcript: MeetingGhostTranscript): string {
+  return normalizeTimeZone(transcript.timeZone);
 }
 
-function toIsoDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
+const DUE_DATE_KEY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// An explicit spoken/annotated `YYYY-MM-DD` is kept verbatim as `dueDate`, so
+// the instant builders re-validate it: `Date.UTC` would silently roll an
+// impossible day such as 02-30 into the next month.
+function parseDueDateKey(dueDate: string): LocalDate | null {
+  const match = DUE_DATE_KEY.exec(dueDate);
+  if (!match) return null;
+  const parts = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+  };
+  return getLocalDateKey(addDaysToLocalDate(parts, 0)) === dueDate
+    ? parts
+    : null;
 }
 
 function parseDueDate(
   dueText: string | null,
   meetingStartedAt: string,
+  timeZone: string,
 ): string | null {
   if (!dueText) return null;
   const trimmed = dueText.trim();
@@ -354,29 +397,54 @@ function parseDueDate(
 
   const base = new Date(meetingStartedAt);
   if (Number.isNaN(base.getTime())) return null;
+  const { year, month, day } = getZonedDateParts(base, timeZone);
+  const meetingDay: LocalDate = { year, month, day };
   const normalizedDue = normalize(trimmed);
-  if (normalizedDue.includes("tomorrow")) return toIsoDate(addDays(base, 1));
+  if (normalizedDue.includes("tomorrow")) {
+    return getLocalDateKey(addDaysToLocalDate(meetingDay, 1));
+  }
 
   const weekday = [...WEEKDAYS.entries()].find(([name]) =>
     normalizedDue.includes(name),
   );
   if (weekday) {
     const [, target] = weekday;
-    const current = base.getUTCDay();
+    const current = getWeekdayForLocalDate(meetingDay);
     const delta = (target - current + 7) % 7 || 7;
-    return toIsoDate(addDays(base, delta));
+    return getLocalDateKey(addDaysToLocalDate(meetingDay, delta));
   }
   return null;
 }
 
-function dueDateToLedgerDueAt(dueDate: string | null): string | null {
+function localInstantOnDueDate(
+  dueDate: string | null,
+  timeZone: string,
+  hour: number,
+): Date | null {
   if (!dueDate) return null;
-  const due = new Date(`${dueDate}T17:00:00.000Z`);
-  return Number.isNaN(due.getTime()) ? null : due.toISOString();
+  const parts = parseDueDateKey(dueDate);
+  if (!parts) return null;
+  return buildUtcDateFromLocalParts(timeZone, {
+    ...parts,
+    hour,
+    minute: 0,
+    second: 0,
+  });
+}
+
+function dueDateToLedgerDueAt(
+  dueDate: string | null,
+  timeZone: string,
+): string | null {
+  return (
+    localInstantOnDueDate(dueDate, timeZone, LEDGER_DUE_HOUR)?.toISOString() ??
+    null
+  );
 }
 
 function parseCommitment(
   transcript: MeetingGhostTranscript,
+  timeZone: string,
   segment: TranscriptSegment,
   index: number,
 ): MeetingGhostCommitment | null {
@@ -384,7 +452,7 @@ function parseCommitment(
   const parsed = parseCommitmentBody(text);
   if (!parsed) return null;
   const who = parsed.who ?? speakerOf(segment);
-  const dueDate = parseDueDate(parsed.dueText, transcript.startedAt);
+  const dueDate = parseDueDate(parsed.dueText, transcript.startedAt, timeZone);
   return {
     id: stableId(["commitment", String(index), who, parsed.what]),
     who,
@@ -428,14 +496,20 @@ function buildFollowUpApproval(
 
 function buildCalendarIntent(
   transcript: MeetingGhostTranscript,
+  timeZone: string,
   owner: MeetingGhostOwnerContext,
   commitment: MeetingGhostCommitment,
 ): MeetingGhostCalendarIntent | null {
   if (!commitment.recipientEmail || !commitment.dueDate || !owner.calendarId) {
     return null;
   }
-  const startsAtMs = Date.parse(`${commitment.dueDate}T09:00:00.000Z`);
-  if (Number.isNaN(startsAtMs)) return null;
+  const startsAt = localInstantOnDueDate(
+    commitment.dueDate,
+    timeZone,
+    CALENDAR_DEADLINE_HOUR,
+  );
+  if (!startsAt) return null;
+  const startsAtMs = startsAt.getTime();
   const payload: ApprovalPayload = {
     action: "schedule_event",
     calendarId: owner.calendarId,
@@ -491,7 +565,10 @@ export function createMeetingGhostCommitmentLedgerRecord(input: {
     kind: "commitment",
     summary: input.commitment.what,
     counterparty: input.commitment.who,
-    dueAt: dueDateToLedgerDueAt(input.commitment.dueDate),
+    dueAt: dueDateToLedgerDueAt(
+      input.commitment.dueDate,
+      resolveTranscriptTimeZone(input.transcript),
+    ),
     confidence: input.commitment.dueDate ? 0.86 : 0.78,
     metadata: {
       meetingId: input.transcript.meetingId,
@@ -516,6 +593,7 @@ export function analyzeMeetingGhostTranscript(input: {
   const decisions: MeetingGhostDecision[] = [];
   const commitments: MeetingGhostCommitment[] = [];
   const careHits: MeetingGhostCareHit[] = [];
+  const timeZone = resolveTranscriptTimeZone(input.transcript);
 
   input.transcript.segments.forEach((segment, index) => {
     const decision = parseDecision(segment, index);
@@ -526,7 +604,7 @@ export function analyzeMeetingGhostTranscript(input: {
     // segment so a collective verb never becomes a per-person follow-up.
     const commitment = decision
       ? null
-      : parseCommitment(input.transcript, segment, index);
+      : parseCommitment(input.transcript, timeZone, segment, index);
     if (commitment) commitments.push(commitment);
 
     for (const careAbout of input.owner.careAbouts) {
@@ -549,7 +627,7 @@ export function analyzeMeetingGhostTranscript(input: {
     .filter((entry): entry is ApprovalEnqueueInput => entry !== null);
   const calendarIntents = commitments
     .map((commitment) =>
-      buildCalendarIntent(input.transcript, input.owner, commitment),
+      buildCalendarIntent(input.transcript, timeZone, input.owner, commitment),
     )
     .filter((entry): entry is MeetingGhostCalendarIntent => entry !== null);
   const commitmentLedgerRecords: LifeOpsCommitmentLedgerRecord[] = [];

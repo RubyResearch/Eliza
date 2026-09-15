@@ -51,6 +51,7 @@ function analyzeSeededTranscript() {
       meetingId: "ops-sync-2026-07-06",
       title: "Ops Sync",
       startedAt: "2026-07-06T16:00:00.000Z",
+      timeZone: "UTC",
       attendees: [
         { name: "Mira", email: "mira@example.com" },
         { name: "Ava", email: "ava@example.com" },
@@ -181,6 +182,7 @@ describe("meeting ghost transcript analysis", () => {
         meetingId: "ops-sync-2026-07-06",
         title: "Ops Sync",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [{ name: "Ava", email: "ava@example.com" }],
         segments: [
           seg(
@@ -224,6 +226,7 @@ describe("meeting ghost transcript analysis", () => {
         meetingId: "ops-sync-2026-07-06",
         title: "Ops Sync",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [{ name: "Ava", email: "ava@example.com" }],
         segments: [],
       },
@@ -306,6 +309,7 @@ describe("meeting ghost transcript analysis", () => {
         meetingId: "chatter-only",
         title: "Standup",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [{ name: "Mira", email: "mira@example.com" }],
         segments: [
           seg("Mira", 0, "Morning everyone, how was the weekend?"),
@@ -337,6 +341,7 @@ describe("meeting ghost transcript analysis", () => {
         meetingId: "joined-subject-words",
         title: "Standup",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [{ name: "Mira", email: "mira@example.com" }],
         segments: [
           seg("Mira", 0, "iwill send the plan tomorrow"),

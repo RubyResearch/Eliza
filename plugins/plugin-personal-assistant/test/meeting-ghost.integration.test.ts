@@ -122,6 +122,7 @@ describe("meeting-ghost consumer (real approval queue)", () => {
         meetingId: "ops-sync-integration",
         title: "Ops Sync",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [
           { name: "Ava", email: "ava@example.com" },
           { name: "Ben", email: "ben@example.com" },
@@ -207,6 +208,7 @@ describe("meeting-ghost consumer (real approval queue)", () => {
         meetingId: "ops-sync-integration",
         title: "Ops Sync",
         startedAt: "2026-07-06T16:00:00.000Z",
+        timeZone: "UTC",
         attendees: [
           { name: "Ava", email: "ava@example.com" },
           { name: "Ben", email: "ben@example.com" },
