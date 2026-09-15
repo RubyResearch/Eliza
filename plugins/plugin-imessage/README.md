@@ -79,8 +79,13 @@ channel-scoped Blooio webhook for the configured channel pointing to:
 https://YOUR_AGENT_HOST/api/imessage/webhook/blooio
 ```
 
-Subscribe to `message.received`. The route verifies `X-Blooio-Signature`
+Blooio v4 subscriptions deliver all event types. The route handles only
+`message.received` and verifies `X-Blooio-Signature`
 against the unmodified request body and silently ignores other channel IDs.
+
+Startup and the existing recurring heartbeat verify API access and that the sender
+number resolves to the configured channel. This check does not prove webhook or
+message delivery; complete an inbound and outbound test before client handoff.
 
 ### Permissions
 

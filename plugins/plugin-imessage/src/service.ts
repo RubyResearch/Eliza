@@ -46,6 +46,7 @@ import {
   DEFAULT_ACCOUNT_ID as IMESSAGE_LOCAL_ACCOUNT_ID,
   normalizeAccountId as normalizeIMessageAccountId,
 } from "./accounts.js";
+import { verifyBlooioChannel } from "./blooio-readiness.js";
 import {
   parseBlooioInbound,
   sendBlooioMessage,
@@ -622,6 +623,7 @@ export class IMessageService extends Service implements IIMessageService {
 
   private settings: IMessageSettings | null = null;
   private connected: boolean = false;
+  private blooioHealthReason: string | null = null;
   private pollInterval: NodeJS.Timeout | null = null;
   /**
    * Highest `message.ROWID` we've already dispatched to the agent. The
@@ -708,6 +710,7 @@ export class IMessageService extends Service implements IIMessageService {
     const backfill = resolveBackfillRows(resolvedBackfillRaw);
     await service.validateSettings();
     if (service.settings.transport === "blooio") {
+      await service.verifyHostedChannel();
       service.registerBlooioReceiptCleanupWorker();
     }
 
@@ -1079,6 +1082,20 @@ export class IMessageService extends Service implements IIMessageService {
     return this.connected;
   }
 
+  private async verifyHostedChannel(): Promise<void> {
+    const settings = this.settings;
+    if (!settings?.blooioApiKey || !settings.blooioFromNumber || !settings.blooioChannelId) {
+      throw new ElizaError("Blooio sender settings are incomplete", {
+        code: "BLOOIO_CHANNEL_CONFIGURATION_INVALID",
+      });
+    }
+    await verifyBlooioChannel({
+      apiKey: settings.blooioApiKey,
+      fromNumber: settings.blooioFromNumber,
+      channelId: settings.blooioChannelId,
+    });
+  }
+
   getStatus(): IMessageServiceStatus {
     const transport = this.settings?.transport ?? "native";
     const chatDbAvailable = this.chatDb !== null;
@@ -1094,7 +1111,7 @@ export class IMessageService extends Service implements IIMessageService {
       chatDbPath: this.chatDbPath,
       reason:
         transport === "blooio"
-          ? null
+          ? this.blooioHealthReason
           : (accessIssue?.reason ?? (chatDbAvailable ? null : "chat.db reader not available")),
       permissionAction: accessIssue?.permissionAction ?? null,
       webhookPath: transport === "blooio" ? "/api/imessage/webhook/blooio" : null,
@@ -2736,8 +2753,9 @@ export class IMessageService extends Service implements IIMessageService {
         let contactsCount = 0;
         try {
           if (this.settings?.transport === "blooio") {
-            ok = this.connected;
-            reason = ok ? "" : "Blooio transport disconnected";
+            await this.verifyHostedChannel();
+            this.connected = true;
+            this.blooioHealthReason = null;
           } else if (!this.chatDb) {
             ok = false;
             reason = "chat.db reader not available (send-only mode)";
@@ -2750,8 +2768,14 @@ export class IMessageService extends Service implements IIMessageService {
           }
           contactsCount = this.contacts.size;
         } catch (err) {
+          // error-policy:J4 expose failed health checks as disconnected and retry next heartbeat.
           ok = false;
           reason = err instanceof Error ? err.message : String(err);
+          if (this.settings?.transport === "blooio") {
+            this.connected = false;
+            this.blooioHealthReason = reason;
+          }
+          runtime.reportError("IMessageService.heartbeat", err);
         }
 
         logger.debug(
