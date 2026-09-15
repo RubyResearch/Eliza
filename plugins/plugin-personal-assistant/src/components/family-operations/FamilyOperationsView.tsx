@@ -36,6 +36,7 @@ import {
 } from "react";
 import type { FamilyPacketSection } from "../../lifeops/family-coordination/index.js";
 import { nextFamilyPacketPeriod } from "../../lifeops/family-workflows/period.js";
+import type { FamilyMonthlyScheduleView } from "../../lifeops/family-workflows/runtime.js";
 import { AgreementGuestAccessPanel } from "./AgreementGuestAccessPanel.js";
 import { AgreementObligationReview } from "./AgreementObligationReview.js";
 import { AgreementProposalEditor } from "./AgreementProposalEditor.js";
@@ -54,6 +55,7 @@ import type {
   FamilyOperationsAdapter,
   FamilyOperationsSnapshot,
   Loadable,
+  SchoolWorkflowView,
 } from "./types.js";
 
 const packetSectionLabels: Record<FamilyPacketSection, string> = {
@@ -746,6 +748,28 @@ function CalendarPanel({
   );
 }
 
+const schoolStatusLabels: Record<SchoolWorkflowView["state"], string> = {
+  never_run: "Not checked yet",
+  running: "Checking",
+  unchanged: "No changes",
+  awaiting_approval: "Ready for review",
+  applied: "Updated",
+  failed: "Check failed",
+};
+const monthlyScheduleStatusLabels: Record<
+  FamilyMonthlyScheduleView["status"],
+  string
+> = {
+  scheduled: "Scheduled",
+  fired: "In progress",
+  acknowledged: "Acknowledged",
+  completed: "Completed",
+  skipped: "Skipped",
+  expired: "Expired",
+  failed: "Failed",
+  dismissed: "Stopped",
+};
+
 function SchoolPanel({
   state,
   adapter,
@@ -802,7 +826,7 @@ function SchoolPanel({
               setSchoolLevel(value === "elementary" ? "elementary" : "all")
             }
           >
-            <SelectTrigger id="school-level">
+            <SelectTrigger id="school-level" className="min-h-12">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -822,7 +846,7 @@ function SchoolPanel({
               setUpdateMode(value === "automatic" ? "automatic" : "review")
             }
           >
-            <SelectTrigger id="school-update-mode">
+            <SelectTrigger id="school-update-mode" className="min-h-12">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -834,10 +858,15 @@ function SchoolPanel({
           </Select>
         </div>
         <p>
-          Checks monthly. Unchanged files add no events. Unclear dates stop for
-          review; changes apply only to events managed by this school source.
+          Saving creates a monthly school check and packet preparation task if
+          one does not exist. The default is the first day of each month at 9:00
+          AM America/New_York; an existing schedule and its status are
+          preserved. It never sends email automatically. Unchanged files add no
+          events. Unclear dates stop for review; changes apply only to events
+          managed by this school source.
         </p>
         <Button
+          className="min-h-12"
           onClick={() =>
             void run(() => adapter.configureSchool({ schoolLevel, updateMode }))
           }
@@ -845,8 +874,48 @@ function SchoolPanel({
           Save school settings
         </Button>
       </fieldset>
+      <section
+        aria-label="Saved family schedule"
+        style={{ display: "grid", gap: 8, marginTop: 20, marginBottom: 20 }}
+      >
+        <h3 style={{ fontWeight: 700 }}>Saved family schedule</h3>
+        {workflow.monthlySchedule.status === "unavailable" ? (
+          <Unavailable message={workflow.monthlySchedule.message} />
+        ) : workflow.monthlySchedule.data === null ? (
+          <p>
+            Not scheduled yet. Save school settings to enable monthly
+            preparation.
+          </p>
+        ) : (
+          <>
+            <p>
+              Status:{" "}
+              {
+                monthlyScheduleStatusLabels[
+                  workflow.monthlySchedule.data.status
+                ]
+              }
+            </p>
+            <p>
+              {workflow.monthlySchedule.data.trigger.kind === "cron" &&
+              workflow.monthlySchedule.data.trigger.expression === "0 9 1 * *"
+                ? `First day of each month at 9:00 AM ${workflow.monthlySchedule.data.trigger.tz}`
+                : "Custom schedule. Review its timing in Automations."}
+            </p>
+            <p>
+              Last recorded start:{" "}
+              {date(workflow.monthlySchedule.data.lastFiredAt)}
+            </p>
+            <p>
+              Checks school dates and prepares an owner-review packet. Email
+              still requires your approval.
+            </p>
+          </>
+        )}
+        <a href="/automations">Review scheduled tasks</a>
+      </section>
       <p>
-        <strong>Status:</strong> {workflow.state} · checked{" "}
+        <strong>Status:</strong> {schoolStatusLabels[workflow.state]} · checked{" "}
         {date(workflow.lastCheckedAt)}
       </p>
       {workflow.changes?.length ? (
@@ -862,6 +931,7 @@ function SchoolPanel({
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
         <Button
+          className="min-h-12"
           disabled={busy}
           onClick={() => void run(() => adapter.runSchoolWorkflow())}
         >
@@ -869,6 +939,7 @@ function SchoolPanel({
         </Button>
         {workflow.state === "awaiting_approval" && workflow.runId ? (
           <Button
+            className="min-h-12"
             disabled={busy}
             variant="outline"
             onClick={() =>
@@ -1497,7 +1568,6 @@ export function FamilyOperationsView({
           {exportError ? <Unavailable message={exportError} /> : null}
           {exportNotice ? <p role="status">{exportNotice}</p> : null}
         </header>
-        <FamilyDeletionPanel adapter={deletionAdapter} onChange={refresh} />
         <nav
           aria-label="Family Operations sections"
           style={{
@@ -1557,6 +1627,7 @@ export function FamilyOperationsView({
             )}
           </div>
         ) : null}
+        <FamilyDeletionPanel adapter={deletionAdapter} onChange={refresh} />
       </div>
     </main>
   );

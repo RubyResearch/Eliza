@@ -721,6 +721,7 @@ describe("FamilyOperationsView", () => {
     data.school = {
       status: "ready",
       data: {
+        monthlySchedule: { status: "ready", data: null },
         sourceId: "concord",
         label: "Concord calendar",
         state: "never_run",
@@ -731,10 +732,28 @@ describe("FamilyOperationsView", () => {
         updateMode: "review",
       },
     };
+    local.configureSchool = vi.fn(async () => {
+      if (data.school.status !== "ready")
+        throw new Error("School state missing");
+      data.school.data.monthlySchedule = {
+        status: "ready",
+        data: {
+          taskId: "saved-family-task",
+          status: "scheduled",
+          lastFiredAt: null,
+          trigger: {
+            kind: "cron",
+            expression: "0 9 1 * *",
+            tz: "America/New_York",
+          },
+        },
+      };
+    });
     render(<FamilyOperationsView adapter={local} />);
     fireEvent.click(
       await screen.findByRole("button", { name: "School calendar" }),
     );
+    expect(screen.getByText(/Not scheduled yet/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("School level"), {
       target: { value: "elementary" },
     });
@@ -750,6 +769,11 @@ describe("FamilyOperationsView", () => {
         updateMode: "automatic",
       }),
     );
+    expect(await screen.findByText("Status: Scheduled")).toBeTruthy();
+    expect(screen.queryByText(/Not scheduled yet/)).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Review scheduled tasks" }),
+    ).toBeTruthy();
     expect(local.runSchoolWorkflow).not.toHaveBeenCalled();
   });
   it("shows export preparation and recovers visibly when the original cannot be verified", async () => {
