@@ -261,7 +261,7 @@ export const checks: Check[] = [
   {
     name: "product connect persists redacted trust audit records",
     pattern:
-      /ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT[\s\S]{0,500}appendTrustAuditRecord[\s\S]{0,300}readTrustAuditRecords[\s\S]*redactEndpoint\(audit\.endpoint\)[\s\S]{0,800}trustDecisions:\s*audit\.sync\.trustDecisions/,
+      /readTrustAuditRecords\([\s\S]{0,200}ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT[\s\S]*ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT = JSON\.stringify\([\s\S]{0,200}appendTrustAuditRecord\([\s\S]*redactEndpoint\(audit\.endpoint\)[\s\S]{0,800}trustDecisions:\s*audit\.sync\.trustDecisions/,
     source: "remote-capability-routes",
     message:
       "product connect persistence must record redacted capability-router trust-audit records.",

@@ -35,6 +35,8 @@ const originalEnabled = process.env.ELIZA_CAPABILITY_ROUTER_ENABLED;
 const originalUrls = process.env.ELIZA_CAPABILITY_ROUTER_URLS;
 const originalAllowedModules =
   process.env.ELIZA_CAPABILITY_ROUTER_ALLOWED_MODULES;
+const originalTrustPolicy = process.env.ELIZA_CAPABILITY_ROUTER_TRUST_POLICY;
+const originalTrustAudit = process.env.ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT;
 const MALFORMED_COMPONENTS = [
   "%",
   "%2",
@@ -61,6 +63,16 @@ afterEach(() => {
   } else {
     process.env.ELIZA_CAPABILITY_ROUTER_ALLOWED_MODULES =
       originalAllowedModules;
+  }
+  if (originalTrustPolicy === undefined) {
+    delete process.env.ELIZA_CAPABILITY_ROUTER_TRUST_POLICY;
+  } else {
+    process.env.ELIZA_CAPABILITY_ROUTER_TRUST_POLICY = originalTrustPolicy;
+  }
+  if (originalTrustAudit === undefined) {
+    delete process.env.ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT;
+  } else {
+    process.env.ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT = originalTrustAudit;
   }
 });
 
@@ -1178,6 +1190,159 @@ describe("handleRemoteCapabilityRoutes", () => {
         tools: ["remote-plugin"],
       }),
     );
+  });
+
+  describe("corrupted persisted settings", () => {
+    const CORRUPT_URLS =
+      '[{"id":"legacy","baseUrl":"https://legacy.example.test"},]';
+    const CORRUPT_ALLOWLIST = '{"legacy":["legacy-plugin"],}';
+    const CORRUPT_TRUST_POLICY =
+      '{"legacy":{"requireVerifiedProvenance":true},}';
+    const CORRUPT_AUDIT = '[{"recordedAt":"2026-09-13T00:00:00.000Z",]';
+
+    function makeConnectCtx(
+      overrides: Partial<Parameters<typeof handleRemoteCapabilityRoutes>[0]>,
+      body: Record<string, unknown> = {},
+    ) {
+      const connectEndpointProvider = vi.fn().mockResolvedValue({
+        providerId: "direct",
+        endpoint: {
+          id: "tools",
+          baseUrl: "https://capability.example.test",
+        },
+        sync: syncResult,
+      });
+      const made = makeCtx(
+        {
+          endpoint: {
+            id: "tools",
+            baseUrl: "https://capability.example.test",
+          },
+          ...body,
+        },
+        { connectEndpointProvider, ...overrides },
+      );
+      return { ...made, connectEndpointProvider };
+    }
+
+    function expectRejectedWithoutPersisting(
+      made: ReturnType<typeof makeConnectCtx>,
+      setting: string,
+    ): void {
+      expect(made.error).toHaveBeenCalledTimes(1);
+      const [, message, status] = made.error.mock.calls[0] ?? [];
+      expect(status).toBe(500);
+      expect(String(message)).toContain(setting);
+      expect(made.json).not.toHaveBeenCalled();
+      expect(made.ctx.persistConfigEnv).not.toHaveBeenCalled();
+      expect(made.ctx.saveConfig).not.toHaveBeenCalled();
+      expect(made.connectEndpointProvider).not.toHaveBeenCalled();
+    }
+
+    it("refuses to overwrite an unparseable persisted endpoint list", async () => {
+      process.env.ELIZA_CAPABILITY_ROUTER_URLS = CORRUPT_URLS;
+      const made = makeConnectCtx({});
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(made, "ELIZA_CAPABILITY_ROUTER_URLS");
+      expect(process.env.ELIZA_CAPABILITY_ROUTER_URLS).toBe(CORRUPT_URLS);
+    });
+
+    it("refuses to overwrite an unparseable endpoint list stored in config env", async () => {
+      const made = makeConnectCtx({
+        config: {
+          env: { vars: { ELIZA_CAPABILITY_ROUTER_URLS: CORRUPT_URLS } },
+        },
+      });
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(made, "ELIZA_CAPABILITY_ROUTER_URLS");
+      expect(made.ctx.config?.env?.vars?.ELIZA_CAPABILITY_ROUTER_URLS).toBe(
+        CORRUPT_URLS,
+      );
+    });
+
+    it("refuses to overwrite an unparseable module allowlist", async () => {
+      process.env.ELIZA_CAPABILITY_ROUTER_ALLOWED_MODULES = CORRUPT_ALLOWLIST;
+      const made = makeConnectCtx({}, { allowedModuleIds: ["remote-plugin"] });
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(
+        made,
+        "ELIZA_CAPABILITY_ROUTER_ALLOWED_MODULES",
+      );
+      expect(process.env.ELIZA_CAPABILITY_ROUTER_ALLOWED_MODULES).toBe(
+        CORRUPT_ALLOWLIST,
+      );
+    });
+
+    it("refuses to overwrite an unparseable trust policy map", async () => {
+      const made = makeConnectCtx({
+        config: {
+          env: {
+            vars: {
+              ELIZA_CAPABILITY_ROUTER_TRUST_POLICY: CORRUPT_TRUST_POLICY,
+            },
+          },
+        },
+      });
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(
+        made,
+        "ELIZA_CAPABILITY_ROUTER_TRUST_POLICY",
+      );
+      expect(
+        made.ctx.config?.env?.vars?.ELIZA_CAPABILITY_ROUTER_TRUST_POLICY,
+      ).toBe(CORRUPT_TRUST_POLICY);
+    });
+
+    it("refuses to overwrite an unparseable trust audit log", async () => {
+      const made = makeConnectCtx({
+        config: {
+          env: { vars: { ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT: CORRUPT_AUDIT } },
+        },
+      });
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(
+        made,
+        "ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT",
+      );
+      expect(
+        made.ctx.config?.env?.vars?.ELIZA_CAPABILITY_ROUTER_TRUST_AUDIT,
+      ).toBe(CORRUPT_AUDIT);
+    });
+
+    it("treats a persisted endpoint list that is not an array as corrupt", async () => {
+      process.env.ELIZA_CAPABILITY_ROUTER_URLS = '{"id":"legacy"}';
+      const made = makeConnectCtx({});
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expectRejectedWithoutPersisting(made, "ELIZA_CAPABILITY_ROUTER_URLS");
+      expect(process.env.ELIZA_CAPABILITY_ROUTER_URLS).toBe('{"id":"legacy"}');
+    });
+
+    it("still connects without persisting when the stored list is corrupt and persist is false", async () => {
+      process.env.ELIZA_CAPABILITY_ROUTER_URLS = CORRUPT_URLS;
+      const made = makeConnectCtx({}, { persist: false });
+
+      await expect(handleRemoteCapabilityRoutes(made.ctx)).resolves.toBe(true);
+
+      expect(made.error).not.toHaveBeenCalled();
+      expect(made.connectEndpointProvider).toHaveBeenCalledTimes(1);
+      expect(made.json.mock.calls[0]?.[1]).toMatchObject({
+        success: true,
+        persisted: false,
+      });
+      expect(process.env.ELIZA_CAPABILITY_ROUTER_URLS).toBe(CORRUPT_URLS);
+    });
   });
 
   it("rejects requests without endpoint or cloud configuration", async () => {
