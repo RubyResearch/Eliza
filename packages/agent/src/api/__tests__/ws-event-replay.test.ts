@@ -10,6 +10,7 @@ import {
   eventSequence,
   parseEventCursor,
   type ReplayableEvent,
+  selectReplay,
   selectReplayEvents,
 } from "../ws-event-replay.ts";
 
@@ -162,5 +163,56 @@ describe("selectReplayEvents — fail-closed on non-positive limit", () => {
     const buffer = makeBuffer(20);
     expect(selectReplayEvents(buffer, null, 1.9)).toEqual(buffer.slice(-1));
     expect(selectReplayEvents(buffer, 5, 1.9)).toEqual([buffer.at(-1)]);
+  });
+});
+
+describe("selectReplay — incomplete replay signaling", () => {
+  it("reports the range omitted by the replay limit", () => {
+    const selection = selectReplay(makeBuffer(125), 0, 120);
+
+    expect(selection.events.map((event) => event.bufferSeq)).toEqual(
+      Array.from({ length: 120 }, (_, index) => index + 6),
+    );
+    expect(selection.gap).toEqual({
+      type: "replay-gap",
+      version: 1,
+      requestedAfter: 0,
+      availableFrom: 1,
+      availableThrough: 125,
+      replayedFrom: 6,
+      replayedThrough: 125,
+      reasons: ["replay-limit"],
+    });
+  });
+
+  it("reports events evicted before the retained buffer", () => {
+    const selection = selectReplay(makeBuffer(5, 11), 5, 120);
+
+    expect(selection.events.map((event) => event.bufferSeq)).toEqual([
+      11, 12, 13, 14, 15,
+    ]);
+    expect(selection.gap?.reasons).toEqual(["retention-gap"]);
+    expect(selection.gap?.availableFrom).toBe(11);
+  });
+
+  it("reports a cursor ahead of the current server sequence", () => {
+    const selection = selectReplay(makeBuffer(5), 25, 120);
+
+    expect(selection.events).toEqual(makeBuffer(5));
+    expect(selection.gap).toMatchObject({
+      requestedAfter: 25,
+      availableFrom: 1,
+      availableThrough: 5,
+      replayedFrom: 1,
+      replayedThrough: 5,
+      reasons: ["cursor-ahead"],
+    });
+  });
+
+  it("does not claim a gap when every newer event is replayed", () => {
+    expect(selectReplay(makeBuffer(10), 7, 120)).toEqual({
+      events: makeBuffer(3, 8),
+      gap: null,
+    });
   });
 });

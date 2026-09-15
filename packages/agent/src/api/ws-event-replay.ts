@@ -11,6 +11,11 @@
  * @module
  */
 
+import type {
+  WebSocketReplayGap,
+  WebSocketReplayGapReason,
+} from "@elizaos/shared";
+
 /**
  * Maximum number of buffered envelopes replayed when the client provides no
  * (or an invalid) cursor. This is the historical, backward-compatible default:
@@ -28,6 +33,12 @@ export const DEFAULT_REPLAY_LIMIT = 120;
 export interface ReplayableEvent {
   eventId: string;
   bufferSeq?: number;
+}
+
+/** A bounded replay plus an explicit signal when that replay is incomplete. */
+export interface ReplaySelection<T extends ReplayableEvent> {
+  events: T[];
+  gap: WebSocketReplayGap | null;
 }
 
 /**
@@ -74,31 +85,105 @@ export function parseEventCursor(
 }
 
 /**
- * Select the envelopes to replay to a (re)connecting client.
+ * Select a bounded replay and describe any events that cannot be replayed.
  *
- * - With a valid `cursor`, returns only envelopes whose sequence is strictly
- *   greater than the cursor (the events the client is missing), preserving
- *   buffer order and capped to the `limit` most recent so a stale cursor can
- *   never replay an unbounded burst.
- * - With `cursor === null` (absent/invalid), returns `buffer.slice(-limit)` —
- *   the exact historical behavior, so clients that send no cursor are
- *   unaffected.
+ * A valid cursor receives only newer envelopes, preserving buffer order and
+ * the historical most-recent limit. `gap` is non-null when retention, that
+ * limit, an unsequenced envelope, or a cursor from a later sequence epoch
+ * prevents the replay from being complete. An absent cursor keeps the legacy
+ * tail behavior and never reports a gap because it makes no completeness
+ * claim.
  *
  * Does not mutate the input buffer and does not reorder events.
+ */
+export function selectReplay<T extends ReplayableEvent>(
+  buffer: readonly T[],
+  cursor: number | null,
+  limit: number = DEFAULT_REPLAY_LIMIT,
+): ReplaySelection<T> {
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
+  if (cursor === null) {
+    return {
+      events:
+        cap === 0
+          ? []
+          : cap >= buffer.length
+            ? buffer.slice()
+            : buffer.slice(-cap),
+      gap: null,
+    };
+  }
+
+  const sequenced = buffer.flatMap((event) => {
+    const seq = eventSequence(event);
+    return seq === null ? [] : [{ event, seq }];
+  });
+  const orderedSequences = [...new Set(sequenced.map(({ seq }) => seq))].sort(
+    (left, right) => left - right,
+  );
+  const availableFrom = orderedSequences[0] ?? null;
+  const availableThrough = orderedSequences.at(-1) ?? null;
+  const cursorAhead =
+    (availableThrough === null && cursor > 0) ||
+    (availableThrough !== null && cursor > availableThrough);
+  // A cursor from a prior server epoch cannot order the current epoch. Replay
+  // the available tail alongside the gap so clients can still recover useful
+  // recent state after performing their authoritative HTTP refresh.
+  const missing = cursorAhead
+    ? sequenced
+    : sequenced.filter(({ seq }) => seq > cursor);
+  const replayed = cap === 0 ? [] : missing.slice(-cap);
+  const reasons: WebSocketReplayGapReason[] = [];
+
+  if (sequenced.length !== buffer.length) reasons.push("unsequenced-event");
+
+  if (cursorAhead) {
+    reasons.push("cursor-ahead");
+  } else {
+    const afterCursor = orderedSequences.filter((seq) => seq > cursor);
+    let expected = cursor + 1;
+    for (const seq of afterCursor) {
+      if (seq > expected) {
+        reasons.push("retention-gap");
+        break;
+      }
+      expected = Math.max(expected, seq + 1);
+    }
+  }
+
+  if (replayed.length < missing.length) reasons.push("replay-limit");
+
+  const events = replayed.map(({ event }) => event);
+  const replayedSequences = replayed.map(({ seq }) => seq);
+  return {
+    events,
+    gap:
+      reasons.length === 0
+        ? null
+        : {
+            type: "replay-gap",
+            version: 1,
+            requestedAfter: cursor,
+            availableFrom,
+            availableThrough,
+            replayedFrom: replayedSequences[0] ?? null,
+            replayedThrough: replayedSequences.at(-1) ?? null,
+            reasons,
+          },
+  };
+}
+
+/**
+ * Compatibility wrapper for callers that only consume the bounded event list.
+ * New transport code should use `selectReplay` so it cannot hide a gap.
  */
 export function selectReplayEvents<T extends ReplayableEvent>(
   buffer: readonly T[],
   cursor: number | null,
   limit: number = DEFAULT_REPLAY_LIMIT,
 ): T[] {
-  const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
-  if (cap === 0) return [];
-  if (cursor === null) {
-    return cap >= buffer.length ? buffer.slice() : buffer.slice(-cap);
-  }
-  const missing = buffer.filter((event) => {
-    const seq = eventSequence(event);
-    return seq !== null && seq > cursor;
-  });
-  return missing.length > cap ? missing.slice(-cap) : missing;
+  const selection = selectReplay(buffer, cursor, limit);
+  return selection.gap?.reasons.includes("cursor-ahead")
+    ? []
+    : selection.events;
 }

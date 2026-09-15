@@ -68,6 +68,35 @@ Clients should reconnect with bounded backoff and resubscribe their local state.
 Replayable envelopes include ordering metadata so a reconnecting client can
 request or apply missed events without duplicating earlier ones.
 
+Pass the highest applied `bufferSeq` as `lastEventId` (a bare integer or the
+`evt-<n>` form) when reconnecting. The server keeps replay bounded. If retained
+events cannot satisfy that cursor completely, it sends this control frame
+before the partial event tail:
+
+```typescript
+type WebSocketReplayGap = {
+  type: "replay-gap";
+  version: 1;
+  requestedAfter: number;
+  availableFrom: number | null;
+  availableThrough: number | null;
+  replayedFrom: number | null;
+  replayedThrough: number | null;
+  reasons: Array<
+    | "cursor-ahead"
+    | "retention-gap"
+    | "replay-limit"
+    | "unsequenced-event"
+  >;
+};
+```
+
+Treat `replay-gap` as an explicit resync requirement. Fetch authoritative HTTP
+state before treating the retained tail as complete. Unknown clients keep the
+legacy bounded tail because the control frame is additive and ordinary event
+envelopes are unchanged. A connection without a cursor still receives the
+historical tail and makes no completeness claim.
+
 Use the shared frontend API client when building inside this repository; it
 already owns connection state, parsing, replay, and listener cleanup. Custom
 clients should:

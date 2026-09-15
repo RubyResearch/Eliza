@@ -48,6 +48,28 @@ export interface StreamEventEnvelope {
   payload: unknown;
 }
 
+/** Why a reconnect cursor could not be satisfied as one lossless replay. */
+export type WebSocketReplayGapReason =
+  | "cursor-ahead"
+  | "retention-gap"
+  | "replay-limit"
+  | "unsequenced-event";
+
+/**
+ * Control frame sent before a partial WebSocket replay. Consumers must refresh
+ * authoritative HTTP state because the retained event tail is not complete.
+ */
+export interface WebSocketReplayGap {
+  type: "replay-gap";
+  version: 1;
+  requestedAfter: number;
+  availableFrom: number | null;
+  availableThrough: number | null;
+  replayedFrom: number | null;
+  replayedThrough: number | null;
+  reasons: WebSocketReplayGapReason[];
+}
+
 // ── Trigger API types ────────────────────────────────────────────────────────
 
 export interface TriggerTaskMetadata {
