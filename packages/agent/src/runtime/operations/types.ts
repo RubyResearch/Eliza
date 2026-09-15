@@ -138,6 +138,8 @@ export interface OperationPhase {
 
 export interface RuntimeOperation {
   id: string;
+  /** Local executor identity; absent on records written before ownership tracking. */
+  processOwner?: { hostname: string; pid: number };
   kind: OperationKind;
   intent: OperationIntent;
   tier: ReloadTier;

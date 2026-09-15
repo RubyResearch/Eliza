@@ -11,6 +11,7 @@ import {
   ElizaError,
   InMemoryDatabaseAdapter,
   type Memory,
+  RoomHandlerQueue,
   stringToUuid,
   type UUID,
 } from "@elizaos/core";
@@ -50,6 +51,7 @@ function makeRuntime(store: Store) {
   const runtime = {
     agentId: AGENT_ID,
     character: { name: "Eliza" },
+    roomHandlerQueue: new RoomHandlerQueue(),
     ensureConnection: vi.fn(async () => undefined),
     getMemories,
     countMemories,
@@ -81,6 +83,7 @@ async function makeAdapterRuntime() {
   const runtime = {
     agentId: AGENT_ID,
     character: { name: "Eliza" },
+    roomHandlerQueue: new RoomHandlerQueue(),
     ensureConnection: vi.fn(async () => undefined),
     getMemories: vi.fn(
       async (params: Parameters<InMemoryDatabaseAdapter["getMemories"]>[0]) =>
@@ -457,6 +460,7 @@ describe("GET /api/memory/search corpus cache", () => {
     const runtime = {
       agentId: AGENT_ID,
       character: { name: "A" },
+      roomHandlerQueue: new RoomHandlerQueue(),
       ensureConnection: vi.fn(async () => undefined),
       getMemories,
       countMemories,
@@ -565,6 +569,7 @@ describe("GET /api/memory/search corpus cache", () => {
     const runtime = {
       agentId: AGENT_ID,
       character: { name: "A" },
+      roomHandlerQueue: new RoomHandlerQueue(),
       ensureConnection: vi.fn(async () => undefined),
       getMemories,
       // No countMemories means every result is intentionally uncached.

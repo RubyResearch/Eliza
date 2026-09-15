@@ -523,6 +523,9 @@ export class ProviderStateComposer {
 			currentProviderResults[freshResult.providerName] = {
 				...freshResult,
 				text: redactedText,
+				discoveryText: freshResult.discoveryText
+					? this.runtime.redactSecrets(freshResult.discoveryText)
+					: freshResult.discoveryText,
 				values:
 					freshResult.values && typeof freshResult.values === "object"
 						? Object.fromEntries(
@@ -587,166 +590,182 @@ export class ProviderStateComposer {
 				providerAttribution.providerAttributions;
 			activeTrajectoryContext.providerAttributionState = attributionState;
 		}
-		if (trajectoryStepId && trajLogger) {
-			const userText =
-				typeof message.content.text === "string" ? message.content.text : "";
-			const trajCtx = activeTrajectoryContext;
-			const providerTraceId = this.runtime.getActiveTrace(
-				this.runtime.getCurrentRunId(),
-			)?.id;
-			for (const [providerIndex, r] of providerData.entries()) {
-				try {
-					const overlapsWith = providerOverlaps[providerIndex];
-					if (!overlapsWith) {
-						throw new Error(
-							`Missing provider overlap row at index ${providerIndex}`,
+		const recordProviderAccesses = (includeText: boolean) => {
+			if (trajectoryStepId && trajLogger) {
+				const userText =
+					typeof message.content.text === "string" ? message.content.text : "";
+				const trajCtx = activeTrajectoryContext;
+				const providerTraceId = this.runtime.getActiveTrace(
+					this.runtime.getCurrentRunId(),
+				)?.id;
+				for (const [providerIndex, r] of providerData.entries()) {
+					try {
+						const overlapsWith = providerOverlaps[providerIndex];
+						if (!overlapsWith) {
+							throw new Error(
+								`Missing provider overlap row at index ${providerIndex}`,
+							);
+						}
+						const redactedText =
+							currentProviderResults[r.providerName]?.text ?? "";
+						const attribution = providerAttributionByName.get(r.providerName);
+						trajLogger.logProviderAccess({
+							stepId: trajectoryStepId,
+							providerName: r.providerName,
+							startedAt: r.providerStartedAt,
+							endedAt: r.providerEndedAt,
+							durationMs: r.providerDurationMs,
+							overlapsWith,
+							data: {
+								// Retain only audience-authorized, secret-redacted text; never raw values/data.
+								...(includeText && !r.providerError
+									? { text: redactedText }
+									: {}),
+								textLength: redactedText.length,
+								outcome: r.providerOutcome,
+								coalesced: r.providerCoalesced,
+								cacheHit: false,
+								...(r.providerError ? { errorCode: r.providerError.code } : {}),
+							},
+							sha256: attribution?.sha256,
+							tokenCount: attribution?.tokenCount,
+							position: attribution?.position,
+							// Spans index providersText, which is not persisted on the
+							// access row — omit them so readers do not slice a different
+							// string with compose-local offsets.
+							purpose: "compose_state",
+							query: { message: toWellFormedUnicode(userText) },
+							runId: trajCtx?.runId,
+							roomId: trajCtx?.roomId,
+							messageId: trajCtx?.messageId,
+							executionTraceId: providerTraceId,
+						});
+					} catch (error) {
+						// error-policy:J7 trajectory diagnostics must not replace the
+						// provider result or kill the message loop.
+						this.runtime.reportError(
+							"AgentRuntime.composeState.providerTrajectory",
+							error,
+							{
+								provider: r.providerName,
+								messageId: message.id,
+							},
 						);
 					}
-					const redactedText =
-						currentProviderResults[r.providerName]?.text ?? "";
-					const attribution = providerAttributionByName.get(r.providerName);
-					trajLogger.logProviderAccess({
-						stepId: trajectoryStepId,
-						providerName: r.providerName,
-						startedAt: r.providerStartedAt,
-						endedAt: r.providerEndedAt,
-						durationMs: r.providerDurationMs,
-						overlapsWith,
-						data: {
-							textLength: redactedText.length,
-							outcome: r.providerOutcome,
-							coalesced: r.providerCoalesced,
-							cacheHit: false,
-							...(r.providerError ? { errorCode: r.providerError.code } : {}),
-						},
-						sha256: attribution?.sha256,
-						tokenCount: attribution?.tokenCount,
-						position: attribution?.position,
-						// Spans index providersText, which is not persisted on the
-						// access row — omit them so readers do not slice a different
-						// string with compose-local offsets.
-						purpose: "compose_state",
-						query: { message: toWellFormedUnicode(userText) },
-						runId: trajCtx?.runId,
-						roomId: trajCtx?.roomId,
-						messageId: trajCtx?.messageId,
-						executionTraceId: providerTraceId,
-					});
-				} catch (error) {
-					// error-policy:J7 trajectory diagnostics must not replace the
-					// provider result or kill the message loop.
-					this.runtime.reportError(
-						"AgentRuntime.composeState.providerTrajectory",
-						error,
-						{
-							provider: r.providerName,
-							messageId: message.id,
-						},
-					);
+				}
+				for (const provider of reusedProviders) {
+					try {
+						const cached = currentProviderResults[provider.name];
+						const attribution = providerAttributionByName.get(provider.name);
+						trajLogger.logProviderAccess({
+							stepId: trajectoryStepId,
+							providerName: provider.name,
+							startedAt: composeStartedAt,
+							endedAt: composeStartedAt,
+							durationMs: 0,
+							overlapsWith: [],
+							data: {
+								...(includeText && cached ? { text: cached.text ?? "" } : {}),
+								textLength:
+									typeof cached?.text === "string" ? cached.text.length : 0,
+								outcome: cached?.providerOutcome ?? "success",
+								coalesced: false,
+								cacheHit: true,
+								...(typeof cached?.providerDurationMs === "number"
+									? { sourceDurationMs: cached.providerDurationMs }
+									: {}),
+							},
+							sha256: attribution?.sha256,
+							tokenCount: attribution?.tokenCount,
+							position: attribution?.position,
+							purpose: "compose_state",
+							query: { message: toWellFormedUnicode(userText) },
+							runId: trajCtx?.runId,
+							roomId: trajCtx?.roomId,
+							messageId: trajCtx?.messageId,
+							executionTraceId: providerTraceId,
+						});
+					} catch (error) {
+						// error-policy:J7 trajectory diagnostics must not replace the
+						// cached provider result or kill the message loop.
+						this.runtime.reportError(
+							"AgentRuntime.composeState.cachedProviderTrajectory",
+							error,
+							{
+								provider: provider.name,
+								messageId: message.id,
+							},
+						);
+					}
 				}
 			}
-			for (const provider of reusedProviders) {
-				try {
-					const cached = currentProviderResults[provider.name];
-					const attribution = providerAttributionByName.get(provider.name);
-					trajLogger.logProviderAccess({
-						stepId: trajectoryStepId,
-						providerName: provider.name,
-						startedAt: composeStartedAt,
-						endedAt: composeStartedAt,
-						durationMs: 0,
-						overlapsWith: [],
-						data: {
-							textLength:
-								typeof cached?.text === "string" ? cached.text.length : 0,
-							outcome: cached?.providerOutcome ?? "success",
-							coalesced: false,
-							cacheHit: true,
-							...(typeof cached?.providerDurationMs === "number"
-								? { sourceDurationMs: cached.providerDurationMs }
-								: {}),
-						},
-						sha256: attribution?.sha256,
-						tokenCount: attribution?.tokenCount,
-						position: attribution?.position,
-						purpose: "compose_state",
-						query: { message: toWellFormedUnicode(userText) },
-						runId: trajCtx?.runId,
-						roomId: trajCtx?.roomId,
-						messageId: trajCtx?.messageId,
-						executionTraceId: providerTraceId,
-					});
-				} catch (error) {
-					// error-policy:J7 trajectory diagnostics must not replace the
-					// cached provider result or kill the message loop.
-					this.runtime.reportError(
-						"AgentRuntime.composeState.cachedProviderTrajectory",
-						error,
-						{
-							provider: provider.name,
-							messageId: message.id,
-						},
-					);
+		};
+		let includeProviderText = false;
+		try {
+			// A designed turn abort (threadOps abort op, user "stop", client
+			// disconnect) owns the whole composition, including the post-provider
+			// assembly window. Surface that owner cancellation even when every provider
+			// already settled; provider-originated failures were reported above and are
+			// not misclassified as aborts merely because their Error name resembles one.
+			throwIfProviderCompositionAborted(
+				providerSignal,
+				this.lifecycle.isStopping(),
+			);
+			if (failedProviderData.length === 1) {
+				const failedProvider = failedProviderData[0];
+				if (failedProvider?.providerError) {
+					throw failedProvider.providerError;
 				}
 			}
-		}
-		// A designed turn abort (threadOps abort op, user "stop", client
-		// disconnect) owns the whole composition, including the post-provider
-		// assembly window. Surface that owner cancellation even when every provider
-		// already settled; provider-originated failures were reported above and are
-		// not misclassified as aborts merely because their Error name resembles one.
-		throwIfProviderCompositionAborted(
-			providerSignal,
-			this.lifecycle.isStopping(),
-		);
-		if (failedProviderData.length === 1) {
-			const failedProvider = failedProviderData[0];
-			if (failedProvider?.providerError) {
-				throw failedProvider.providerError;
-			}
-		}
-		if (failedProviderData.length > 1) {
-			// error-policy:J2 preserve every provider failure behind one
-			// state-composition error so callers receive the complete cause chain.
-			throw new ElizaError(
-				`State composition failed in ${failedProviderData.length} providers`,
-				{
-					code: "STATE_COMPOSITION_PROVIDER_FAILURES",
-					cause: new AggregateError(
-						failedProviderData.flatMap((record) =>
-							record.providerError ? [record.providerError] : [],
+			if (failedProviderData.length > 1) {
+				// error-policy:J2 preserve every provider failure behind one
+				// state-composition error so callers receive the complete cause chain.
+				throw new ElizaError(
+					`State composition failed in ${failedProviderData.length} providers`,
+					{
+						code: "STATE_COMPOSITION_PROVIDER_FAILURES",
+						cause: new AggregateError(
+							failedProviderData.flatMap((record) =>
+								record.providerError ? [record.providerError] : [],
+							),
 						),
-					),
-					severity: "ephemeral",
-					context: {
-						providers: failedProviderData.map((record) => record.providerName),
-						messageId: message.id,
-						roomId: message.roomId,
+						severity: "ephemeral",
+						context: {
+							providers: failedProviderData.map(
+								(record) => record.providerName,
+							),
+							messageId: message.id,
+							roomId: message.roomId,
+						},
 					},
-				},
-			);
-		}
-		if (containsSensitiveProvider) {
-			const disclosure = await revalidateOwnerExclusiveDisclosure(
-				this.runtime,
-				message,
-			);
-			if (!disclosure.allowed) {
-				throw new ElizaError(PRIVACY_DENIED_TEXT, {
-					code: "OWNER_PRIVATE_AUDIENCE_CHANGED",
-					severity: "ephemeral",
-					context: {
-						messageId: message.id,
-						roomId: message.roomId,
-						reason: disclosure.reason,
-					},
-				});
+				);
 			}
+			if (containsSensitiveProvider) {
+				const disclosure = await revalidateOwnerExclusiveDisclosure(
+					this.runtime,
+					message,
+				);
+				if (!disclosure.allowed) {
+					throw new ElizaError(PRIVACY_DENIED_TEXT, {
+						code: "OWNER_PRIVATE_AUDIENCE_CHANGED",
+						severity: "ephemeral",
+						context: {
+							messageId: message.id,
+							roomId: message.roomId,
+							reason: disclosure.reason,
+						},
+					});
+				}
+			}
+			throwIfProviderCompositionAborted(
+				providerSignal,
+				this.lifecycle.isStopping(),
+			);
+			includeProviderText = true;
+		} finally {
+			// Preserve failure diagnostics, but retain text only after final audience and cancellation checks.
+			recordProviderAccesses(includeProviderText);
 		}
-		throwIfProviderCompositionAborted(
-			providerSignal,
-			this.lifecycle.isStopping(),
-		);
 		const conversationSeed = buildDeterministicSeed(
 			this.runtime.agentId,
 			message.roomId,

@@ -128,6 +128,25 @@
         "required": false,
         "sensitive": true
       },
+      "OPENROUTER_API_KEY": {
+        "type": "string",
+        "description": "Server-side OpenRouter credential used only with an explicit OPENROUTER_FALLBACK_MODEL after Cerebras rate limiting.",
+        "required": false,
+        "sensitive": true
+      },
+      "OPENROUTER_FALLBACK_MODEL": {
+        "type": "string",
+        "description": "Explicit equivalent OpenRouter text model for Cerebras HTTP 429 recovery, for example qwen/qwen3.8-27b.",
+        "required": false,
+        "sensitive": false
+      },
+      "OPENROUTER_BASE_URL": {
+        "type": "string",
+        "description": "OpenRouter-compatible endpoint for the explicit text fallback.",
+        "required": false,
+        "default": "https://openrouter.ai/api/v1",
+        "sensitive": false
+      },
       "EVOLINK_BASE_URL": {
         "type": "string",
         "description": "Base URL for EvoLink's OpenAI-compatible API.",

@@ -51,3 +51,14 @@ views or event state to this package.
 - `clear-notes` validates `expectedRevision` inside the store write barrier, so
   a note committed between confirmation and commit aborts the clear instead of
   being wiped. The dispatch-time snapshot check is only a fast path.
+
+Saved-note prompt content is encoded as complete JSON strings with canonical label/newline/body boundaries; never flatten it into a display dash that can corrupt a partial update.
+
+Direct-text planner/completion context can use the provider-owned exact title/count index. Complete note bodies remain in the authorized provider result and are retrieved through the shared context-restoration protocol or NOTES before body recall or replacement. Never turn labels into inferred body text; keep full JSON-string line boundaries on retrieval.
+
+Literal chat updates may supply textEdit with a field, exact oldText and newText.
+Validate this alternative at the existing boundary and match under the store
+write barrier. Require a unique current match and preserve every other character;
+reject ambiguous, absent, conflicting or normalization-dependent edits without a
+write. Full replacement and legacy caller contracts remain supported. This is
+structured tool input, never a natural-language shortcut or a second write path.

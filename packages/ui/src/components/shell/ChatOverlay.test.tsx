@@ -2493,20 +2493,27 @@ describe("ChatOverlay", () => {
       expect(orb.getAttribute("style")).toContain("width: 20px");
       expect(orb.getAttribute("style")).toContain("height: 20px");
       expect(activity.querySelector(".rounded-full.size-2")).toBeNull();
-      expect(
-        screen.getByTestId("chat-composer-realtime-copy").textContent,
-      ).toBe("live words from Ink");
       const copy = screen.getByTestId("chat-composer-realtime-copy");
-      expect(copy.className).not.toContain("shimmer");
       const expectedPhaseLabel = {
         listening: "Listening…",
         transcribing: "Hearing you…",
         thinking: "Thinking…",
-        speaking: "Speaking…",
+        speaking: "Speaking · mic paused",
       }[status];
-      expect(activity.getAttribute("aria-label")).toBe(
-        `${expectedPhaseLabel}: live words from Ink`,
+      const listening = status === "listening" || status === "transcribing";
+      expect(copy.textContent).toBe(
+        listening ? "live words from Ink" : expectedPhaseLabel,
       );
+      expect(activity.getAttribute("aria-label")).toBe(
+        listening
+          ? `${expectedPhaseLabel}: live words from Ink`
+          : expectedPhaseLabel,
+      );
+      expect(
+        screen
+          .getByTestId("chat-composer-voice-mute")
+          .getAttribute("aria-disabled"),
+      ).toBe(String(status === "speaking"));
       expect(screen.queryByTestId("chat-overlay-voice-status")).toBeNull();
       expect(screen.queryByTestId("chat-composer-textarea")).toBeNull();
       expect(screen.getByTestId("chat-sheet").getAttribute("data-detent")).toBe(
@@ -2591,8 +2598,8 @@ describe("ChatOverlay", () => {
         })}
       />,
     );
-    expect(copy.textContent).toBe(nextTranscript);
-    expect(observedScrollTop).toBe(96);
+    expect(copy.textContent).toBe("Thinking…");
+    expect(observedScrollTop).toBe(0);
   });
 
   it("keeps a retryable Cartesia error out of the text input surface", () => {
@@ -5850,6 +5857,49 @@ describe("ChatOverlay — routed OS-intent composer prefill (#9148, #16441)", ()
       (screen.getByLabelText("message") as HTMLTextAreaElement).value,
     ).toBe("");
     expect(toggleHandsFree).not.toHaveBeenCalled();
+  });
+
+  it("uses the shared reply-only callback for a stored effect failure without resending", async () => {
+    let finish!: () => void;
+    const handleChatRetry = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    __setAppValueForTests({ handleChatRetry } as never);
+    const controller = makeController({
+      messages: [
+        { id: "u1", role: "user", content: "Create a note", createdAt: 1 },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "The reply failed.",
+          createdAt: 2,
+          failureKind: "provider_issue",
+          replyRecoveryAvailable: true,
+          terminalFailure: {
+            kind: "provider_issue",
+            transient: false,
+            message: "Reply failed.",
+          },
+        },
+      ],
+    });
+    render(<ChatOverlay controller={controller} />);
+    fireEvent.focus(screen.getByLabelText("message"));
+    const retry = screen.getByRole("button", { name: "Regenerate reply" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(handleChatRetry).toHaveBeenCalledTimes(1);
+    expect(handleChatRetry).toHaveBeenCalledWith("a1");
+    expect(controller.send).not.toHaveBeenCalled();
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+    expect(retry.textContent).toContain("Regenerating reply…");
+    await act(async () => {
+      finish();
+    });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("shows Retry on planner exhaustion and re-sends the preceding user turn", () => {

@@ -141,6 +141,10 @@ export interface Experience {
 
 	// Provenance for review and evidence replay
 	sourceMessageIds?: UUID[]; // Conversation messages used as extraction evidence
+	extractionStatus?: "source_invalidated";
+	extractionReconciliationId?: string;
+	sourceMessageRevisions?: Record<string, string>; // Exact revisions used by an incremental extraction
+	extractionEvidenceId?: string; // Stable operation batch identity retained across retries
 	sourceRoomId?: UUID; // Room where the evidence was observed
 	sourceTriggerMessageId?: UUID; // Agent message that triggered extraction
 	sourceTrajectoryId?: string; // Full trajectory, when available
@@ -150,6 +154,8 @@ export interface Experience {
 }
 
 export interface ExperienceQuery {
+	/** Audit/reconciliation reads only; ordinary retrieval excludes retired evidence. */
+	includeInactive?: boolean;
 	query?: string; // Text query for semantic search
 	type?: ExperienceType | ExperienceType[];
 	outcome?: OutcomeType | OutcomeType[];

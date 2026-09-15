@@ -10,6 +10,35 @@ import {
 
 describe("side-effect-claims", () => {
 	describe("replyClaimsCompletedSideEffect", () => {
+		it.each([
+			'The original assistant sentence was exactly: "I set it: for any future note, I would show its title and body before saving." That rule was revoked.',
+			'The original line was: "I saved a note." This is quoted history, not a new action.',
+			"The earlier reply was: “I scheduled a reminder.”",
+			"The assistant's original sentence, quoted exactly, was: “I set it: for any future note, I would show its title and body before saving.”",
+			"The assistant's original sentence was “I set it: for any future note, I would show its title and body before saving.”",
+			'The phrase "I saved a note" is a completion claim.',
+			'For example: "I scheduled a reminder."',
+		])("does not turn explicit quoted wording into an effect: %s", (reply) => {
+			expect(replyClaimsCompletedSideEffect(reply)).toBe(false);
+		});
+
+		it.each([
+			'"I saved your note."',
+			'The tool returned: "I saved your note."',
+			'The result says: "Your reminders are set."',
+			'I saved a note. The original line was: "I scheduled a reminder."',
+			'The original line was: "I scheduled a reminder." I saved your note.',
+			'The original line was: "I saved a note." Your reminders are set.',
+			'The original line was: "I saved a note." Added todo: buy groceries.',
+			'The original line was: "I saved a note." 已经把提醒设置好了。',
+			'I saved the phrase: "a note".',
+		])(
+			"still detects current or unqualified claims around quotes: %s",
+			(reply) => {
+				expect(replyClaimsCompletedSideEffect(reply)).toBe(true);
+			},
+		);
+
 		it("detects English first-person completed side effect claims", () => {
 			expect(
 				replyClaimsCompletedSideEffect("I've set a reminder for your meeting."),

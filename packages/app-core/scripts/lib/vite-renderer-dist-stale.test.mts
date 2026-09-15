@@ -49,6 +49,39 @@ function makeRenderer(playwrightTestAuth?: boolean) {
 }
 
 describe("Playwright test-auth renderer reuse", () => {
+  it("rejects a source edit during compilation even when the output is newer", () => {
+    const { appDir, distDir } = makeRenderer(false);
+    const src = path.join(appDir, "src");
+    fs.mkdirSync(src);
+    const input = path.join(src, "main.ts");
+    fs.writeFileSync(input, "export const revision = 2;");
+    const start = Date.now() - 10_000;
+    fs.utimesSync(input, (start + 1000) / 1000, (start + 1000) / 1000);
+    fs.utimesSync(
+      path.join(distDir, "index.html"),
+      (start + 2000) / 1000,
+      (start + 2000) / 1000,
+    );
+    writeRendererBuildManifest(distDir, {
+      startedAt: new Date(start).toISOString(),
+      builtAt: new Date(start + 2000).toISOString(),
+      playwrightTestAuth: false,
+    });
+    expect(viteRendererBuildNeeded(appDir, tmp)).toBe(true);
+    // An unchanged input predating the compile remains reusable.
+    fs.utimesSync(input, (start - 1000) / 1000, (start - 1000) / 1000);
+    expect(viteRendererBuildNeeded(appDir, tmp)).toBe(false);
+  });
+
+  it("rebuilds a legacy completion-only stamp", () => {
+    const { appDir, distDir } = makeRenderer(false);
+    const stamp = path.join(distDir, RENDERER_BUILD_MANIFEST_FILENAME);
+    const manifest = JSON.parse(fs.readFileSync(stamp, "utf8"));
+    delete manifest.startedAt;
+    fs.writeFileSync(stamp, JSON.stringify(manifest));
+    expect(viteRendererBuildNeeded(appDir, tmp)).toBe(true);
+  });
+
   it.each([true, false])(
     "reuses a fresh renderer when test auth is %s in both build and invocation",
     (playwrightTestAuth) => {
@@ -136,6 +169,12 @@ describe("Playwright test-auth renderer reuse", () => {
         path.join(appDir, ".env.production"),
         "VITE_PLAYWRIGHT_TEST_AUTH=true\n",
       );
+      const beforeBuild = (Date.now() - 1000) / 1000;
+      fs.utimesSync(
+        path.join(appDir, ".env.production"),
+        beforeBuild,
+        beforeBuild,
+      );
       makeRenderer(true);
 
       const expectedPlaywrightTestAuth = resolvePlaywrightTestAuth(appDir);
@@ -179,10 +218,10 @@ describe("Playwright test-auth renderer reuse", () => {
     }
   });
 
-  it("lets generic desktop callers reuse renderers without a manifest", () => {
+  it("rebuilds unstamped desktop renderers rather than guessing their input boundary", () => {
     const { appDir, distDir } = makeRenderer();
     fs.unlinkSync(path.join(distDir, RENDERER_BUILD_MANIFEST_FILENAME));
 
-    expect(viteRendererBuildNeeded(appDir, tmp)).toBe(false);
+    expect(viteRendererBuildNeeded(appDir, tmp)).toBe(true);
   });
 });

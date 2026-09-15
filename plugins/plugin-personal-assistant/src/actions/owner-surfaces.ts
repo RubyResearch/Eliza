@@ -23,6 +23,7 @@ import { isOwnerReminderNonCommandContext } from "../lifeops/reminders/direct-ro
 import { runBookTravelHandler } from "./book-travel.js";
 import { createOwnerHealthAction, runHealthHandler } from "./health.js";
 import { runSchedulingNegotiationHandler } from "./lib/scheduling-handler.js";
+import { TASK_CREATE_PLAN_PARAMETER } from "./lib/task-create-plan-parameter.js";
 import {
   OWNER_OPERATION_CONTEXTS,
   OWNER_OPERATION_ROLE_GATE,
@@ -238,6 +239,9 @@ function makeOwnerLifeAction(args: {
         required: false,
         schema: { type: "object" as const, additionalProperties: true },
       },
+      ...(args.defaultKind === "definition"
+        ? [TASK_CREATE_PLAN_PARAMETER]
+        : []),
     ],
     handler: async (runtime, message, state, options, callback) => {
       const params = readParameters(options);

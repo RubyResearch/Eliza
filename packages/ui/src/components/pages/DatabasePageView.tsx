@@ -12,6 +12,7 @@ import {
   FramedPageHeader,
   FramedPageNavigation,
 } from "../../layouts/framed-page";
+import { DATABASE_VECTOR_VIEW } from "../../navigation/builtin-route-descriptors";
 import { useAppSelector } from "../../state";
 import { SegmentedControl } from "../ui/segmented-control";
 import { DynamicViewLoader } from "../views/DynamicViewLoader";
@@ -23,8 +24,6 @@ import { MediaGalleryView } from "./MediaGalleryView";
 // THREE runtime. It lives in its own plugin package and is loaded dynamically
 // so it (and three) only ship when the user actually opens the vectors tab,
 // never with the always-loaded Database page.
-const VECTOR_BROWSER_BUNDLE_URL = "/api/views/vector-browser/bundle.js";
-const VECTOR_BROWSER_COMPONENT_EXPORT = "VectorBrowserView";
 
 export function DatabasePageView({
   contentHeader,
@@ -76,9 +75,7 @@ export function DatabasePageView({
   } else if (databaseSubTab === "vectors") {
     content = (
       <DynamicViewLoader
-        bundleUrl={VECTOR_BROWSER_BUNDLE_URL}
-        componentExport={VECTOR_BROWSER_COMPONENT_EXPORT}
-        viewId="vector-browser"
+        {...DATABASE_VECTOR_VIEW}
         viewProps={{ leftNav, contentHeader }}
       />
     );

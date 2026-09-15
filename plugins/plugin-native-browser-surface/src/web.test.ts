@@ -63,6 +63,12 @@ describe("BrowserSurfaceWeb", () => {
     await expect(web.reloadSurface({ ...identity, id: "a" })).rejects.toThrow(
       /native-only/i,
     );
+    await expect(web.goBack({ ...identity, id: "a" })).rejects.toThrow(
+      /native-only/i,
+    );
+    await expect(web.readPage({ ...identity, id: "a" })).rejects.toThrow(
+      /native-only/i,
+    );
     await expect(web.presentSurface({ ...identity, id: "a" })).rejects.toThrow(
       /native-only/i,
     );

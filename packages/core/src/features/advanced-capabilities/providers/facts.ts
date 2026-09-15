@@ -10,22 +10,11 @@
  * header; room-pool facts about other participants render under a neutral
  * room header, so relay/webhook turns keep room recall without the room's
  * facts being misattributed to the bridge sender.
- * Lexical BM25 stays the primary lane, but it is no longer the only one: a
- * bounded semantic lane (local gte-small embedding of the query, one embed
- * call plus the same bounded fact-table searches the old total-miss widen
- * path used) is ALWAYS unioned in, so facts that are meaning-related but
- * lexically disjoint from the query ("Connor is a Zcash core dev" vs a
- * "convent/season/grove" turn) still surface. In-turn evidence text — the
- * current message's attachment/link-preview text and any action results
- * already on the composed state — contributes query tokens too, so content
- * the agent just read participates in retrieval within the same turn.
- * A keyword-miss on durable facts still falls back to the highest-prior
- * candidates so direct recall works.
- * Sender-owned `preference` facts get a separate bounded always-on lane
- * because standing preferences should be visible on every turn even with zero
- * lexical overlap ("brief replies" never BM25-matches "what's next?"); the
- * lane gate is structural (extractor-assigned category + ownership + prior),
- * and the responding model decides which surfaced preferences apply.
+ * Ranking only changes order; every readable active fact is retained, with no
+ * embedding call or top-k cutoff. The optional Stage-1 discovery view keeps
+ * complete sender preferences, identity and categorized corrections inline;
+ * other facts remain available as a complete freshly authorized context read.
+ * Other consumers and raw provider recordings retain the complete text.
  */
 import { ElizaError } from "../../../errors.ts";
 import { requireProviderSpec } from "../../../generated/spec-helpers.ts";
@@ -39,6 +28,7 @@ import type {
 	ProviderResult,
 	State,
 } from "../../../types/index.ts";
+import { isActiveMemoryEvidence } from "../../../utils/extraction-evidence.ts";
 import {
 	buildFactQueryText,
 	scoreFactKeywordRelevance,
@@ -463,7 +453,9 @@ const factsProvider: Provider = {
 
 			const minimizePrivateFacts = shouldMinimizePrivateFactsForTurn(message);
 			const dedupedPool = dedupeById([...roomFacts, ...entityFacts]).filter(
-				(memory) => !minimizePrivateFacts || !isMarkedPrivateFact(memory),
+				(memory) =>
+					isActiveMemoryEvidence(memory) &&
+					(!minimizePrivateFacts || !isMarkedPrivateFact(memory)),
 			);
 			const { durable: durableCandidates, current: currentCandidates } =
 				partitionByKind(dedupedPool);
@@ -574,6 +566,25 @@ const factsProvider: Provider = {
 			}
 
 			const text = sections.join("\n\n");
+			// Keep standing preferences, identity and explicit corrections inline.
+			// Other complete facts are read on demand by the existing response
+			// handler, before a personal claim; no stored record is removed.
+			const standingFacts = allFacts.filter(
+				(memory) =>
+					isAboutSender(memory) &&
+					["preference", "identity", "qa-correction", "correction"].includes(
+						readCategory(memory),
+					),
+			);
+			const categories = [...new Set(allFacts.map(readCategory))].sort();
+			const discoveryText = [
+				`context_discovery: FACTS\n${allFacts.length} saved facts are available in full (${categories.join(", ")}). For remembered details absent from supplied dialogue, return contextRequests=["FACTS"] with an empty reply before choosing a broader memory search. The runtime supplies the complete facts and asks you again. Search history afterward only if facts cannot answer or exact source records are required. Stored observations are not proof of current app state. Supplied dialogue/corrections may already answer; ordinary conversation needs no fact read.`,
+				standingFacts.length
+					? `Standing preferences, identity and corrections (complete):\n${standingFacts.map((fact) => formatLines([fact], readFactKind(fact))).join("\n")}`
+					: "",
+			]
+				.filter(Boolean)
+				.join("\n\n");
 			const formattedFacts = [
 				formatLines(durableFacts, "durable"),
 				formatLines(currentFacts, "current"),
@@ -589,6 +600,7 @@ const factsProvider: Provider = {
 					currentFacts,
 				},
 				text,
+				discoveryText,
 			};
 		} catch (cause) {
 			// error-policy:J2 Add provider scope before the message boundary reports the failed turn.

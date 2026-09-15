@@ -1,0 +1,397 @@
+/* Developer chat and diagnostics; the real app runs in its own tab. */
+.eliza-developer-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--txt);
+}
+.developer-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.developer-chat-header h1 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.developer-chat-header nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.developer-chat-header a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.developer-workspace-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.developer-app-pane {
+  display: none;
+  position: relative;
+  contain: layout paint;
+  isolation: isolate;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.developer-inspector-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.developer-console {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.developer-chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.developer-chat-content {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+.developer-chat-content > * + * {
+  margin-top: 24px;
+}
+.developer-message {
+  min-width: 0;
+  font-size: 15px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.developer-message-user {
+  width: fit-content;
+  max-width: 88%;
+  margin-left: auto;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: var(--bg-hover);
+}
+.developer-message-body {
+  white-space: pre-wrap;
+}
+.developer-reply-details > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.developer-reply-details > summary::-webkit-details-marker {
+  display: none;
+}
+.developer-token-count {
+  font-variant-numeric: tabular-nums;
+}
+.developer-details-label {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.developer-expanded-reply {
+  padding: 12px 0;
+}
+.developer-expanded-reply > * + * {
+  margin-top: 16px;
+}
+.developer-chat-empty {
+  padding: 20vh 0;
+  text-align: center;
+  font-size: 20px;
+}
+.developer-chat-composer {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 12px 24px max(16px, env(safe-area-inset-bottom));
+}
+.developer-chat-composer textarea {
+  min-height: 72px;
+  resize: vertical;
+  max-height: 25dvh;
+}
+.developer-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+}
+.eliza-developer-workspace :is(button, select, summary) {
+  min-height: 44px;
+}
+@media (max-width: 600px) {
+  .developer-chat-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .developer-chat-header nav {
+    gap: 0;
+  }
+  .developer-chat-content {
+    padding: 24px 16px;
+  }
+  .developer-chat-composer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+.developer-live-activity {
+  padding: 8px 0;
+}
+.developer-live-activity > p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.developer-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: developer-working 1.5s ease-in-out infinite alternate;
+}
+@keyframes developer-working {
+  to {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .developer-live-dot {
+    animation: none;
+  }
+}
+
+/* Raw evidence needs a fixed-width text face even under the branded app theme. */
+.eliza-developer-workspace .developer-raw-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The inspector owns its viewport. Opening evidence never grows the chat. */
+.developer-reply-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.developer-reply-summary .developer-inspect-trigger {
+  padding: 0 12px;
+  font-size: 12px;
+}
+.developer-reply-inspector {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, calc(100vw - 32px));
+  height: min(900px, calc(100dvh - 48px));
+  max-height: calc(100dvh - 48px);
+  top: 50%;
+  bottom: auto;
+  translate: -50% -50%;
+  padding: 0;
+  gap: 0;
+}
+.developer-inspection-header {
+  padding: 18px 64px 14px 24px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.developer-inspection-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.developer-reply-inspector > button {
+  min-height: 44px;
+  min-width: 44px;
+  right: 12px;
+  top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.developer-reply-inspector :is(button, select, summary) {
+  min-height: 44px;
+}
+.developer-reply-inspector [hidden] {
+  display: none;
+}
+.developer-reply-inspector .developer-expanded-reply,
+.developer-trajectories-panel,
+.developer-run-browser,
+.developer-trajectory-detail,
+.developer-call-inspector,
+.developer-selected-call,
+.developer-call-text,
+.developer-raw-panel,
+.developer-step-inspector,
+.developer-code-block {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.developer-reply-inspector .developer-expanded-reply {
+  padding: 12px 24px 0;
+  overflow: hidden;
+}
+.developer-reply-inspector .developer-expanded-reply > * + * {
+  margin-top: 10px;
+}
+.developer-reply-inspector [role="tablist"] {
+  flex-shrink: 0;
+  align-self: flex-start;
+  max-width: 100%;
+  justify-content: flex-start;
+  overflow-x: auto;
+}
+.developer-details-scroll,
+.developer-diagnostics-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 20px;
+}
+.developer-run-selector {
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.developer-run-selector label,
+.developer-call-selector label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.developer-run-selector select,
+.developer-call-selector select {
+  width: 100%;
+  font-size: 13px;
+}
+.developer-evidence-navigation {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-bottom: 10px;
+  overflow-x: auto;
+}
+.developer-evidence-navigation button {
+  white-space: nowrap;
+  font-size: 13px;
+}
+.developer-call-selector {
+  flex-shrink: 0;
+  margin-bottom: 10px;
+}
+.developer-call-selector p {
+  margin-top: 6px;
+}
+.developer-call-text {
+  gap: 8px;
+}
+.developer-raw-panel {
+  margin-top: 0;
+  overflow: hidden;
+}
+.developer-code-block > :first-child {
+  flex-shrink: 0;
+}
+.developer-reply-inspector .developer-code-block > :last-child {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.developer-reply-inspector .developer-raw-text {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+/* Diagnostics already owns scrolling. Its unconstrained text blocks must not
+   intercept wheel/touch gestures in a second, non-scrollable container. */
+.developer-reply-inspector .developer-diagnostics-scroll .developer-raw-text {
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+.developer-evidence-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0;
+}
+@media (max-width: 600px) {
+  .developer-reply-inspector {
+    width: calc(100vw - 16px);
+    height: calc(
+      100dvh -
+      24px -
+      env(safe-area-inset-top) -
+      env(safe-area-inset-bottom)
+    );
+    max-height: calc(
+      100dvh -
+      24px -
+      env(safe-area-inset-top) -
+      env(safe-area-inset-bottom)
+    );
+  }
+  .developer-inspection-header {
+    padding: 12px 56px 10px 14px;
+  }
+  .developer-reply-inspector .developer-expanded-reply {
+    padding: 8px 12px 0;
+  }
+  .developer-reply-inspector .developer-expanded-reply > * + * {
+    margin-top: 6px;
+  }
+  .developer-evidence-navigation {
+    padding-bottom: 6px;
+  }
+  .developer-evidence-navigation button {
+    padding-left: 8px;
+    padding-right: 8px;
+    font-size: 12px;
+  }
+}

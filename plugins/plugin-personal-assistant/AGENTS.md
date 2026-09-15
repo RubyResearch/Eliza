@@ -172,3 +172,33 @@ this transition. The Todo projection tags real target IDs as `definition` or
 ## Verification
 
 Follow the repository-wide verification and evidence standard in the [root CLAUDE.md](../../CLAUDE.md). Run the relevant package lanes above, then exercise the real connector, scheduler, database, approval, or UI boundary changed. Inspect scheduled-task records, database rows, logs, trajectories, and rendered behavior; mocked success is not evidence for a real integration.
+
+Planner-owned LifeOps replies hand complete action-specific facts, character
+context and reply rules to the final response model through `data.replyGrounding`.
+Only the full message planner grants this ownership for the same message while
+its action handler is active. Direct/background callers and withheld result
+payloads keep standalone rendering. Deferred replies are internal evidence,
+never unavailable status or canned user prose; preserve receipts, clarification
+states, permission rechecks, final-context restoration and reply-only recovery.
+
+Deferred-draft follow-up classification propagates model failures to action settlement. A provider error is not an unrelated-message verdict and must not start another extraction or replace the pending draft. Valid classifier abstention retains the existing follow-up rules.
+
+Owner definition CREATE surfaces accept `createPlan`, the same semantic task plan
+as the fallback extractor. Validate the supplied shape and pass it through the
+existing cadence, timezone, multi-step, check-in, consent, and draft machinery;
+unknown or malformed plans retain extraction. Expose these instructions only on
+CREATE, not reads/deletes or goal actions. A plan cannot confirm, cancel, or replace
+a pending draft by itself; draft follow-up classification and current-owner-text
+consent still govern reuse. Omitted native fields normalize to unknown, never
+invented schedule values.
+
+The native plan requires an explicit requestKind (alarm/reminder/unspecified) so
+omission cannot silently lose the classification used for consent and native
+reminder metadata. Other unknown fields stay omitted on the native wire.
+Bare confirmation matching uses the shared authored-text extractor to exclude
+the host language footer, while preserving the original message/model context.
+Any remaining substantive text, including a short time such as 9pm, requires the
+normal draft classifier. Expired confirmations invalidate the draft and return
+awaitingUserInput so the planner can explain the required restatement directly.
+
+Calendar feed and event-search promoted tools use operation-specific details schemas authored in the calendar leaf module. Preserve all consumed range, timezone, calendar/connector selection, refresh and search-query aliases, plus original optionality and owner gates. Parent, trip and mutation schemas retain their full contracts; never narrow them by applying a read-only schema globally.

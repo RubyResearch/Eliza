@@ -977,6 +977,8 @@ function AppProviderInner({
     isConversationMessagesOwnershipCurrent,
     getConversationMessagesOwnershipGeneration,
     registerConversationMessageOverlay,
+    getConversationMessagesSnapshot,
+    applyConversationMessageStream,
     applyConversationMessageOverlayModification,
     removeConversationMessageStateMessages,
     discardConversationMessageState,
@@ -1711,12 +1713,16 @@ function AppProviderInner({
       removeConversationMessage,
       setConversationMessages,
       prependConversationMessages,
+      getConversationMessagesSnapshot,
+      applyConversationMessageStream,
     }),
     [
       conversationMessages,
       removeConversationMessage,
       setConversationMessages,
       prependConversationMessages,
+      getConversationMessagesSnapshot,
+      applyConversationMessageStream,
     ],
   );
 

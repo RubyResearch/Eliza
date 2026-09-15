@@ -19,6 +19,8 @@
  */
 
 /** Wire protocol version. Bumped only on breaking control-frame changes. */
+import type { VoiceUiContext } from "@elizaos/shared";
+
 export const VOICE_SESSION_PROTOCOL_VERSION = 1 as const;
 
 /** Uplink/downlink codecs negotiated in `hello`. */
@@ -68,6 +70,7 @@ export interface ClientByeFrame {
 }
 
 export type ClientControlFrame =
+  | { t: "ui_context"; context: VoiceUiContext }
   | ClientHelloFrame
   | ClientAudioMetaFrame
   | ClientAudioCapabilitiesFrame
@@ -78,6 +81,7 @@ export type ClientControlFrame =
 
 export interface ServerReadyEvent {
   t: "ready";
+  uiContext?: boolean;
   sessionId: string;
   traceId: string;
 }

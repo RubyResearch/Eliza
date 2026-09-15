@@ -31,3 +31,7 @@ export const Touch: Story = {
 export const Disabled: Story = {
   args: { disabled: true },
 };
+
+export const Toolbar: Story = {
+  args: { presentation: "toolbar" },
+};

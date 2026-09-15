@@ -312,7 +312,7 @@ function ChatModelGroup({
                 agentId={`models-${target}-cancel`}
                 type="button"
                 variant="outline"
-                className="h-9 rounded-md px-3 text-xs font-medium"
+                className="h-9 px-3 text-xs font-medium"
                 onClick={group.cancelSave}
               >
                 {t("modelconfig.cancel", { defaultValue: "Cancel" })}
@@ -321,7 +321,7 @@ function ChatModelGroup({
                 agentId={`models-${target}-confirm-restart`}
                 type="button"
                 variant="default"
-                className="h-9 rounded-md px-3 text-xs font-medium"
+                className="h-9 px-3 text-xs font-medium"
                 onClick={group.confirmSave}
               >
                 {t("modelconfig.confirmRestart", {
@@ -347,7 +347,7 @@ function ChatModelGroup({
                   agentId={`models-${target}-save`}
                   type="button"
                   variant="outline"
-                  className="h-9 rounded-md px-3 text-xs font-medium"
+                  className="h-9 px-3 text-xs font-medium"
                   disabled={!group.model}
                   onClick={group.requestSave}
                 >
@@ -484,7 +484,7 @@ function CodingModelGroup({
                 agentId="models-coding-save"
                 type="button"
                 variant="outline"
-                className="h-9 rounded-md px-3 text-xs font-medium"
+                className="h-9 px-3 text-xs font-medium"
                 disabled={!group.model.trim()}
                 onClick={group.saveNow}
               >
@@ -502,10 +502,12 @@ export function ModelConfigurationPanelView({
   state,
   t,
   showChatModels = true,
+  showCodingModels = true,
 }: {
   state: ModelConfigurationState;
   t: Translator;
   showChatModels?: boolean;
+  showCodingModels?: boolean;
 }) {
   if (state.phase === "loading") {
     return (
@@ -541,22 +543,24 @@ export function ModelConfigurationPanelView({
             { id: "large-apply", description: true, controlWidth: "w-16" },
           ]}
         />
-        <ModelConfigurationLoadingGroup
-          title={t("modelconfig.codingGroupTitle", {
-            defaultValue: "Coding sub-agent",
-          })}
-          description={t("modelconfig.codingGroupDescription", {
-            defaultValue:
-              "The model coding tasks are delegated to. Applies to the next coding task — no restart.",
-          })}
-          rows={[
-            { id: "coding-backend", controlWidth: "w-48" },
-            { id: "coding-model", description: true, controlWidth: "w-40" },
-            { id: "coding-effort", description: true, controlWidth: "w-24" },
-            { id: "coding-default", description: true, controlWidth: "w-10" },
-            { id: "coding-apply", description: true, controlWidth: "w-16" },
-          ]}
-        />
+        {showCodingModels ? (
+          <ModelConfigurationLoadingGroup
+            title={t("modelconfig.codingGroupTitle", {
+              defaultValue: "Coding sub-agent",
+            })}
+            description={t("modelconfig.codingGroupDescription", {
+              defaultValue:
+                "The model coding tasks are delegated to. Applies to the next coding task — no restart.",
+            })}
+            rows={[
+              { id: "coding-backend", controlWidth: "w-48" },
+              { id: "coding-model", description: true, controlWidth: "w-40" },
+              { id: "coding-effort", description: true, controlWidth: "w-24" },
+              { id: "coding-default", description: true, controlWidth: "w-10" },
+              { id: "coding-apply", description: true, controlWidth: "w-16" },
+            ]}
+          />
+        ) : null}
       </>
     );
   }
@@ -577,7 +581,7 @@ export function ModelConfigurationPanelView({
             agentId="models-retry"
             type="button"
             variant="outline"
-            className="h-9 w-fit rounded-md px-3 text-xs font-medium"
+            className="h-9 w-fit px-3 text-xs font-medium"
             onClick={state.retry}
           >
             {t("modelconfig.retry", { defaultValue: "Retry" })}
@@ -603,7 +607,7 @@ export function ModelConfigurationPanelView({
             agentId="models-retry"
             type="button"
             variant="outline"
-            className="h-9 w-fit rounded-md px-3 text-xs font-medium"
+            className="h-9 w-fit px-3 text-xs font-medium"
             onClick={state.retry}
           >
             {t("modelconfig.retry", { defaultValue: "Retry" })}
@@ -639,7 +643,9 @@ export function ModelConfigurationPanelView({
           />
         </>
       ) : null}
-      <CodingModelGroup group={state.coding} t={t} />
+      {showCodingModels ? (
+        <CodingModelGroup group={state.coding} t={t} />
+      ) : null}
     </>
   );
 }
@@ -647,12 +653,14 @@ export function ModelConfigurationPanelView({
 export function ModelConfigurationPanel({
   activeChatProvider,
   showChatModels = true,
+  showCodingModels = true,
 }: {
   /** Catalog chat provider implied by the active intelligence selection;
    * pins the small/large provider so models track what actually routes chat. */
   activeChatProvider?: string;
   /** Subscription chat does not use the API-key small/large model controls. */
   showChatModels?: boolean;
+  showCodingModels?: boolean;
 }) {
   const t = useAppSelector((s) => s.t);
   const state = useModelConfiguration({ activeChatProvider });
@@ -661,6 +669,7 @@ export function ModelConfigurationPanel({
       state={state}
       t={t}
       showChatModels={showChatModels}
+      showCodingModels={showCodingModels}
     />
   );
 }

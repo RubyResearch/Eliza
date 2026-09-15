@@ -471,6 +471,7 @@ export function useModelConfiguration(
   // The catalog the drafts were resolved against, for post-save re-resolution
   // of `configured` markers without threading it through every callback.
   const catalogRef = useRef<ModelCatalog | null>(null);
+  const configRef = useRef<ModelsConfigResponse | null>(null);
 
   const setSaveState = useCallback(
     (group: "small" | "large" | "coding", next: ModelGroupSaveState) => {
@@ -527,6 +528,7 @@ export function useModelConfiguration(
         config: parseConfigResponse(configResponse),
       };
       catalogRef.current = data.catalog;
+      configRef.current = data.config;
       initializeDrafts(data);
       setLoad({ phase: "ready", data });
     } catch (err) {
@@ -555,8 +557,8 @@ export function useModelConfiguration(
   /**
    * Refresh the effective config after a successful write so source notes and
    * the persisted default backend reflect what the server actually stored.
-   * Deliberately leaves the user's draft selections alone — only the
-   * `configured` markers are re-resolved.
+   * Reconcile untouched effort selections with shared provider knobs while
+   * preserving unsaved selections, including edits made during the request.
    */
   const refreshConfig = useCallback(async () => {
     let config: ModelsConfigResponse;
@@ -569,6 +571,8 @@ export function useModelConfiguration(
       return;
     }
     if (disposedRef.current) return;
+    const previousConfig = configRef.current;
+    configRef.current = config;
     setLoad((prev) =>
       prev.phase === "ready"
         ? { phase: "ready", data: { ...prev.data, config } }
@@ -577,16 +581,26 @@ export function useModelConfiguration(
     setPersistedDefaultBackend(parsePersistedDefaultBackend(config));
     const catalog = catalogRef.current;
     if (!catalog) return;
-    setChatDrafts((prev) => ({
-      small: {
-        ...prev.small,
-        configured: resolveChatDraft("small", catalog, config).configured,
-      },
-      large: {
-        ...prev.large,
-        configured: resolveChatDraft("large", catalog, config).configured,
-      },
-    }));
+    setChatDrafts((prev) => {
+      const reconcile = (target: ChatTarget): ChatDraft => {
+        const draft = prev[target];
+        const effective = resolveChatDraft(target, catalog, config);
+        const previous = previousConfig
+          ? resolveChatDraft(target, catalog, previousConfig)
+          : null;
+        const untouched =
+          previous !== null &&
+          draft.provider === previous.provider &&
+          draft.model === previous.model &&
+          draft.effort === previous.effort;
+        return {
+          ...draft,
+          effort: untouched ? effective.effort : draft.effort,
+          configured: effective.configured,
+        };
+      };
+      return { small: reconcile("small"), large: reconcile("large") };
+    });
     setCodingDrafts((prev) => ({
       codex: {
         ...prev.codex,
@@ -604,28 +618,44 @@ export function useModelConfiguration(
     }));
   }, []);
 
-  const waitForRuntimeRunning = useCallback(async () => {
-    const isRunning = async (): Promise<boolean> => {
-      try {
-        const status = await client.getStatus();
-        return status.state === "running";
-      } catch {
-        // error-policy:J4 status is expected to fail while the agent is down
-        // mid-restart; "unreachable" is the designed not-yet-running signal
-        // the poll loop keeps waiting on.
-        return false;
+  const waitForRuntimeRunning = useCallback(
+    async (previousStartedAt: number | null) => {
+      let sawNotRunning = false;
+      const isRunning = async (): Promise<boolean> => {
+        try {
+          const status = await client.getStatus();
+          if (status.state !== "running") {
+            sawNotRunning = true;
+            return false;
+          }
+          return previousStartedAt !== null
+            ? typeof status.startedAt === "number" &&
+                status.startedAt !== previousStartedAt
+            : sawNotRunning;
+        } catch {
+          // error-policy:J4 status is expected to fail while the agent is down
+          // mid-restart; "unreachable" is the designed not-yet-running signal
+          // the poll loop keeps waiting on.
+          sawNotRunning = true;
+          return false;
+        }
+      };
+      const startedAt = Date.now();
+      for (;;) {
+        if (disposedRef.current) return;
+        if (await isRunning()) return;
+        if (Date.now() - startedAt >= RESTART_MAX_WAIT_MS) {
+          throw new Error(
+            "Settings were saved, but the replacement agent has not reported ready yet. Check runtime status before retrying.",
+          );
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, RESTART_POLL_INTERVAL_MS),
+        );
       }
-    };
-    const startedAt = Date.now();
-    for (;;) {
-      if (disposedRef.current) return;
-      if (await isRunning()) return;
-      if (Date.now() - startedAt >= RESTART_MAX_WAIT_MS) return;
-      await new Promise((resolve) =>
-        setTimeout(resolve, RESTART_POLL_INTERVAL_MS),
-      );
-    }
-  }, []);
+    },
+    [],
+  );
 
   const scheduleIdle = useCallback((group: "small" | "large" | "coding") => {
     setTimeout(() => {
@@ -645,6 +675,19 @@ export function useModelConfiguration(
     ) => {
       setSaveState(group, { phase: "saving" });
       try {
+        let previousStartedAt: number | null = null;
+        if (group !== "coding") {
+          try {
+            const before = await client.getStatus();
+            previousStartedAt =
+              typeof before.startedAt === "number" ? before.startedAt : null;
+          } catch {
+            // error-policy:J4 an unavailable status leaves the old runtime
+            // identity unknown; saving still proceeds, and restart confirmation
+            // requires the existing post-save not-running-to-running transition.
+            previousStartedAt = null;
+          }
+        }
         const result = await client.updateModelsConfig(request);
         if (disposedRef.current) return;
         if (result.kind === "invalid") {
@@ -671,7 +714,7 @@ export function useModelConfiguration(
               ? { operationId: result.operationId }
               : {}),
           });
-          await waitForRuntimeRunning();
+          await waitForRuntimeRunning(previousStartedAt);
           if (disposedRef.current) return;
         }
         await refreshConfig();

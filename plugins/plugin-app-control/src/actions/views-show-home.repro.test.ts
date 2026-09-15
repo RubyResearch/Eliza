@@ -7,16 +7,22 @@
 import {
 	AgentRuntime,
 	type Memory,
+	renderActionResultsForModel,
 	type ViewScopedAction,
 } from "@elizaos/core";
 import { describe, expect, it, vi } from "vitest";
-import { runPlannerLoop } from "../../../../packages/core/src/runtime/planner-loop.js";
+import {
+	actionResultToPlannerToolResult,
+	runPlannerLoop,
+} from "../../../../packages/core/src/runtime/planner-loop.js";
+import { collectPreviousActionResults } from "../../../../packages/core/src/services/message/planned-tool.js";
 import { createViewsAction } from "./views.js";
 import {
 	createViewsClient,
 	type ViewSummary,
 	type ViewsClient,
 } from "./views-client.js";
+import { runViewsList } from "./views-list.js";
 import { runViewsShow } from "./views-show.js";
 
 const coreMock = vi.hoisted(() => ({
@@ -120,6 +126,23 @@ function scopedInteractionHarness(catalog: ViewSummary[] = [scopedCalendar()]) {
 }
 
 describe("VIEWS scoped-action namespace preflight", () => {
+	it("never rewrites an unknown explicit UI capability into a record mutation", async () => {
+		const h = scopedInteractionHarness();
+		h.request.content.text =
+			"Create a calendar event, then open Calendar to September 7.";
+		const result = await h.invoke({
+			action: "interact",
+			view: "calendar",
+			capability: "click-button",
+			params: { title: "Must not be created" },
+		});
+		expect(result.success).toBe(false);
+		expect(result.text).toContain('capability "click-button"');
+		expect(result.text).toContain("No interaction was dispatched");
+		expect(h.fetchMock).not.toHaveBeenCalled();
+		expect(h.callback).not.toHaveBeenCalled();
+	});
+
 	it("returns full no-effect coaching before aliasing the Calendar action to create-event", async () => {
 		const h = scopedInteractionHarness();
 		const result = await h.invoke({
@@ -480,6 +503,9 @@ async function runCase(
 
 describe("VIEWS show/home with Notes foreground (#17299)", () => {
 	it("carries the real registry parser's scoped selection contract into the navigation receipt", async () => {
+		const params = {
+			date: { type: "string", description: "fresh-schema-sentinel" },
+		};
 		const scopedActions = [
 			{
 				name: "VIEW_CALENDAR_SELECT_VISIBLE_DAY",
@@ -506,6 +532,7 @@ describe("VIEWS show/home with Notes foreground (#17299)", () => {
 										{
 											id: "get-events",
 											description: "Read events; does not select a day.",
+											params,
 										},
 									],
 									scopedActions,
@@ -544,6 +571,50 @@ describe("VIEWS show/home with Notes foreground (#17299)", () => {
 		expect(result).not.toHaveProperty("userFacingText");
 		expect(result).not.toHaveProperty("effectReceipts");
 		expect(result.data).not.toHaveProperty("selectedDate");
+		expect(result.data).toMatchObject({
+			view: { capabilities: [{ id: "get-events", params }] },
+		});
+		expect(result.promptData).toMatchObject({
+			view: {
+				scopedActions,
+				capabilities: [{ id: "get-events", paramsDeferred: true }],
+			},
+		});
+		const navigationPrompt = renderActionResultsForModel([result]).text;
+		expect(navigationPrompt).not.toContain("fresh-schema-sentinel");
+		expect(navigationPrompt).toContain("VIEW_CALENDAR_SELECT_VISIBLE_DAY");
+		expect(navigationPrompt).toContain("view_navigation");
+		const backgroundResults = collectPreviousActionResults({
+			context: { id: "navigation-background", events: [] },
+			archivedSteps: [],
+			plannedQueue: [],
+			evaluatorOutputs: [],
+			steps: [
+				{
+					iteration: 1,
+					thought: "Open Calendar",
+					toolCall: {
+						id: "nav",
+						name: "VIEWS",
+						params: { action: "show", view: "calendar" },
+					},
+					result: actionResultToPlannerToolResult(result),
+				},
+			],
+		});
+		// Background task persistence round-trips the projection and original data.
+		const persisted = JSON.parse(JSON.stringify(backgroundResults));
+		expect(persisted[0].data.view.capabilities[0].params).toEqual(params);
+		const backgroundPrompt = renderActionResultsForModel(persisted).text;
+		expect(backgroundPrompt).not.toContain("fresh-schema-sentinel");
+		expect(backgroundPrompt).toContain("VIEWS action=list");
+		expect(backgroundPrompt).toContain("view_navigation");
+		// The fresh discovery read still returns the complete callable contract.
+		const catalog = await runViewsList({ client: createViewsClient() });
+		expect(renderActionResultsForModel([catalog]).text).toContain(
+			"fresh-schema-sentinel",
+		);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});
 
 	it("does not claim navigation to a registered but unavailable view", async () => {

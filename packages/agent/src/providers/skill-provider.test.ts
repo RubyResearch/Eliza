@@ -51,6 +51,36 @@ function runtime() {
 }
 
 describe("dynamic skill current-turn relevance", () => {
+  it("does not activate Apple Notes from an ambiguous native Notes request", async () => {
+    let instructionReads = 0;
+    const host = {
+      getService: () => ({
+        getLoadedSkills: () => [
+          {
+            slug: "apple-notes",
+            name: "Apple Notes",
+            description:
+              "Use for notes. Create notes, edit notes and open notes in Apple Notes using the CLI.",
+          },
+        ],
+        getSkillInstructions: () => {
+          instructionReads++;
+          return { body: "RUN THE EXTERNAL NOTES CLI" };
+        },
+      }),
+    };
+    const result = await createDynamicSkillProvider().get(
+      host as never,
+      { content: { text: "open notes" } } as never,
+      {} as never,
+    );
+    expect(result.text).toContain("not activated");
+    expect(result.text).toContain("apple-notes");
+    expect(result.text).not.toContain("RUN THE EXTERNAL");
+    expect(instructionReads).toBe(0);
+    expect(result.discoveryText).toContain("apple-notes");
+    expect(result.discoveryText).not.toContain("CLI");
+  });
   it("does not activate a skill from stale recent messages", async () => {
     const provider = createDynamicSkillProvider();
     const result = await provider.get(
@@ -74,6 +104,35 @@ describe("dynamic skill current-turn relevance", () => {
     expect(result.data?.matchedSkills).toEqual([]);
     expect(result.text).not.toContain("Active Skill");
     expect(result.text).not.toContain("eliza-cloud");
+  });
+
+  it("does not treat the host language instruction as a skill query", async () => {
+    const provider = createDynamicSkillProvider();
+    const host = runtime();
+    host.getService = () => ({
+      getLoadedSkills: () => [
+        ...skills,
+        {
+          slug: "english-reply",
+          name: "English Replies",
+          description:
+            "Reply in natural English unless the user explicitly requests another language.",
+        },
+      ],
+      getSkillInstructions: (slug: string) => ({
+        slug,
+        body: "UNRELATED_ENGLISH_SKILL",
+        estimatedTokens: 1,
+      }),
+    });
+    const run = (text: string) =>
+      provider.get(host as never, { content: { text } } as never, {} as never);
+    const clean = await run("open notes");
+    const wrapped = await run(
+      "open notes\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]",
+    );
+    expect(wrapped).toEqual(clean);
+    expect(wrapped.text).not.toContain("UNRELATED_ENGLISH_SKILL");
   });
 
   it("still activates a skill explicitly named in the current turn", async () => {

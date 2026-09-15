@@ -180,6 +180,18 @@ export interface MessageHandlerDeterministicToolCall {
 	params?: Record<string, JsonValue>;
 }
 
+/** Stage-1 source selection for planning and completion; it never edits stored history. */
+export type CompletionContextSelection = {
+	mode: "full" | "selected";
+	sourceSetId: string;
+	/** The model reviewed every source for applicability before selecting. */
+	complete: boolean;
+	relevantSourceIds: string[];
+	constraintSourceIds: string[];
+	referentSourceIds: string[];
+	pendingIntentSourceIds: string[];
+};
+
 export interface MessageHandlerPlan {
 	contexts: AgentContext[];
 	reply?: string;
@@ -192,6 +204,7 @@ export interface MessageHandlerPlan {
 	 */
 	requiresTool?: boolean;
 	contextSlices?: string[];
+	completionContext?: CompletionContextSelection;
 	candidateActions?: string[];
 	/**
 	 * Stage 1's declared user intents for the turn, verbatim ("delete
@@ -748,6 +761,11 @@ export interface ProviderResult {
 	/** Human-readable text for LLM prompt inclusion */
 	text?: string;
 
+	/** Optional Stage-1 discovery notice. Keep standing constraints complete here;
+	 * the response handler can request the entire authorized `text` before answering.
+	 * Other consumers retain `text`. This never replaces stored provider evidence. */
+	discoveryText?: string;
+
 	/**
 	 * Complete, explicit retrieval representation used only when the primary
 	 * text cannot fit the selected model's input boundary. This must describe
@@ -1025,13 +1043,14 @@ export interface ActionResult {
 	data?: ProviderDataRecord;
 
 	/**
-	 * Optional model-bound projection of `data`. When present, prompt renderers
-	 * use only this object and never additionally serialize `data`. Exact source
-	 * pages remain in `text`; progressive readers put model-safe `ReadView`
-	 * metadata here and keep native locators and complete bodies out of both
-	 * prompt projections and trajectories.
+	 * Supplemental model-bound metadata. By default both this and data remain
+	 * complete on the model wire. A producer may explicitly declare replace-data
+	 * only when this contains the complete model contract, including a fresh read
+	 * route for any deferred schema. Text and effect receipts are never replaced.
 	 */
 	promptData?: ProviderDataRecord;
+	/** Explicit producer opt-in; complete data stays in runtime state/recordings. */
+	promptDataMode?: "replace-data";
 
 	/** Error information if the action failed */
 	error?: string | Error;

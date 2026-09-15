@@ -83,6 +83,10 @@ export enum EventType {
 	MODEL_USED = "MODEL_USED",
 	MODEL_REGISTERED = "MODEL_REGISTERED",
 
+	// Service instance is available through getService; startup observers finish
+	// before callers waiting on getServiceLoadPromise receive the instance.
+	SERVICE_STARTED = "SERVICE_STARTED",
+
 	// Embedding events
 	EMBEDDING_GENERATION_REQUESTED = "EMBEDDING_GENERATION_REQUESTED",
 	EMBEDDING_GENERATION_COMPLETED = "EMBEDDING_GENERATION_COMPLETED",
@@ -829,6 +833,7 @@ export interface EventPayloadMap {
 	[EventType.EVALUATOR_COMPLETED]: EvaluatorEventPayload;
 	[EventType.MODEL_USED]: ModelEventPayload;
 	[EventType.MODEL_REGISTERED]: ModelRegisteredEventPayload;
+	[EventType.SERVICE_STARTED]: EventPayload & { serviceType: string };
 	[EventType.EMBEDDING_GENERATION_REQUESTED]: EmbeddingGenerationPayload;
 	[EventType.EMBEDDING_GENERATION_COMPLETED]: EmbeddingGenerationPayload;
 	[EventType.EMBEDDING_GENERATION_FAILED]: EmbeddingGenerationPayload;

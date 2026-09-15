@@ -179,6 +179,11 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 	});
 
 	it("maps detail steps into phase-classified llmCalls / providerAccesses / toolEvents", async () => {
+		const messages = [{ role: "user", content: "  complete input\n" }];
+		const tools = [{ name: "REPLY", description: "Full tool definition" }];
+		const providerData = { text: "  full provider context\n", cacheHit: false };
+		const providerQuery = { message: "Find the corrected workout" };
+		const result = { receipt: { kind: "preview", persisted: false } };
 		const service = {
 			getTrajectoryDetail: async (id: string) => ({
 				trajectoryId: id,
@@ -217,6 +222,10 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 								latencyMs: 80,
 								model: "m",
 								response: "RESPOND",
+								messages,
+								tools,
+								finishReason: "tool_calls",
+								tokenUsageEstimated: true,
 								stepType: "should_respond",
 							},
 							{
@@ -227,13 +236,24 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 							},
 						],
 						providerAccesses: [
-							{ providerId: "p0", providerName: "facts", purpose: "ctx" },
+							{
+								providerId: "p0",
+								providerName: "facts",
+								purpose: "ctx",
+								data: providerData,
+								query: providerQuery,
+								startedAt: 501,
+								endedAt: 505,
+								durationMs: 4,
+							},
 						],
 						action: {
 							attemptId: "a0",
 							actionType: "REPLY",
 							actionName: "REPLY",
 							success: true,
+							parameters: { text: "Preview only" },
+							result,
 						},
 					},
 				],
@@ -285,6 +305,10 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 			promptTokens: 12,
 			completionTokens: 0,
 			latencyMs: 80,
+			messages,
+			tools,
+			finishReason: "tool_calls",
+			tokenUsageEstimated: true,
 		});
 		expect(b.llmCalls[1]).not.toHaveProperty("promptTokens");
 		expect(b.llmCalls.map((c) => c.stepType)).toEqual([
@@ -292,10 +316,23 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 			"reasoning",
 		]);
 		expect(b.providerAccesses).toHaveLength(1);
+		expect(b.providerAccesses[0]).toMatchObject({
+			id: "p0",
+			stepId: "s0",
+			trajectoryId: "abc",
+			data: providerData,
+			query: providerQuery,
+			startedAt: 501,
+			endedAt: 505,
+			durationMs: 4,
+		});
 		expect(b.toolEvents[0]).toMatchObject({
 			actionName: "REPLY",
 			success: true,
 			type: "tool_result",
+			parameters: { text: "Preview only" },
+			args: { text: "Preview only" },
+			result,
 		});
 		expect(b.semanticStages).toMatchObject([
 			{
@@ -308,6 +345,56 @@ describe("tryHandleTrajectoryReadRoutes", () => {
 				},
 			},
 		]);
+		const compactResponse = mockRes();
+		await tryHandleTrajectoryReadRoutes({
+			pathname: "/api/trajectories/abc",
+			method: "GET",
+			url: url("/api/trajectories/abc?includePayloads=0"),
+			runtime: runtimeWith(service),
+			res: compactResponse.res,
+		});
+		const compact = compactResponse.get().body as {
+			payloadsIncluded: boolean;
+			llmCalls: Record<string, unknown>[];
+			providerAccesses: Record<string, unknown>[];
+			toolEvents: Record<string, unknown>[];
+			semanticStages: Array<{
+				stageId: string;
+				payload: unknown;
+				latencyMs: number;
+			}>;
+		};
+		expect(compact.payloadsIncluded).toBe(false);
+		expect(compact.llmCalls[0]).toMatchObject({
+			promptTokens: 12,
+			completionTokens: 0,
+			latencyMs: 80,
+		});
+		expect(compact.llmCalls[1]).not.toHaveProperty("promptTokens");
+		for (const call of compact.llmCalls) {
+			expect(call).not.toHaveProperty("systemPrompt");
+			expect(call).not.toHaveProperty("userPrompt");
+			expect(call).not.toHaveProperty("response");
+			expect(call).not.toHaveProperty("messages");
+			expect(call).not.toHaveProperty("tools");
+		}
+		expect(compact.providerAccesses[0]).toMatchObject({ durationMs: 4 });
+		expect(compact.providerAccesses[0]).not.toHaveProperty("data");
+		expect(compact.providerAccesses[0]).not.toHaveProperty("query");
+		expect(compact.toolEvents[0]).not.toHaveProperty("parameters");
+		expect(compact.toolEvents[0]).not.toHaveProperty("result");
+		expect(compact.semanticStages).toMatchObject([
+			{ stageId: "search-1", latencyMs: 2, payload: {} },
+		]);
+		const fullAgain = mockRes();
+		await tryHandleTrajectoryReadRoutes({
+			pathname: "/api/trajectories/abc",
+			method: "GET",
+			url: url("/api/trajectories/abc"),
+			runtime: runtimeWith(service),
+			res: fullAgain.res,
+		});
+		expect(fullAgain.get().body).toEqual(body);
 	});
 
 	it("returns LLM-only detail without fabricating a tool event", async () => {

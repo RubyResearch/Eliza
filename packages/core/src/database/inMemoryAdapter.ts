@@ -1343,11 +1343,18 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		);
 	}
 
-	async getMemoriesByIds(ids: UUID[]): Promise<Memory[]> {
+	async getMemoriesByIds(ids: UUID[], tableName?: string): Promise<Memory[]> {
 		const out: Memory[] = [];
 		for (const id of ids) {
 			const m = this.memoriesById.get(String(id));
-			if (m) out.push(m);
+			if (
+				m &&
+				(tableName === undefined ||
+					this.memoriesByRoom
+						.get(roomTableKey(tableName, m.roomId))
+						?.some((row) => row.id === m.id))
+			)
+				out.push(m);
 		}
 		return out;
 	}

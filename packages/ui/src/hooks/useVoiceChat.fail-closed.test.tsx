@@ -47,7 +47,8 @@ const speechSynthesisMock = {
   }),
 };
 
-class FakeAudioContext {
+class FakeAudioContext extends EventTarget {
+  currentTime = 0;
   state = "running";
   destination = {};
   resume = vi.fn(async () => {});

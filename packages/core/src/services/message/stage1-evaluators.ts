@@ -491,6 +491,14 @@ export const BUILTIN_RESPONSE_HANDLER_EVALUATORS: readonly ResponseHandlerEvalua
 			shouldRun: ({ messageHandler }) => {
 				if (messageHandler.processMessage !== "RESPOND") return false;
 				if (messageHandler.plan.requiresTool === true) return false;
+				// A terminal no-effect decision cannot gain mutation authority from
+				// its wording. Egress still validates the draft and, if necessary,
+				// repairs it through the existing reply-only path without actions.
+				if (
+					messageHandler.plan.replyEffectStatus === "non_applied" ||
+					messageHandler.plan.replyEffectStatus === "none"
+				)
+					return false;
 				const nonSimpleContexts = (messageHandler.plan.contexts ?? []).filter(
 					(context) => context !== SIMPLE_CONTEXT_ID,
 				);

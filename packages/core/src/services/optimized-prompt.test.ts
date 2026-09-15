@@ -219,6 +219,159 @@ describe("OptimizedPromptService — symlink-based versioning", () => {
 		expect(service.getPrompt("action_planner")).toBeNull();
 	});
 
+	it.each<[string, Record<string, unknown>]>([
+		["nonfinite score", { score: Number.NaN }],
+		["infinite baseline", { baselineScore: Number.POSITIVE_INFINITY }],
+		["negative dataset size", { datasetSize: -1 }],
+		["fractional dataset size", { datasetSize: 1.5 }],
+		["unsafe dataset size", { datasetSize: Number.MAX_SAFE_INTEGER + 1 }],
+		["invalid timestamp", { generatedAt: "not-a-date" }],
+		[
+			"malformed lineage",
+			{ lineage: [{ round: 1, variant: 0, score: 0.7 }, null] },
+		],
+		[
+			"nonfinite lineage",
+			{ lineage: [{ round: 1, variant: 0, score: Number.NaN }] },
+		],
+		[
+			"fractional lineage index",
+			{ lineage: [{ round: 1.5, variant: 0, score: 0.7 }] },
+		],
+		["malformed frontier", { frontier: [{ prompt: "candidate", score: 0.7 }] }],
+		[
+			"nonfinite frontier",
+			{
+				frontier: [
+					{
+						prompt: "candidate",
+						score: Number.NEGATIVE_INFINITY,
+						promptTokenCount: 5,
+						origin: "gepa",
+					},
+				],
+			},
+		],
+		[
+			"negative token count",
+			{
+				frontier: [
+					{
+						prompt: "candidate",
+						score: 0.7,
+						promptTokenCount: -1,
+						origin: "gepa",
+					},
+				],
+			},
+		],
+		[
+			"malformed demonstration",
+			{ fewShotExamples: [{ input: { user: "complete" } }] },
+		],
+		[
+			"nonfinite demonstration reward",
+			{
+				fewShotExamples: [
+					{
+						input: { user: "complete" },
+						expectedOutput: "complete",
+						reward: Number.NaN,
+					},
+				],
+			},
+		],
+		[
+			"incomplete promotion evidence",
+			{ promotionDecision: { incumbentScores: [0.5, Number.NaN] } },
+		],
+		[
+			"nonfinite promotion decision",
+			{ promotionDecision: { candidateScore: Number.POSITIVE_INFINITY } },
+		],
+		[
+			"fractional reseed count",
+			{ promotionDecision: { incumbentReseeds: 1.2 } },
+		],
+	])(
+		"rejects %s without replacing an active persisted artifact",
+		async (_name, overrides) => {
+			const currentPath = await service.setPrompt(
+				"action_planner",
+				makeArtifact(1),
+			);
+			const before = await readFile(currentPath, "utf8");
+			const priorPrompt = service.getPrompt("action_planner");
+			const invalid = {
+				...makeArtifact(2),
+				...overrides,
+			} as OptimizedPromptArtifact;
+			await expect(
+				service.setPrompt("action_planner", invalid),
+			).rejects.toMatchObject({
+				code: "OPTIMIZED_PROMPT_ARTIFACT_INVALID",
+			});
+			expect(await readFile(currentPath, "utf8")).toBe(before);
+			expect(readlinkSync(join(storeRoot, "action_planner", "current"))).toBe(
+				"v1.json",
+			);
+			expect(existsSync(join(storeRoot, "action_planner", "v2.json"))).toBe(
+				false,
+			);
+			await service.refresh();
+			expect(service.getPrompt("action_planner")).toEqual(priorPrompt);
+		},
+	);
+
+	it("retains complete valid experiment metrics and examples across signing and restart", async () => {
+		const artifact: OptimizedPromptArtifact = {
+			...makeArtifact(1),
+			lineage: [
+				{ round: 0, variant: 0, score: 0.51, notes: "Complete trial evidence" },
+			],
+			fewShotExamples: [
+				{
+					input: {
+						system: "Full instructions",
+						user: "user: first\nassistant: evidence\nuser: final",
+					},
+					expectedOutput: "complete result",
+					reward: 0.75,
+				},
+			],
+			frontier: [
+				{
+					prompt: "Candidate instructions",
+					score: 0.51,
+					promptTokenCount: 0,
+					origin: "gepa",
+				},
+			],
+			promotionDecision: {
+				promote: false,
+				incumbentScores: [0.6, 0.7],
+				candidateScore: 0.51,
+				delta: -0.14,
+				incumbentReseeds: 2,
+				examplesPerPass: 1,
+			},
+		};
+		const file = await service.setPrompt("action_planner", artifact);
+		const persisted = JSON.parse(await readFile(file, "utf8"));
+		expect(parseOptimizedPromptArtifact(persisted)).toEqual(
+			parseOptimizedPromptArtifact(artifact),
+		);
+		const restarted = createService();
+		restarted.setStoreRoot(storeRoot);
+		await restarted.refresh();
+		expect(restarted.getPrompt("action_planner")).toEqual(
+			service.getPrompt("action_planner"),
+		);
+		expect(restarted.getMetadata("action_planner")).toEqual(
+			service.getMetadata("action_planner"),
+		);
+	});
+
 	it("rejects an artifact task mismatch with typed expected/actual context", async () => {
 		const artifact = makeArtifact(1);
 		await expect(service.setPrompt("response", artifact)).rejects.toMatchObject(

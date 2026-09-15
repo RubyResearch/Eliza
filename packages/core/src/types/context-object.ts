@@ -73,6 +73,8 @@ export interface ContextProviderEvent extends ContextEventBase {
 	type: "provider";
 	name: string;
 	text?: string;
+	/** Provider-owned index; the complete text stays in the original context. */
+	discoveryText?: string;
 	values?: Record<string, JsonValue | undefined>;
 	data?: Record<string, unknown>;
 	/**

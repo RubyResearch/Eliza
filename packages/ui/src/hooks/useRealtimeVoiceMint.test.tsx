@@ -322,6 +322,34 @@ describe("useRealtimeVoiceMint", () => {
   });
 
   describe("production self-hosted eligibility", () => {
+    it("probes a paired runtime without special build flags and still requires conversation proof", async () => {
+      vi.stubEnv("VITE_VOICE_REALTIME_SELF_HOSTED", undefined);
+      vi.stubEnv("VITE_VOICE_REALTIME_FORCE", undefined);
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(
+          jsonHealthResponse({ ready: true, conversationId: CONVERSATION_ID }),
+        );
+      try {
+        const { result } = renderHook(() =>
+          useRealtimeVoiceMint({
+            resolveAgentId: () => null,
+            resolveSelfHostedRuntime: () => true,
+            conversationId: CONVERSATION_ID,
+            fetch,
+          }),
+        );
+        expect(result.current.agentId).toBeNull();
+        await waitFor(() => expect(result.current.agentId).not.toBeNull());
+        expect(fetch).toHaveBeenCalledWith(
+          "/api/v1/voice/session/health?conversationId=voice%2Froom%3Factive%3Dtrue",
+          expect.objectContaining({ method: "GET", redirect: "error" }),
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it("arms only after the paired runtime proves the active conversation", async () => {
       const fetch = vi.fn().mockResolvedValue(
         jsonHealthResponse({

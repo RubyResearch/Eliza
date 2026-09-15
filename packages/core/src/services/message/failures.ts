@@ -1,11 +1,13 @@
 /** Builds user-visible failure responses while preserving complete dialogue context and explicit missing-provider failures. */
 
+import { getRecentMessagesData } from "../../recent-messages-state";
 import { sanitizeUserVisibleModelOutput } from "../../runtime/user-visible-model-output";
 import type { Memory } from "../../types/memory";
 import { ModelType } from "../../types/model";
 import type { Content, UUID } from "../../types/primitives";
 import type { IAgentRuntime } from "../../types/runtime";
 import type { State } from "../../types/state";
+import { addHeader, conversationMessagesHeader } from "../../utils";
 import type { FailureReplyAttempt, StrategyResult } from "./contracts.js";
 import {
 	buildFailureReplyPrompt,
@@ -17,6 +19,7 @@ import {
 	type StructuredFailureCause,
 	stripReasoningBlocks,
 } from "./fallback-reply";
+import { labelHistorySources } from "./history-wire";
 import { reportRejectedUserVisibleModelOutput } from "./stage1-output.js";
 import { hasTextGenerationHandler } from "./trajectory-stages.js";
 export class MessageFailures {
@@ -25,7 +28,39 @@ export class MessageFailures {
 			typeof state.values?.recentMessages === "string" &&
 			state.values.recentMessages.trim().length > 0
 		) {
-			return state.values.recentMessages;
+			const recentMessages = state.values.recentMessages;
+			const entries =
+				state.data?.providers?.RECENT_MESSAGES?.data?.formattedMessageSegments;
+			if (
+				Array.isArray(entries) &&
+				entries.every((entry) => typeof entry === "string")
+			) {
+				const header = conversationMessagesHeader(
+					getRecentMessagesData(state).length,
+				);
+				// Only the exact provider rendering may use entry references. Custom,
+				// stale or incomplete formatting retains the full legacy string.
+				if (addHeader(header, entries.join("\n")) === recentMessages) {
+					const segments = entries.map((content, index) => ({
+						id: `failure-history:${index}`,
+						content,
+						stable: false,
+					}));
+					const encoded = labelHistorySources(
+						segments,
+						new Map(
+							segments.map((segment, index) => [segment.id, `h${index + 1}`]),
+						),
+						"referenced",
+					);
+					const referenced = addHeader(
+						header,
+						encoded.map((segment) => segment.content).join("\n"),
+					);
+					if (referenced.length < recentMessages.length) return referenced;
+				}
+			}
+			return recentMessages;
 		}
 		if (typeof state.text === "string" && state.text.trim().length > 0) {
 			return state.text;

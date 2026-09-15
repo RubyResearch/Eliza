@@ -33,6 +33,12 @@ describe("action callback voice rewriting", () => {
 					expect(modelType).toBe(ModelType.TEXT_SMALL);
 					expect(params.prompt).toContain("Original action payload");
 					expect(params.prompt).toContain("stdout: found task id=abc123");
+					const payload = params.prompt
+						.split("\n")
+						.find((line) => line.startsWith("Original action payload: "));
+					expect(
+						JSON.parse(payload!.replace("Original action payload: ", "")),
+					).toBe("stdout: found task id=abc123");
 					return JSON.stringify({
 						response: "I found the task. Its ID is abc123.",
 					});

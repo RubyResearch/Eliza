@@ -137,7 +137,9 @@ export function isEvoLinkMode(runtime: IAgentRuntime): boolean {
  * must distinguish the transport implementation from the service that
  * actually handled and billed the request.
  */
-export function getUsageProvider(runtime: IAgentRuntime): "cerebras" | "evolink" | "openai" {
+export function getUsageProvider(
+  runtime: IAgentRuntime
+): "cerebras" | "evolink" | "openai" | "openrouter" {
   if (isCerebrasMode(runtime)) {
     return "cerebras";
   }

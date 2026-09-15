@@ -19,6 +19,36 @@ bun run test
 
 See `package.json` for `build`, `lint`, and other scripts.
 
+## Trajectory viewer access
+
+Raw trajectory reads require owner authority at the HTTP boundary. Authenticated
+non-owner sessions and shared gateway credentials do not grant developer-view
+access. Standalone trusted-local access, configured API owner credentials, and
+authorized owner sessions retain the existing read-service contract. Product
+role resolvers must grant both owner authority and route access.
+
+## Memory search results
+
+Planner-owned `MEMORY action=search` calls return each complete source once in
+`data.memories`, with its exact text, IDs, author, room, timestamps and evidence
+status. The text field explains search scope and pagination. Standalone callers
+retain the complete text rendering as well as structured records. Ownership comes
+from the existing trusted execution context, never model-supplied arguments.
+The normal model-boundary redactor handles source strings before serialization;
+stored records and structured runtime results remain intact.
+
+The promoted `MEMORY_SEARCH` tool requires an explicit `author` choice:
+`requester` for the current user's messages, `assistant` for the agent's replies,
+or `any` for no author restriction. `any` preserves other type, entity and room
+filters, including searches for facts or another speaker. Legacy direct
+`MEMORY action=search` callers may still omit `author` for unfiltered searches.
+
+For an exact quotation, `queryMode=literal` matches the supplied `query` as a
+case-sensitive substring of source text, including punctuation, whitespace and
+Unicode. It preserves all other filters and returns every match through the same
+pagination contract. Omitted `queryMode` or `keywords` keeps ranked keyword
+recall. Literal queries cannot be empty, and invalid modes fail explicitly.
+
 The default test command runs isolated Vitest batches. The repository runner
 requests `--reporter=default --reporter=junit --outputFile.junit=<path>` and the
 batch runner validates every report before writing one combined JUnit artifact.
@@ -341,3 +371,9 @@ replays, not additional live-model trials. Comparing an older consumer requires
 an independently pinned compatible harness; this command does not emulate old
 production behavior. Semantic success and cache/latency improvement remain
 separate claims.
+
+Action relevance checks use the same prepared multilingual keyword predicates
+as complete match collection, but stop once any strong or weak term matches.
+Negative checks still inspect every available source. They do not cache
+permission decisions, remove history, change vocabulary, or alter the complete
+match collector used by consumers that need every match.

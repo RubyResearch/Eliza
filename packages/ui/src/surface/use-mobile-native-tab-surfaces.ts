@@ -27,11 +27,13 @@
  */
 
 import type { SurfaceLifecyclePolicy } from "@elizaos/core";
+import { logger } from "@elizaos/logger";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { APP_PAUSE_EVENT, APP_RESUME_EVENT } from "../events";
 import { CapacitorNativeSurfaceShell } from "./capacitor-native-surface-shell";
 import { isNativeSurfaceCapabilityDenial } from "./native-surface-capability";
 import type {
+  NativePageRead,
   NativeSurfacePolicy,
   NativeSurfaceShell,
   SurfaceBounds,
@@ -83,6 +85,11 @@ export interface UseMobileNativeTabSurfacesArgs {
    * tests pass a faithful in-memory shell to assert the exact command sequence.
    */
   readonly shell?: NativeSurfaceShell;
+  readonly onNavigation?: (event: {
+    tabId: string;
+    url: string;
+    previousUrl: string | undefined;
+  }) => void;
 }
 
 /** The imperative handles the Browser view binds to per-tab DOM + navigation. */
@@ -96,6 +103,9 @@ export interface MobileNativeTabSurfaces {
   navigateSurface(tabId: string, url: string): void;
   /** Reload the current page through the native reconciler. */
   reloadSurface(tabId: string): void;
+  /** Step through the selected native page's history without server-tab dispatch. */
+  backSurface(tabId: string): Promise<void>;
+  readPage(tabId: string, selector?: string): Promise<NativePageRead>;
   /** Transport failure replacing a blank or stale native layer, if any. */
   readonly error: MobileNativeSurfaceError | null;
   /** Replay the failed desired-state commands after the user chooses Retry. */
@@ -445,6 +455,11 @@ export function useMobileNativeTabSurfaces(
   } = args;
 
   const activeShell = shell ?? PROCESS_NATIVE_SURFACE_SHELL;
+  const onNavigationRef = useRef(args.onNavigation);
+  onNavigationRef.current = args.onNavigation;
+  const [navigationRetry, setNavigationRetry] = useState(0);
+  const [navigationError, setNavigationError] =
+    useState<MobileNativeSurfaceError | null>(null);
 
   const elements = useRef(new Map<string, HTMLElement>());
   const leaseHolder = useRef(Symbol("browser-native-surface-hook"));
@@ -611,7 +626,72 @@ export function useMobileNativeTabSurfaces(
       (command) => command.status === "failed",
     );
     for (const command of failed) command.retry();
+    setNavigationRetry((value) => value + 1);
   }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: explicit Retry replaces the native listener after bridge failure.
+  useEffect(() => {
+    if (!active || !onNavigationRef.current) return;
+    let disposed = false;
+    let release: (() => Promise<void>) | undefined;
+    const onError = (error: unknown): void => {
+      if (!disposed)
+        setNavigationError({
+          key: "navigation-observation",
+          message: describeNativeSurfaceFailure(error),
+          permanent: isNativeSurfaceCapabilityDenial(error),
+        });
+    };
+    void activeShell
+      .subscribeNavigation((event) => {
+        if (
+          disposed ||
+          !ownsSurfaceLease(activeShell, event.id, leaseHolder.current)
+        )
+          return;
+        const tabId = [...managedTabIds.current].find(
+          (id) => surfaceIdOf(id) === event.id,
+        );
+        if (!tabId) return;
+        setNavigationError(null);
+        onNavigationRef.current?.({
+          tabId,
+          url: event.url,
+          previousUrl: event.previousUrl,
+        });
+      }, onError)
+      .then(async (remove) => {
+        if (disposed) await remove();
+        else {
+          release = remove;
+          setNavigationError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          // error-policy:J6 a listener registered after unmount still needs
+          // observable teardown failures; it cannot update the retired view.
+          logger.warn(
+            { error },
+            "Native Browser navigation subscription cleanup failed",
+          );
+          return;
+        }
+        // error-policy:J1 render subscription failure at the native UI boundary.
+        onError(error);
+      });
+    return () => {
+      disposed = true;
+      if (release)
+        void release().catch((error: unknown) => {
+          // error-policy:J6 listener teardown cannot update an unmounted view.
+          logger.warn(
+            { error },
+            "Native Browser navigation listener cleanup failed",
+          );
+        });
+    };
+  }, [active, activeShell, navigationRetry]);
 
   const measure = useCallback(
     (tabId: string): void => {
@@ -681,6 +761,32 @@ export function useMobileNativeTabSurfaces(
       );
     },
     [active, activeShell, issueCommand],
+  );
+
+  const backSurface = useCallback(
+    async (tabId: string): Promise<void> => {
+      const id = surfaceIdOf(tabId);
+      if (!active || !ownsSurfaceLease(activeShell, id, leaseHolder.current)) {
+        throw new Error("This renderer no longer owns the Browser tab.");
+      }
+      await activeShell.back(id);
+    },
+    [active, activeShell],
+  );
+
+  const readPage = useCallback(
+    async (tabId: string, selector?: string): Promise<NativePageRead> => {
+      const id = surfaceIdOf(tabId);
+      if (!active || !ownsSurfaceLease(activeShell, id, leaseHolder.current)) {
+        throw new Error("This renderer no longer owns the Browser tab.");
+      }
+      const result = await activeShell.readPage(id, selector);
+      if (!ownsSurfaceLease(activeShell, id, leaseHolder.current)) {
+        throw new Error("This renderer no longer owns the Browser tab.");
+      }
+      return result;
+    },
+    [active, activeShell],
   );
 
   const readOcclusions = useCallback(
@@ -1112,7 +1218,9 @@ export function useMobileNativeTabSurfaces(
     registerSurfaceElement,
     navigateSurface,
     reloadSurface,
-    error: surfaceError,
+    backSurface,
+    readPage,
+    error: surfaceError ?? navigationError,
     retry,
   };
 }

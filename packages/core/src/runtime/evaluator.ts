@@ -4,6 +4,7 @@
  * decision (FINISH / CONTINUE / NEXT_RECOMMENDED) before the loop acts on it.
  * Also records each evaluation as a trajectory stage for offline review.
  */
+
 import { ElizaError } from "../errors";
 import { computeCallCostUsd } from "../features/trajectories/pricing";
 import { timeInferenceSpan } from "../inference-timing";
@@ -13,12 +14,14 @@ import {
 	projectToolDiagnosticValue,
 	type ToolDiagnosticTextRedactor,
 } from "../security/tool-diagnostics";
+import { referenceRepeatedHistory } from "../services/message/history-wire";
 import {
 	emitStreamingHook,
 	getStreamingContext,
 	runWithStreamingContext,
 } from "../streaming-context";
 import type { EvaluationResult } from "../types/components";
+import type { ContextEvent } from "../types/context-object";
 import {
 	type ChatMessage,
 	getModelFallbackChain,
@@ -31,6 +34,7 @@ import { modelProviderErrorDetail } from "../utils/model-errors";
 import { stripReasoningPrefixes } from "../utils/reasoning-tags";
 import { resolveSetting } from "../utils/resolve-setting";
 import { toWellFormedUnicode } from "../utils/well-formed.js";
+import { selectCompletionContext } from "./completion-context";
 import { computePrefixHashes } from "./context-hash";
 import {
 	buildStageChatMessages,
@@ -63,6 +67,7 @@ import type {
 	PlannerTrajectory,
 	RunEvaluatorParams,
 } from "./planner-types";
+import { projectDeferredProviders } from "./provider-context";
 import type {
 	RecordedStage,
 	RecordedUsage,
@@ -88,6 +93,7 @@ interface RawEvaluatorOutput {
 	effectReceiptIds?: unknown;
 	copyToClipboard?: unknown;
 	recommendedToolCallId?: unknown;
+	contextRequest?: unknown;
 }
 
 interface ParsedEvaluatorObject {
@@ -108,6 +114,7 @@ const EVALUATOR_ENVELOPE_KEYS = new Set([
 	"effectReceiptIds",
 	"copyToClipboard",
 	"recommendedToolCallId",
+	"contextRequest",
 ]);
 
 /**
@@ -571,11 +578,73 @@ export async function runEvaluator(
 		});
 		throw error;
 	}
-	const output = finalizeEvaluatorOutput(
-		raw,
-		params.context,
-		params.trajectory,
-	);
+	let output = finalizeEvaluatorOutput(raw, params.context, params.trajectory);
+	const snapshot = selectedCall?.preparedAttempt;
+	const recordOutput = () =>
+		recordEvaluationStage({
+			runtime: params.runtime,
+			recorder: params.recorder,
+			trajectoryId: params.trajectoryId,
+			parentStageId: params.parentStageId,
+			iteration: params.iteration ?? 1,
+			...(typeof output.raw?.contextRequest === "string" &&
+			(snapshot?.input ?? renderedInput).completionSelectionApplied
+				? { attempt: 0 }
+				: {}),
+			modelType: String(modelType),
+			provider: snapshot?.provider ?? params.provider,
+			messages: (snapshot?.input ?? renderedInput).messages,
+			providerOptions: snapshot?.providerOptions ?? providerOptions,
+			raw,
+			output,
+			startedAt,
+			endedAt: selectedCall?.endedAt ?? Date.now(),
+			segmentHashes: (snapshot?.prefixHashes ?? prefixHashes).map(
+				(entry) => entry.segmentHash,
+			),
+			prefixHash: snapshot?.prefixHash ?? prefixHash,
+			logger: params.runtime.logger,
+		});
+	if (
+		typeof output.raw?.contextRequest === "string" &&
+		!output.protocolFailure
+	) {
+		const scope = output.raw?.contextRequest;
+		const original = params.trajectory.modelBaseContext ?? params.context;
+		const readHistory = scope === "history" || scope === "full";
+		const readProviders = scope === "providers" || scope === "full";
+		if (
+			(readHistory && selectCompletionContext(original).applied) ||
+			(readProviders && projectDeferredProviders(original).available.length)
+		) {
+			// This is a read of the original in-memory sources, not another
+			// planner turn. No callbacks or tools run before the full-context
+			// evaluator decides; removing the selector makes this one-shot.
+			await recordOutput();
+			const restored =
+				readProviders &&
+				projectDeferredProviders(original).available.length &&
+				params.runtime.restoreProviderContext
+					? await params.runtime.restoreProviderContext(original)
+					: original;
+			// Keep the restored sources for subsequent planner/evaluator rounds,
+			// including CONTINUE outcomes. The original context events are intact.
+			params.trajectory.modelBaseContext = {
+				...restored,
+				metadata: {
+					...original.metadata,
+					...(readHistory ? { completionContext: undefined } : {}),
+					...(readProviders ? { providerDiscoveryEnabled: false } : {}),
+				},
+			};
+			return runEvaluator(params);
+		}
+		output = {
+			...output,
+			protocolFailure: true,
+			parseError: "Full completion context was already supplied",
+		};
+	}
 	await timeInferenceSpan("evaluator:stream-hook", () =>
 		emitStreamingHook(streamingContext, "onEvaluation", {
 			evaluation: projectToolDiagnosticValue(
@@ -589,27 +658,7 @@ export async function runEvaluator(
 		applyEvaluatorEffects(output, params.effects),
 	);
 
-	const snapshot = selectedCall?.preparedAttempt;
-	await recordEvaluationStage({
-		runtime: params.runtime,
-		recorder: params.recorder,
-		trajectoryId: params.trajectoryId,
-		parentStageId: params.parentStageId,
-		iteration: params.iteration ?? 1,
-		modelType: String(modelType),
-		provider: snapshot?.provider ?? params.provider,
-		messages: (snapshot?.input ?? renderedInput).messages,
-		providerOptions: snapshot?.providerOptions ?? providerOptions,
-		raw,
-		output,
-		startedAt,
-		endedAt: selectedCall?.endedAt ?? Date.now(),
-		segmentHashes: (snapshot?.prefixHashes ?? prefixHashes).map(
-			(entry) => entry.segmentHash,
-		),
-		prefixHash: snapshot?.prefixHash ?? prefixHash,
-		logger: params.runtime.logger,
-	});
+	await recordOutput();
 
 	return output;
 }
@@ -785,19 +834,85 @@ function renderEvaluatorModelInput(params: {
 	messages: ChatMessage[];
 	promptSegments: PromptSegment[];
 	cacheKeySegments: PromptSegment[];
+	completionSelectionApplied: boolean;
 } {
-	const renderedContext = renderContextObject(
+	const completion = selectCompletionContext(
 		params.trajectory.modelBaseContext ?? params.context,
 	);
+	const deferred = projectDeferredProviders(completion.context);
+	const renderedContext = renderContextObject(
+		projectEvaluatorContext(deferred.context),
+	);
+	renderedContext.promptSegments = referenceRepeatedHistory(
+		params.trajectory.modelBaseContext ?? params.context,
+		renderedContext.promptSegments,
+	);
+	if (deferred.available.length)
+		renderedContext.promptSegments.push({
+			id: "completion-provider-discovery",
+			label: "completion_context",
+			stable: false,
+			content: `Deferred provider references: ${JSON.stringify(deferred.available)}. If their complete syntax or factual details are needed, request contextRequest=providers with decision=CONTINUE, success=false and no user reply or clipboard effect. This reads authorized provider bodies without adding omitted dialogue or running tools. Do not emit Stage-1 contextRequests here. Do not request missing context when settled receipts already establish the answer.`,
+		});
+	if (completion.applied) {
+		renderedContext.promptSegments.push({
+			id: "completion-context-selection",
+			label: "completion_context",
+			stable: false,
+			content: `${JSON.stringify({ selection: completion.selection, omittedSourceCount: completion.omittedSourceCount })}\nOnly Stage-1-selected prior dialogue sources are shown. All original sources remain available in this turn. If any constraint, correction, referent or requested historical evidence is missing, request contextRequest=history with decision=CONTINUE, success=false, and no user reply or clipboard effect. The runtime restores complete original dialogue without expanding unrelated provider references for one tool-free evaluator call. Do not infer or count omitted messages; do not repeat a successful action to retrieve conversation context.`,
+		});
+	}
 	const template = params.template ?? evaluatorTemplate;
 	const instructions = (
 		template.split("context_object:")[0] ?? template
 	).trim();
-	const stepMessages =
+	const completeStepMessages =
 		params.trajectory.modelHistory ??
 		trajectoryStepsToMessages(params.trajectory.steps, {
 			redactText: params.redactText,
 		});
+	// The planner's append-only history stays byte-stable. Only this stage's
+	// wire copy removes JSON indentation; all result fields and string bytes
+	// survive, including receipts, failures, attachments and pending work.
+	const stepMessages = completeStepMessages.map((message): ChatMessage => {
+		if (message.role !== "tool" || !Array.isArray(message.content)) {
+			return message;
+		}
+		return {
+			...message,
+			content: message.content.map((part) => {
+				const output =
+					part.type === "tool-result" && "output" in part
+						? part.output
+						: undefined;
+				if (
+					!output ||
+					typeof output !== "object" ||
+					!("type" in output) ||
+					output.type !== "text" ||
+					!("value" in output) ||
+					typeof output.value !== "string"
+				) {
+					return part;
+				}
+				try {
+					const result: unknown = JSON.parse(output.value);
+					// Only change the canonical serialization emitted by the planner.
+					// This rejects lossy parse roundtrips (duplicate object keys, large
+					// integers, etc.) and retains legacy/custom tool text verbatim.
+					if (JSON.stringify(result, null, 2) !== output.value) return part;
+					return {
+						...part,
+						output: { ...output, value: JSON.stringify(result) },
+					};
+				} catch {
+					// error-policy:J3 Non-JSON tool text is valid evidence. Preserve it
+					// completely instead of repairing or extracting a JSON substring.
+					return part;
+				}
+			}),
+		};
+	});
 	// Mirrors planner-loop: the evaluator stage instructions are template-derived
 	// (`evaluatorTemplate`) and structurally identical across calls. Marking
 	// the segment `stable: true` makes them cacheable on Anthropic's wire path.
@@ -823,7 +938,81 @@ function renderEvaluatorModelInput(params: {
 		dynamicBlocks: [],
 		stepMessages,
 	});
-	return { messages, promptSegments, cacheKeySegments };
+	return {
+		messages,
+		promptSegments,
+		cacheKeySegments,
+		completionSelectionApplied:
+			completion.applied || deferred.available.length > 0,
+	};
+}
+
+const ACTION_SURFACE_DIAGNOSTIC_FIELDS = new Set([
+	"mode",
+	"candidateActionCount",
+	"discoverableActionCount",
+	"discoveryToolName",
+	"catalogParentCount",
+	"exposedActionCount",
+	"tierAParents",
+	"tierAChildrenByParent",
+	"tierBParents",
+	"omittedParentCount",
+	"omittedParentNamesPreview",
+	"actionSurfaceHash",
+	"warnings",
+	"queryTokens",
+	"candidateActions",
+	"parentActionHints",
+	"codingActionProfile",
+	"fallback",
+]);
+
+/**
+ * The evaluator judges outcomes and can return CONTINUE for more planning. Its
+ * input therefore does not need the message service's retrieval catalog
+ * diagnostics. Preserve the source event and every semantic field; unknown
+ * producers or future catalog fields keep the complete representation.
+ */
+function projectEvaluatorContext(context: ContextObject): ContextObject {
+	const events = (context.events ?? []).map((event): ContextEvent => {
+		if (
+			event.type !== "message_handler" ||
+			event.source !== "message-service"
+		) {
+			return event;
+		}
+		const plan = event.metadata?.plan;
+		if (!plan || typeof plan !== "object" || Array.isArray(plan)) return event;
+		const surface = plan.actionSurface;
+		if (
+			!surface ||
+			typeof surface !== "object" ||
+			Array.isArray(surface) ||
+			(surface.mode !== "full" &&
+				surface.mode !== "tiered" &&
+				surface.mode !== "relay-delivery") ||
+			Object.keys(surface).some(
+				(key) => !ACTION_SURFACE_DIAGNOSTIC_FIELDS.has(key),
+			)
+		) {
+			return event;
+		}
+		const { actionSurface: _catalogDiagnostics, ...completionPlan } = plan;
+		return {
+			...event,
+			metadata: {
+				...event.metadata,
+				plan: completionPlan,
+				evaluatorProjection: {
+					sourceEventId: event.id,
+					omittedFields: ["metadata.plan.actionSurface"],
+					reason: "planner_retrieval_diagnostics",
+				},
+			},
+		};
+	});
+	return { ...context, events };
 }
 
 export function parseEvaluatorOutput(
@@ -915,6 +1104,17 @@ function evaluatorEnvelopeProtocolError(
 	if (typeof output.thought !== "string")
 		return 'required field "thought" must be a string';
 	if (
+		Object.hasOwn(output, "contextRequest") &&
+		(!["full", "history", "providers"].includes(
+			String(output.contextRequest),
+		) ||
+			output.success !== false ||
+			parseEvaluatorRoute(output.decision ?? output.route) !== "CONTINUE" ||
+			Object.hasOwn(output, "messageToUser") ||
+			Object.hasOwn(output, "copyToClipboard"))
+	)
+		return "contextRequest must be full, history or providers with CONTINUE, success=false, and no messageToUser or copyToClipboard";
+	if (
 		Object.hasOwn(output, "messageToUser") &&
 		typeof output.messageToUser !== "string"
 	) {
@@ -979,8 +1179,8 @@ function evaluatorEnvelopeProtocolError(
  * Each pattern is conservative: it targets a parenthetical / inline
  * annotation that the LLM appends as metadata, not the surrounding
  * natural language. The replacement either drops the parenthetical
- * entirely or substitutes a neutral phrase, then collapses any
- * doubled whitespace.
+ * entirely or substitutes a neutral phrase. Unrelated reply whitespace and
+ * punctuation remain intact, including literal text and code indentation.
  */
 // Orchestrator auto-generated task labels always have at least two
 // hyphen-separated word segments before the trailing index (e.g.
@@ -1032,10 +1232,6 @@ function sanitizeMessageToUser(text: string): string {
 	for (const { pattern, replacement } of INTERNAL_MECHANIC_PATTERNS) {
 		cleaned = cleaned.replace(pattern, replacement);
 	}
-	// Collapse multiple spaces introduced by the substitutions and
-	// trim trailing space before punctuation (", ." -> ".").
-	cleaned = cleaned.replace(/[ \t]{2,}/g, " ");
-	cleaned = cleaned.replace(/\s+([.,!?:;])/g, "$1");
 	return cleaned.trim();
 }
 
@@ -1080,6 +1276,10 @@ function repairMissingEvaluatorMessage(
 ): EvaluatorOutput {
 	if (typeof output.messageToUser === "string") return output;
 	if (output.success !== true || output.decision !== "FINISH") return output;
+	// A terminal planner reply already supplies the message. Omitted evaluator
+	// prose approves that reply; its internal thought must not replace it.
+	const lastStep = trajectory.steps.at(-1);
+	if (lastStep?.terminalOnly && lastStep.terminalMessage?.trim()) return output;
 	const command = latestSafeCommandForUser(context, trajectory);
 	if (hasSuccessfulToolResult(trajectory) && !command) return output;
 	const thought = output.thought.trim();
@@ -1119,6 +1319,15 @@ function repairFinishedToolTurnWithoutUserMessage(
 	const latestResult = latestStep?.result;
 	if (latestResult?.success !== true) return output;
 	if (latestResult.userFacingText?.trim()) return output;
+	// Internal results explicitly delegate presentation to the planner's
+	// no-tools reply guarantee. Replanning here adds another evaluation and
+	// exposes already-settled work to ordinary action selection again.
+	if (
+		trajectory.codingMode === false &&
+		latestResult.transcriptVisibility === "internal" &&
+		latestResult.modelReplyRequired === true
+	)
+		return output;
 	return {
 		...output,
 		success: false,
@@ -1515,6 +1724,11 @@ function containsFabricatedMarkerInvocation(text: string): boolean {
 	const prose = text
 		.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "")
 		.replace(/`[^`\r\n]*`/g, "");
+	// A planner call reference can appear without an argument body. It is
+	// still protocol syntax, including after a successful tool result (#31382).
+	if (/\[[ \t]*CALL[ \t]*:[ \t]*[A-Za-z0-9_.:-]+[ \t]*\]/.test(prose)) {
+		return true;
+	}
 	for (const match of prose.matchAll(
 		/\[[ \t]*([A-Z][A-Z0-9_]{2,})[ \t]*\]([\s\S]*?)\[[ \t]*\/[ \t]*\1[ \t]*\]/g,
 	)) {

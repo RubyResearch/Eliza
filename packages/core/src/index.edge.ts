@@ -65,6 +65,7 @@ export * from "./providers/setup-progress";
 export * from "./providers/skill-eligibility";
 export * from "./roles";
 export * from "./runtime";
+export { actionGateRejection } from "./runtime/action-gate";
 export * from "./runtime/rlm";
 export * from "./runtime/system-prompt";
 export * from "./schemas/character";
@@ -117,6 +118,7 @@ export * from "./utils/channel-utils";
 export * from "./utils/description-compressed-lint";
 export { stableStringify } from "./utils/deterministic";
 export * from "./utils/environment";
+export * from "./utils/extraction-evidence";
 export * from "./utils/html-raw-text";
 export * from "./utils/model-errors";
 export * from "./utils/prompt-compression";
@@ -129,3 +131,8 @@ export * from "./validation";
 export const isBrowser = false;
 export const isNode = false;
 export const isEdge = true;
+
+export {
+	isPermanentQuotaError,
+	providerRetryAfterMs,
+} from "./utils/model-retry";

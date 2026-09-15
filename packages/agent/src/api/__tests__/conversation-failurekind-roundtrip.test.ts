@@ -580,6 +580,43 @@ describe("conversation transcript visibility round-trip", () => {
     ).toBeUndefined();
   });
 
+  it.each(["IGNORE", "STOP"])(
+    "GET /messages keeps a silent %s receipt out of visible history",
+    async (action) => {
+      const state = createState([
+        userMemory(),
+        assistantMemory({
+          actions: [action],
+          thought: "Terminal decision, not a reply.",
+        }),
+      ]);
+      const { ctx, captured } = createCtx(
+        "GET",
+        "/api/conversations/conv-1/messages",
+        state,
+      );
+      await handleConversationRoutes(ctx);
+      const payload = captured.payload as {
+        messages: Array<{ role: string; text: string }>;
+      };
+      expect(payload.messages.map((m) => m.role)).toEqual(["user"]);
+    },
+  );
+
+  it("GET /messages preserves actual reply text accompanying STOP", async () => {
+    const state = createState([
+      assistantMemory({ actions: ["STOP"], text: "I'll stop now." }),
+    ]);
+    const { ctx, captured } = createCtx(
+      "GET",
+      "/api/conversations/conv-1/messages",
+      state,
+    );
+    await handleConversationRoutes(ctx);
+    const payload = captured.payload as { messages: Array<{ text: string }> };
+    expect(payload.messages.map((m) => m.text)).toEqual(["I'll stop now."]);
+  });
+
   it("GET /messages omits persisted internal diagnostics from visible history", async () => {
     const state = createState([
       userMemory(),

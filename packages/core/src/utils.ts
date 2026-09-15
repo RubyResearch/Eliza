@@ -525,9 +525,9 @@ ${message.content.text ?? ""}
  * @param {Object} params - The formatting parameters
  * @param {Memory[]} params.messages - List of messages to format
  * @param {Entity[]} params.entities - List of entities for name resolution
- * @returns {string} Formatted message string with timestamps and user information
+ * @returns Complete formatted entries, including timestamps and user information.
  */
-export const formatMessages = ({
+export const formatMessageSegments = ({
 	messages,
 	entities,
 }: {
@@ -642,9 +642,14 @@ export const formatMessages = ({
 		messageStrings.push(messageString);
 	}
 
-	const formattedMessages = messageStrings.join("\n");
-	return formattedMessages;
+	return messageStrings;
 };
+
+/** Render the complete formatted transcript in its established display order. */
+export const formatMessages = (params: {
+	messages: Memory[];
+	entities: Entity[];
+}): string => formatMessageSegments(params).join("\n");
 
 export const formatTimestamp = formatTimestampBase;
 

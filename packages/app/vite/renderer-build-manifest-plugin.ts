@@ -3,11 +3,13 @@
  * packaging steps.
  */
 import { execSync } from "node:child_process";
+import path from "node:path";
 import type { Plugin } from "vite";
 import {
   RENDERER_BUILD_MANIFEST_FILENAME,
   writeRendererBuildManifest,
 } from "../../app-core/scripts/lib/renderer-build-manifest.mjs";
+import { viteRendererBuildNeeded } from "../../app-core/scripts/lib/vite-renderer-dist-stale.mjs";
 
 /**
  * Emits `dist/eliza-renderer-build.json` at the end of EVERY production renderer
@@ -38,13 +40,19 @@ function resolveCommit(): string | null {
 
 export function rendererBuildManifestPlugin(): Plugin {
   let outDir = "dist";
+  let root = "";
   let playwrightTestAuth = false;
   let iosApnsEnabled: boolean | null = null;
+  let startedAt = 0;
   return {
     name: "renderer-build-manifest",
     apply: "build",
+    buildStart() {
+      startedAt = Date.now();
+    },
     configResolved(config) {
-      outDir = config.build.outDir;
+      root = config.root;
+      outDir = path.resolve(root, config.build.outDir);
       // Use Vite's resolved env so values loaded from `.env*` match the
       // `import.meta.env` value compiled into the renderer.
       playwrightTestAuth = config.env.VITE_PLAYWRIGHT_TEST_AUTH === "true";
@@ -58,6 +66,7 @@ export function rendererBuildManifestPlugin(): Plugin {
       // only stamp a real app bundle.
       try {
         const manifest = writeRendererBuildManifest(outDir, {
+          startedAt: new Date(startedAt).toISOString(),
           commit: resolveCommit(),
           variant: process.env.ELIZA_BUILD_VARIANT ?? null,
           capacitorTarget: process.env.ELIZA_CAPACITOR_BUILD_TARGET ?? null,
@@ -69,6 +78,18 @@ export function rendererBuildManifestPlugin(): Plugin {
           playwrightTestAuth,
           iosApnsEnabled,
         });
+        // Reuse the packaging input scan: an edit after Vite read a module can
+        // predate index.html while still making this build inconsistent.
+        if (
+          viteRendererBuildNeeded(
+            root,
+            path.resolve(import.meta.dirname, "../../.."),
+          )
+        ) {
+          throw new Error(
+            "[renderer-build-manifest] input changed during build. Rebuild before packaging.",
+          );
+        }
         this.info?.(
           `[renderer-build-manifest] wrote ${RENDERER_BUILD_MANIFEST_FILENAME} buildId=${manifest.buildId.slice(0, 12)} (${manifest.assetCount} assets)`,
         );

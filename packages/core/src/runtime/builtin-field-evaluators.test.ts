@@ -114,37 +114,37 @@ describe("intentsFieldEvaluator", () => {
 		).toEqual(["VIEWS", "NOTES", "CALENDAR", "BROWSER"]);
 	});
 
-	it("lowercases, trims, and strips trailing sentence punctuation", () => {
-		expect(intentsFieldEvaluator.parse(["  Schedule Meeting!? "])).toEqual([
+	it("preserves exact intent text and every occurrence without a length boundary", () => {
+		const intents = [
+			"delete the owner reminder Handler instruction QA 20260911 2155 by its ID and confirm the deletion",
+			"  Schedule Meeting!? ",
+			"Draft email...",
+			"Research X.",
+			"research x!",
+			"RESEARCH X",
+			"Research X.",
+			"",
+			"...",
+		];
+		expect(intentsFieldEvaluator.parse(intents)).toEqual(intents);
+	});
+
+	it("rejects malformed arrays instead of coercing or dropping their entries", () => {
+		for (const value of [
+			[null],
+			[undefined],
+			["valid", 42],
 			"schedule meeting",
-		]);
-		expect(intentsFieldEvaluator.parse(["Draft email..."])).toEqual([
-			"draft email",
-		]);
+			42,
+		]) {
+			expect(intentsFieldEvaluator.parse(value)).toBeNull();
+		}
 	});
 
-	it("collapses near-duplicates after normalization", () => {
-		expect(
-			intentsFieldEvaluator.parse(["Research X.", "research x!", "RESEARCH X"]),
-		).toEqual(["research x"]);
-	});
-
-	it("keeps the 80-character boundary and drops anything longer", () => {
-		const atLimit = "a".repeat(80);
-		const overLimit = `${atLimit}b`;
-		expect(intentsFieldEvaluator.parse([atLimit])).toEqual([atLimit]);
-		expect(intentsFieldEvaluator.parse([overLimit])).toEqual([]);
-	});
-
-	it("skips empties and coerces nullish items to nothing", () => {
-		expect(intentsFieldEvaluator.parse([null, undefined, "", "..."])).toEqual(
-			[],
-		);
-	});
-
-	it("returns an empty array for non-array values", () => {
-		expect(intentsFieldEvaluator.parse("schedule meeting")).toEqual([]);
-		expect(intentsFieldEvaluator.parse(42)).toEqual([]);
+	it("keeps absent and empty intents backward compatible", () => {
+		for (const value of [undefined, null, []]) {
+			expect(intentsFieldEvaluator.parse(value)).toEqual([]);
+		}
 	});
 });
 
@@ -169,15 +169,6 @@ describe("candidateActionNamesFieldEvaluator", () => {
 });
 
 describe("replyTextFieldEvaluator", () => {
-	it("requires navigation acknowledgements to name the destination", () => {
-		expect(replyTextFieldEvaluator.description).toContain(
-			"For UI navigation, mention the requested destination",
-		);
-		expect(replyTextFieldEvaluator.schema.description).toContain(
-			"UI navigation must name the destination",
-		);
-	});
-
 	it("passes ordinary prose through unchanged", () => {
 		expect(replyTextFieldEvaluator.parse("On it.")).toBe("On it.");
 		expect(replyTextFieldEvaluator.parse("hello there")).toBe("hello there");
@@ -366,13 +357,15 @@ describe("emotionFieldEvaluator", () => {
 });
 
 describe("BUILTIN_RESPONSE_HANDLER_FIELD_EVALUATORS", () => {
-	it("registers exactly the eleven built-in evaluators in priority order", () => {
+	it("registers the built-in evaluators in priority order", () => {
 		expect(
 			BUILTIN_RESPONSE_HANDLER_FIELD_EVALUATORS.map((e) => e.name),
 		).toEqual([
 			"shouldRespond",
 			"contexts",
+			"contextRequests",
 			"intents",
+			"completionContext",
 			"replyText",
 			"replyEffectStatus",
 			"candidateActionNames",

@@ -1,10 +1,8 @@
 /**
- * SEARCH_EXPERIENCES envelope regression: a hardened message (content.text
- * wrapped in core's external-content security envelope) driving the free-text
- * query fallback must never echo the envelope into the user-facing callback
- * text, and the machine-facing query fields stay single-line and
- * length-bounded. Empty results must not terminate unrelated queued work.
- * Deterministic — real action and planner loop, fake EXPERIENCE service and model.
+ * Exercises experience search through its action and planner boundaries using
+ * a controlled experience service and model. Search results remain internal
+ * evidence, complete queries survive in model-facing results, and an empty
+ * search cannot terminate unrelated queued work.
  */
 import { describe, expect, it, vi } from "vitest";
 import { runPlannerLoop } from "../../../../runtime/planner-loop.ts";
@@ -129,18 +127,19 @@ describe("SEARCH_EXPERIENCES hardened-message fallback (envelope echo regression
 
 		// The search itself ran on the unwrapped sentence, not the envelope.
 		expect(queries[0]?.query).toBe("solana wallet bugs");
-		const visible = delivered.join("\n");
+		expect(delivered).toEqual([]);
+		const visible = result.text ?? "";
 		expect(visible).not.toContain("EXTERNAL_UNTRUSTED_CONTENT");
 		expect(visible).not.toContain("SECURITY NOTICE");
 		expect(visible).toContain('"solana wallet bugs"');
 		expect((result.data as { query: string }).query).toBe("solana wallet bugs");
 	});
 
-	it("clamps a blob-shaped query in machine fields and neutralizes the echo", async () => {
+	it("preserves a complete multiline query without streaming internal search text", async () => {
 		const { runtime } = makeRuntime();
 		// Payload that matches no strip pattern: the raw-text fallback becomes
 		// the query, so both echo layers must hold on their own.
-		const blobPayload = `first line of a pasted document\n${"lorem ipsum ".repeat(30)}`;
+		const blobPayload = `first line of a pasted document\n${"lorem ipsum ".repeat(30)}終端`;
 		const message = hardenedMessage(blobPayload);
 
 		const delivered: string[] = [];
@@ -155,15 +154,15 @@ describe("SEARCH_EXPERIENCES hardened-message fallback (envelope echo regression
 			},
 		);
 
-		const visible = delivered.join("\n");
+		expect(delivered).toEqual([]);
+		const visible = result.text ?? "";
 		expect(visible).not.toContain("EXTERNAL_UNTRUSTED_CONTENT");
 		expect(visible).not.toContain("SECURITY NOTICE");
 		expect(visible).toContain("No experiences found for that request.");
-		const queryLine =
-			visible.split("\n").find((line) => line.startsWith("Query:")) ?? "";
-		expect(queryLine.length).toBeLessThanOrEqual(128);
+		expect(visible).toContain(JSON.stringify(blobPayload));
 		const data = result.data as { query: string };
-		expect(data.query).not.toContain("\n");
-		expect(data.query.length).toBeLessThanOrEqual(121);
+		expect(data.query).toBe(blobPayload);
+		expect(result.values?.experienceSearchQuery).toBe(blobPayload);
+		expect(result.transcriptVisibility).toBe("internal");
 	});
 });

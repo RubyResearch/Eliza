@@ -49,7 +49,8 @@ interface FakeSource {
 
 const createdSources: FakeSource[] = [];
 
-class FakeAudioContext {
+class FakeAudioContext extends EventTarget {
+  currentTime = 0;
   state = "running";
   destination = {};
   audioWorklet = { addModule: vi.fn(async () => {}) };

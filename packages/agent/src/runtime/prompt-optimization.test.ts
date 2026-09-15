@@ -23,6 +23,7 @@ import {
 import {
   applyActiveViewAwareness,
   clearActiveViewContext,
+  renderActiveViewContextBlock,
   setActiveViewContext,
 } from "./view-action-affinity.ts";
 
@@ -453,7 +454,7 @@ describe("installPromptOptimizations", () => {
     expect(promptOptimizationOf(payload)?.outputReserveTokens).toBeUndefined();
   });
 
-  it("injects active-view awareness into the last user message, not the first", async () => {
+  it("appends fresh active-view awareness to the last user message", async () => {
     setActiveViewContext(VIEW);
     const { runtime, calls } = installRecordingRuntime();
     await callModel(runtime, ModelType.ACTION_PLANNER, {
@@ -467,10 +468,112 @@ describe("installPromptOptimizations", () => {
       payloadAt(calls, 0) as { messages: Array<{ content: string }> }
     ).messages;
     expect(messages[0]?.content).toBe("first");
-    expect(messages[2]?.content).toBe(applyActiveViewAwareness("latest", VIEW));
+    expect(messages[2]?.content).toBe(
+      `latest\n\n${renderActiveViewContextBlock(VIEW)}`,
+    );
     expect(promptOptimizationOf(payloadAt(calls, 0))?.transformations).toEqual([
       "active-view-awareness:chat",
     ]);
+  });
+
+  it("preserves the base prefix and native tool receipts as the current view changes", async () => {
+    setActiveViewContext(VIEW);
+    const { runtime, calls } = installRecordingRuntime();
+    const baseText =
+      "Complete provider context.\nRead the note, then open Calendar if green.";
+    const feedbackText = "Read completed. Continue the pending request.";
+    const base = [
+      { role: "system", content: "Preserve standing constraints." },
+      {
+        role: "user",
+        content: baseText,
+      },
+    ];
+    const receipt = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "read-1",
+            toolName: "NOTES_LIST",
+            input: { content: "QA" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "read-1",
+            toolName: "NOTES_LIST",
+            output: { type: "json", value: { body: "green", success: true } },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: feedbackText,
+      },
+    ];
+    const originals = structuredClone({ base, receipt });
+    await callModel(runtime, ModelType.ACTION_PLANNER, { messages: base });
+    const calendar = {
+      ...VIEW,
+      viewId: "calendar",
+      viewLabel: "Calendar",
+      viewPath: "/calendar",
+    };
+    setActiveViewContext(calendar);
+    await callModel(runtime, ModelType.ACTION_PLANNER, {
+      messages: [...base, ...receipt],
+    });
+    const first = (
+      payloadAt(calls, 0) as { messages: Array<{ content: string }> }
+    ).messages;
+    const second = (
+      payloadAt(calls, 1) as { messages: Array<{ content: string }> }
+    ).messages;
+    expect(first[1]?.content.startsWith(baseText)).toBe(true);
+    expect(second.slice(0, 2)).toEqual(base);
+    expect(second.slice(2, 4)).toEqual(receipt.slice(0, 2));
+    expect(second[4]?.content).toBe(
+      `${feedbackText}\n\n${renderActiveViewContextBlock(calendar)}`,
+    );
+    expect({ base, receipt }).toEqual(originals);
+  });
+
+  it("keeps literal view headings, whitespace and multimodal envelopes intact", async () => {
+    setActiveViewContext(VIEW);
+    const { runtime, calls } = installRecordingRuntime();
+    const literal =
+      "  Quote exactly:\n# Active View\nThis is source text, not an injected snapshot.  ";
+    const image = {
+      type: "image",
+      image: "https://example.com/fixture.png",
+      providerOptions: { fixture: true },
+    };
+    const message = {
+      role: "user",
+      name: "owner",
+      content: [image, { type: "text", text: literal }],
+    };
+    const original = structuredClone(message);
+    await callModel(runtime, ModelType.ACTION_PLANNER, { messages: [message] });
+    expect((payloadAt(calls, 0) as { messages: unknown[] }).messages).toEqual([
+      {
+        ...message,
+        content: [
+          image,
+          {
+            type: "text",
+            text: `${literal}\n\n${renderActiveViewContextBlock(VIEW)}`,
+          },
+        ],
+      },
+    ]);
+    expect(message).toEqual(original);
   });
 
   it("injects active-view awareness into a prompt that already lists available actions", async () => {
@@ -633,6 +736,44 @@ describe("installPromptOptimizations", () => {
         userPrompt: "already logged",
         response: JSON.stringify({ text: "structured" }),
       },
+    });
+    // A configuration/provider guess must not replace the model already
+    // recorded by the provider, particularly while streaming usage is pending.
+    expect(updates[0].patch.model).toBeUndefined();
+  });
+
+  it("uses the measured model rather than a provider hint for missing captures", async () => {
+    const runtime = createRuntime();
+    const logged: Array<Record<string, unknown>> = [];
+    const logger = {
+      logLlmCall: (entry: Record<string, unknown>) => logged.push(entry),
+    };
+    runtime.getServicesByType = (() => [
+      logger,
+    ]) as unknown as typeof runtime.getServicesByType;
+    runtime.getService = (() => logger) as typeof runtime.getService;
+    runtime.useModel = (async () => {
+      await runtime.emitEvent(EventType.MODEL_USED, {
+        runtime,
+        provider: "cerebras",
+        modelName: "qwen-3.8-27b",
+        tokens: { prompt: 10, completion: 2, total: 12 },
+      });
+      return "measured reply";
+    }) as typeof runtime.useModel;
+    installPromptOptimizations(runtime);
+    await runWithTrajectoryContext({ trajectoryStepId: "step-measured" }, () =>
+      callModel(
+        runtime,
+        ModelType.TEXT_EMBEDDING,
+        { prompt: "capture" },
+        "openai",
+      ),
+    );
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({
+      model: "qwen-3.8-27b",
+      promptTokens: 10,
     });
   });
 

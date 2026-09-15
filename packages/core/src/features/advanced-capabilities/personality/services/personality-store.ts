@@ -48,6 +48,9 @@ function clone(slot: PersonalitySlot): PersonalitySlot {
 		...slot,
 		custom_directives: [...slot.custom_directives],
 		trait_sources: { ...slot.trait_sources },
+		...(slot.extraction_evidence_ids
+			? { extraction_evidence_ids: [...slot.extraction_evidence_ids] }
+			: {}),
 	};
 }
 
@@ -82,6 +85,9 @@ function serializeSlotForMemory(
 		updated_at: slot.updated_at,
 		source: slot.source,
 		trait_sources: { ...slot.trait_sources } as Record<string, string>,
+		...(slot.extraction_evidence_ids
+			? { extraction_evidence_ids: [...slot.extraction_evidence_ids] }
+			: {}),
 	};
 }
 
@@ -147,6 +153,12 @@ function isValidPersistedSlot(value: unknown): value is PersonalitySlot {
 		return false;
 	}
 	if (typeof slot.updated_at !== "string") return false;
+	if (
+		slot.extraction_evidence_ids !== undefined &&
+		(!Array.isArray(slot.extraction_evidence_ids) ||
+			!slot.extraction_evidence_ids.every((id) => typeof id === "string"))
+	)
+		return false;
 	if (!isOneOf(slot.source, PERSONALITY_SOURCES)) return false;
 	const traitSources = slot.trait_sources;
 	if (
@@ -313,12 +325,23 @@ export class PersonalityStore extends Service {
 		actorId: UUID;
 		build: (before: PersonalitySlot) => PersonalitySlot;
 		action: (after: PersonalitySlot) => string;
+		extractionEvidenceId?: string;
 	}): Promise<{ before: PersonalitySlot; after: PersonalitySlot }> {
 		return this.enqueueSlotWrite(
 			slotKey(args.agentId, args.targetId),
 			async () => {
 				const before = this.getSlot(args.targetId, args.agentId);
+				if (
+					args.extractionEvidenceId &&
+					before.extraction_evidence_ids?.includes(args.extractionEvidenceId)
+				)
+					return { before, after: clone(before) };
 				const after = args.build(before);
+				if (args.extractionEvidenceId)
+					after.extraction_evidence_ids = [
+						...(before.extraction_evidence_ids ?? []),
+						args.extractionEvidenceId,
+					];
 				await this.persistAndCache(after);
 				this.recordAudit({
 					actorId: args.actorId,
@@ -470,8 +493,10 @@ export class PersonalityStore extends Service {
 		trait: "verbosity" | "tone" | "formality";
 		value: string | null;
 		source?: PersonalitySlot["source"];
+		extractionEvidenceId?: string;
 	}): Promise<{ before: PersonalitySlot; after: PersonalitySlot }> {
 		return this.mutateSlot({
+			extractionEvidenceId: args.extractionEvidenceId,
 			scope: args.scope,
 			targetId:
 				args.scope === "global" ? GLOBAL_PERSONALITY_SCOPE : args.userId,
@@ -537,8 +562,10 @@ export class PersonalityStore extends Service {
 		actorId: UUID;
 		directive: string;
 		source?: PersonalitySlot["source"];
+		extractionEvidenceId?: string;
 	}): Promise<{ before: PersonalitySlot; after: PersonalitySlot }> {
 		return this.mutateSlot({
+			extractionEvidenceId: args.extractionEvidenceId,
 			scope: "user",
 			targetId: args.userId,
 			agentId: args.agentId,

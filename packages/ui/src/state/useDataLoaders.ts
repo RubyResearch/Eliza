@@ -399,10 +399,24 @@ function mergeMessagesChronologically(
     );
     if (insertionIndex < 0) insertionIndex = merged.length;
 
+    // A terminal receipt is stronger ordering evidence than client/server
+    // clocks. An ephemeral reply must never precede its recorded request.
+    const replyToPosition =
+      message.role === "assistant" && message.replyToMessageId
+        ? merged.findIndex(
+            (candidate) =>
+              candidate.message.role === "user" &&
+              candidate.message.id === message.replyToMessageId,
+          )
+        : -1;
+    if (replyToPosition >= 0) {
+      insertionIndex = Math.max(insertionIndex, replyToPosition + 1);
+    }
     const lineage = localConversationMessageLineage(message);
-    const predecessorServerIndex = lineage
-      ? causalServerPredecessors?.get(lineage)
-      : undefined;
+    const predecessorServerIndex =
+      lineage && !message.replyToMessageId
+        ? causalServerPredecessors?.get(lineage)
+        : undefined;
     if (typeof predecessorServerIndex === "number") {
       const predecessorPosition = merged.findIndex(
         (candidate) => candidate.serverIndex === predecessorServerIndex,
@@ -1191,6 +1205,61 @@ export function useDataLoaders(deps: DataLoadersDeps) {
       }
     },
     [conversationMessagesRef],
+  );
+
+  const getConversationMessagesSnapshot = useCallback(
+    (conversationId: string): ConversationMessage[] | undefined => {
+      if (
+        activeConversationIdRef.current !== conversationId ||
+        visibleConversationMessagesOwnerRef.current !== conversationId ||
+        visibleConversationMessagesContentOwnerRef.current !== conversationId
+      )
+        return undefined;
+      return conversationMessagesRef.current;
+    },
+    [activeConversationIdRef, conversationMessagesRef],
+  );
+
+  const applyConversationMessageStream = useCallback(
+    (
+      conversationId: string,
+      changed: ConversationMessage[],
+      removed: string[],
+    ) => {
+      const previous = getConversationMessagesSnapshot(conversationId);
+      if (!previous) return;
+      const removedIds = new Set(removed);
+      const rows = new Map(
+        previous
+          .filter((row) => !removedIds.has(row.id))
+          .map((row) => [row.id, row]),
+      );
+      for (const row of changed) rows.set(row.id, row);
+      const orderedRows = [...rows.values()].sort(
+        (a, b) => a.timestamp - b.timestamp,
+      );
+      setConversationMessages(
+        mergeMessagesChronologically(
+          orderedRows.filter((row) => row.assistantEphemeral !== true),
+          orderedRows.filter((row) => row.assistantEphemeral === true),
+        ),
+      );
+      // Relayed optimistic and ephemeral rows need the same history-refresh
+      // protection as locally sent rows. Durable history is not an overlay.
+      registerConversationMessageOverlay(
+        conversationId,
+        changed.flatMap((row) => {
+          const lineage = localConversationMessageLineage(row);
+          return lineage ? [lineage] : [];
+        }),
+        changed,
+      );
+    },
+    [
+      getConversationMessagesSnapshot,
+      registerConversationMessageOverlay,
+      setConversationMessages,
+    ],
   );
 
   const isConversationMessagesOwnershipCurrent = useCallback(
@@ -2179,6 +2248,8 @@ export function useDataLoaders(deps: DataLoadersDeps) {
     isConversationMessagesOwnershipCurrent,
     getConversationMessagesOwnershipGeneration,
     registerConversationMessageOverlay,
+    getConversationMessagesSnapshot,
+    applyConversationMessageStream,
     applyConversationMessageOverlayModification,
     removeConversationMessageStateMessages,
     discardConversationMessageState,

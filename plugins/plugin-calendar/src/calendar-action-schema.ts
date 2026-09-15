@@ -100,6 +100,7 @@ const CALENDAR_DETAIL_BOOLEAN_KEYS = [
   "force_sync",
   "notifyAttendees",
   "allowPast",
+  "includeHiddenCalendars",
 ] as const;
 
 const CALENDAR_DETAIL_RECURRENCE_KEYS = [
@@ -168,6 +169,8 @@ const CALENDAR_DETAIL_STRING_DESCRIPTIONS: Partial<
 const CALENDAR_DETAIL_BOOLEAN_DESCRIPTIONS: Partial<
   Record<(typeof CALENDAR_DETAIL_BOOLEAN_KEYS)[number], string>
 > = {
+  includeHiddenCalendars:
+    "Agenda/feed reads default to the calendars selected in the Calendar view. Set true only when explicitly asked to include hidden or all connected calendars. Event searches include hidden calendars by default; set false to search only the selected feed. Hidden search results are not necessarily visible in the Calendar view.",
   allowPast:
     "Set true only when the user explicitly wants an event at a time that has already passed (recording a past event, or confirming the past time after being asked); otherwise omit it and the action asks before creating in the past.",
 };
@@ -237,6 +240,82 @@ export const CALENDAR_DETAILS_PARAMETER_SCHEMA: ActionParameterSchema = {
         ],
       },
     },
+  },
+  additionalProperties: false,
+};
+
+/** The next-event reader consumes only calendar selection and timezone.
+ * Keep every accepted spelling of those fields; mutation and range arguments
+ * remain on the complete CALENDAR contract and their corresponding operations. */
+export const CALENDAR_NEXT_EVENT_DETAILS_PARAMETER_SCHEMA: ActionParameterSchema =
+  {
+    type: "object",
+    properties: Object.fromEntries(
+      Object.entries(CALENDAR_DETAILS_PARAMETER_SCHEMA.properties ?? {}).filter(
+        ([key]) =>
+          [
+            "calendarId",
+            "calendarid",
+            "calendar_id",
+            "timeZone",
+            "timezone",
+            "time_zone",
+          ].includes(key),
+      ),
+    ),
+    additionalProperties: false,
+  };
+
+// Feed/search consume the same window and connector scope. Keep every accepted
+// spelling; event edits, recurrence and travel creation belong to other actions.
+const CALENDAR_READ_DETAIL_KEYS = [
+  "calendarId",
+  "calendarid",
+  "calendar_id",
+  "timeMin",
+  "timemin",
+  "time_min",
+  "timeMax",
+  "timemax",
+  "time_max",
+  "timeZone",
+  "timezone",
+  "time_zone",
+  "forceSync",
+  "forcesync",
+  "force_sync",
+  "windowDays",
+  "windowdays",
+  "window_days",
+  "label",
+  "mode",
+  "side",
+  "grantId",
+  "includeHiddenCalendars",
+] as const;
+
+export const CALENDAR_FEED_DETAILS_PARAMETER_SCHEMA: ActionParameterSchema = {
+  type: "object",
+  properties: Object.fromEntries(
+    Object.entries(CALENDAR_DETAILS_PARAMETER_SCHEMA.properties ?? {}).filter(
+      ([key]) => CALENDAR_READ_DETAIL_KEYS.some((name) => name === key),
+    ),
+  ),
+  additionalProperties: false,
+};
+
+export const CALENDAR_SEARCH_DETAILS_PARAMETER_SCHEMA: ActionParameterSchema = {
+  type: "object",
+  properties: {
+    ...CALENDAR_FEED_DETAILS_PARAMETER_SCHEMA.properties,
+    ...Object.fromEntries(
+      Object.entries(CALENDAR_DETAILS_PARAMETER_SCHEMA.properties ?? {}).filter(
+        ([key]) =>
+          ["query", "queries", "oldTitle", "oldtitle", "old_title"].includes(
+            key,
+          ),
+      ),
+    ),
   },
   additionalProperties: false,
 };

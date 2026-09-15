@@ -220,6 +220,7 @@ import {
   isBootstrapGateRequired,
   isLoopbackGatewayHost,
 } from "./state/use-startup-shell-controller";
+import { DeveloperTabHost } from "./state/useDeveloperTabHost";
 import {
   SurfaceRealmScope,
   setActiveSurfaceRealmScope,
@@ -882,10 +883,49 @@ function useActiveScreenBackgroundPolicy({
 interface ActiveViewSurface {
   manifest: ResolvedSurfaceManifest;
   viewId: string;
+  children?: readonly ActiveViewSurfaceChild[];
   sourceKey: string;
   memberViewIds?: readonly string[];
   sourceComponent?: AppShellPageRegistration["Component"];
   sourceLoader?: AppShellPageRegistration["loader"];
+}
+
+interface ActiveViewSurfaceChild {
+  viewId: string;
+  manifest: ResolvedSurfaceManifest;
+  path?: string;
+  bundleUrl?: string;
+  frameUrl?: string;
+  componentExport?: string;
+}
+
+function builtinSurfaceChildren(tab: string): ActiveViewSurfaceChild[] {
+  return (resolveBuiltinRouteDescriptor(tab)?.dynamicChildren ?? []).map(
+    (child) => ({ ...child, manifest: resolveRoutedSurfaceManifest(null) }),
+  );
+}
+
+function activeViewLayoutEntries(
+  layout: ActiveViewLayout,
+  availableViews: ViewRegistryEntry[],
+): ViewRegistryEntry[] {
+  return layout.viewIds
+    .map((viewId) => availableViews.find((view) => view.id === viewId))
+    .filter((view): view is ViewRegistryEntry => Boolean(view));
+}
+
+function layoutRouteOverrideForView(
+  view: ViewRegistryEntry,
+): ViewRouterRouteOverride {
+  const navigationPath =
+    view.path ??
+    (SHELL_RESERVED_TABS.has(view.id)
+      ? pathForTab(view.id)
+      : `/apps/${view.id}`);
+  return {
+    navigationPath,
+    tab: tabFromPath(navigationPath) ?? view.id,
+  };
 }
 
 function shellSurfaceOwner(page: AppShellPageRegistration) {
@@ -914,6 +954,7 @@ function surfacePolicyKey({
   viewId,
   sourceKey,
   memberViewIds,
+  children,
 }: ActiveViewSurface): string {
   const { background, header, isolation, lifecycle, layout, capabilities } =
     manifest;
@@ -921,6 +962,13 @@ function surfacePolicyKey({
     viewId,
     sourceKey,
     memberViewIds,
+    children?.map((child) => ({
+      ...child,
+      manifest: {
+        ...child.manifest,
+        capabilities: [...child.manifest.capabilities].sort(),
+      },
+    })),
     background,
     header,
     isolation,
@@ -958,9 +1006,28 @@ function resolveActiveViewSurface({
   if (viewLayout) {
     return {
       sourceKey: "layout",
-      memberViewIds: viewLayout.viewIds,
+      memberViewIds: activeViewLayoutEntries(viewLayout, availableViews).map(
+        (view) => view.id,
+      ),
       manifest: resolveRoutedSurfaceManifest(null),
       viewId: `layout:${viewLayout.viewIds.join("+") || tab}`,
+      // Mirror the shell's actual pane composition. Membership permits loading
+      // beneath the existing no-grant layout owner; it does not union grants.
+      children: activeViewLayoutEntries(viewLayout, availableViews).flatMap(
+        (view): ActiveViewSurfaceChild[] => [
+          {
+            viewId: view.id,
+            manifest: resolveRoutedSurfaceManifest(view),
+            path: view.path,
+            bundleUrl: view.bundleUrl,
+            frameUrl: view.frameUrl,
+            componentExport: view.componentExport,
+          },
+          ...(!view.bundleUrl && !view.frameUrl
+            ? builtinSurfaceChildren(layoutRouteOverrideForView(view).tab)
+            : []),
+        ],
+      ),
     };
   }
 
@@ -1085,6 +1152,7 @@ function resolveActiveViewSurface({
       sourceKey: "builtin",
       manifest: builtinManifest,
       viewId: tab === "tasks" ? "projects" : resolveBuiltinTabId(tab),
+      children: builtinSurfaceChildren(tab),
     };
   }
 
@@ -1099,6 +1167,7 @@ function resolveActiveViewSurface({
         layout: builtinDescriptor.layout,
       },
       viewId: builtinDescriptor.canonicalId,
+      children: builtinSurfaceChildren(tab),
     };
   }
 
@@ -1339,24 +1408,9 @@ function ViewLayoutSurface({
   layout: ActiveViewLayout;
   onClear: () => void;
 }): ReactNode {
-  const entries = layout.viewIds
-    .map((viewId) => availableViews.find((view) => view.id === viewId))
-    .filter((view): view is ViewRegistryEntry => Boolean(view));
+  const entries = activeViewLayoutEntries(layout, availableViews);
   const paneClassName =
     "flex min-h-[18rem] min-w-0 flex-col overflow-hidden border border-border/45 bg-bg";
-  const routeOverrideForView = (
-    view: ViewRegistryEntry,
-  ): ViewRouterRouteOverride => {
-    const navigationPath =
-      view.path ??
-      (SHELL_RESERVED_TABS.has(view.id)
-        ? pathForTab(view.id)
-        : `/apps/${view.id}`);
-    return {
-      navigationPath,
-      tab: tabFromPath(navigationPath) ?? view.id,
-    };
-  };
 
   return (
     <AppWorkspaceContent pageLayout={DEFAULT_ROUTED_PAGE_LAYOUT}>
@@ -1416,7 +1470,7 @@ function ViewLayoutSurface({
                   ) : (
                     <ViewRouter
                       cloudAuthenticated={cloudAuthenticated}
-                      routeOverride={routeOverrideForView(view)}
+                      routeOverride={layoutRouteOverrideForView(view)}
                     />
                   )}
                 </div>
@@ -3062,7 +3116,9 @@ function AppContent() {
   )
     ? resolvedDynamicPage
     : null;
-  const { authenticated: cloudAuthenticated } = useSessionAuth();
+  const { authenticated: cloudAuthenticated, user: cloudUser } =
+    useSessionAuth();
+  const agentAuthority = useActiveAgentAuthority();
   // Account management is authorized by the Cloud session, independently of
   // the selected agent. Keep its wake/recovery controls reachable while that
   // agent is asleep, disconnected, or awaiting pairing.
@@ -3092,7 +3148,6 @@ function AppContent() {
   // and the view's global root/body-class + `:root`-var mutations reset on
   // teardown so nothing a view injected into the host realm survives into the
   // next view. `resolveSurfaceManifest` stays the single policy source.
-  const activeSurfaceAuthority = useActiveAgentAuthority();
   const activeViewSurface = useActiveViewSurface({
     tab,
     navigationPath,
@@ -3127,22 +3182,58 @@ function AppContent() {
     overlayAppSurfaceActive,
     startupCoordinator.phase,
   ]);
-  useEffect(() => {
+  const authScopeKey =
+    authState.phase === "authenticated"
+      ? JSON.stringify({
+          phase: authState.phase,
+          identity: authState.identity?.id,
+          session: authState.session?.id,
+          access: authState.access,
+        })
+      : authState.phase;
+  // Equal presentation metadata must not retain a scope across a different
+  // route, runtime, principal, session, or authorization policy.
+  const scopeLifetime = useMemo(
+    () => ({
+      surface: activeViewSurface,
+      navigationPath,
+      agentAuthority,
+      authScopeKey,
+      cloudAuthenticated,
+      cloudUserId: cloudUser?.id,
+      managedCloudRuntime,
+    }),
+    [
+      activeViewSurface,
+      navigationPath,
+      agentAuthority,
+      authScopeKey,
+      cloudAuthenticated,
+      cloudUser?.id,
+      managedCloudRuntime,
+    ],
+  );
+  // Publish before DynamicViewLoader's passive bundle-import effect captures
+  // host externals, so a new view cannot bind the previous view's scope.
+  useLayoutEffect(() => {
     if (typeof window === "undefined") return;
-    void activeSurfaceAuthority;
     const scope = new SurfaceRealmScope(
-      activeViewSurface.manifest,
-      activeViewSurface.viewId,
+      scopeLifetime.surface.manifest,
+      scopeLifetime.surface.viewId,
       window.localStorage,
       navigateBrowserPath,
-      activeViewSurface.memberViewIds,
+      [
+        scopeLifetime.surface.viewId,
+        ...(scopeLifetime.surface.memberViewIds ?? []),
+        ...(scopeLifetime.surface.children?.map((child) => child.viewId) ?? []),
+      ],
     );
     setActiveSurfaceRealmScope(scope);
     return () => {
       scope.resetHostRealm();
       setActiveSurfaceRealmScope(null);
     };
-  }, [activeViewSurface, activeSurfaceAuthority]);
+  }, [scopeLifetime]);
 
   const [editingAction, setEditingAction] = useState<
     import("./api").CustomActionDef | null
@@ -3990,6 +4081,7 @@ function AppContent() {
 export function App() {
   return (
     <>
+      {import.meta.env.DEV && <DeveloperTabHost />}
       <NotificationsDataBoot />
       <AppContent />
     </>

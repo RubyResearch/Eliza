@@ -86,6 +86,18 @@ export async function dispatchViewInteract(
   const handler = currentHandler(viewId, resolvedViewType);
 
   if (!handler) {
+    // Native page reads are directed to one specific client, never broadcast
+    // discovery. A missing view is an actionable precondition failure, not a
+    // disconnected phone: the planner must show it before requesting its DOM.
+    if (capability === "get-text" && params?.nativeOnly === true) {
+      client.sendWsMessage({
+        type: "view:interact:result",
+        requestId,
+        success: false,
+        error: `The ${viewId} view is not mounted on the requesting client. Show that view with VIEWS before reading its native page.`,
+      });
+      return;
+    }
     // The API broadcasts view-interact requests to every connected shell.
     // Clients that do not currently mount the target view must stay silent so
     // they do not race the mounted client and resolve the request as failed.

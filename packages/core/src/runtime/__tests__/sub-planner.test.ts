@@ -182,28 +182,152 @@ describe("sub-planner helpers", () => {
 		});
 	});
 
-	it("resolves child action similes before rejecting sub-planner tool calls", async () => {
-		const child = makeAction({
-			name: "GOOGLE_CALENDAR",
-			similes: ["CALENDAR_READ"],
+	it.each([false, true])(
+		"resolves child similes with inherited outer scope: %s",
+		async (inherited) => {
+			const child = makeAction({
+				name: "GOOGLE_CALENDAR",
+				similes: ["CALENDAR_READ"],
+			});
+			const parent = makeAction({
+				name: "CALENDAR",
+				subActions: ["GOOGLE_CALENDAR"],
+				subPlanner: true,
+			});
+			const useModel = vi.fn(async () => ({
+				text: "",
+				toolCalls: [{ id: "call-1", name: "CALENDAR_READ", arguments: {} }],
+			}));
+			const execute = vi.fn(async () => ({
+				success: true,
+				text: "calendar done",
+				data: { actionName: "GOOGLE_CALENDAR" },
+			}));
+
+			await runSubPlanner({
+				runtime: makeRuntime([parent, child], useModel),
+				action: parent,
+				context: {
+					id: "ctx",
+					events: inherited
+						? [
+								{
+									id: "outer-tool",
+									type: "tool",
+									source: "sub-planner",
+									tool: {
+										name: child.name,
+										description: child.description,
+										action: makeAction({
+											name: child.name,
+											similes: ["OUTER_ONLY"],
+										}),
+										metadata: { parentAction: "OUTER_PARENT" },
+									},
+								},
+							]
+						: [],
+				},
+				ctx: { message: makeMessage() },
+				execute,
+				evaluate: async () => ({
+					success: true,
+					decision: "FINISH",
+					thought: "Done.",
+					messageToUser: "Done.",
+				}),
+			});
+
+			const call = useModel.mock.calls[0] as unknown[] | undefined;
+			const params = call?.[1] as { tools: Array<{ name: string }> };
+			expect(params.tools.map((tool) => tool.name)).toContain(
+				"GOOGLE_CALENDAR",
+			);
+			expect(params.tools.map((tool) => tool.name)).not.toContain(
+				"CALENDAR_READ",
+			);
+
+			expect(execute).toHaveBeenCalledWith(
+				expect.any(Object),
+				expect.any(Object),
+				expect.objectContaining({ name: "GOOGLE_CALENDAR" }),
+				expect.objectContaining({ actions: [child] }),
+			);
+		},
+	);
+
+	it("rejects a restricted child's alias even when another child is exposed", async () => {
+		const allowed = makeAction({ name: "PUBLIC_READ" });
+		const restricted = makeAction({
+			name: "PRIVATE_READ",
+			similes: ["SECRET_ALIAS"],
+			roleGate: { minRole: "OWNER" },
 		});
 		const parent = makeAction({
-			name: "CALENDAR",
-			subActions: ["GOOGLE_CALENDAR"],
-			subPlanner: true,
+			name: "PARENT",
+			subActions: [allowed, restricted],
 		});
-		const useModel = vi.fn(async () => ({
-			text: "",
-			toolCalls: [{ id: "call-1", name: "CALENDAR_READ", arguments: {} }],
-		}));
-		const execute = vi.fn(async () => ({
-			success: true,
-			text: "calendar done",
-			data: { actionName: "GOOGLE_CALENDAR" },
-		}));
-
+		const useModel = vi
+			.fn()
+			.mockResolvedValueOnce({
+				text: "",
+				toolCalls: [{ name: "SECRET_ALIAS", arguments: {} }],
+			})
+			.mockResolvedValue({
+				text: "No private read was performed.",
+				toolCalls: [
+					{
+						name: "REPLY",
+						arguments: { text: "No private read was performed." },
+					},
+				],
+			});
+		const execute = vi.fn();
 		await runSubPlanner({
-			runtime: makeRuntime([parent, child], useModel),
+			runtime: makeRuntime([parent, allowed, restricted], useModel),
+			action: parent,
+			context: {
+				id: "ctx",
+				events: [
+					{
+						id: "outer-tool",
+						type: "tool",
+						source: "sub-planner",
+						tool: {
+							name: allowed.name,
+							description: allowed.description,
+							action: makeAction({
+								name: allowed.name,
+								similes: ["SECRET_ALIAS"],
+							}),
+							metadata: { parentAction: "OUTER_PARENT" },
+						},
+					},
+				],
+			},
+			ctx: { message: makeMessage(), userRoles: ["USER"] },
+			execute,
+		});
+		expect(execute).not.toHaveBeenCalled();
+		expect(useModel).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps canonical identity when another child's simile collides", async () => {
+		const canonical = makeAction({ name: "READ", similes: ["LEGACY_READ"] });
+		const other = makeAction({ name: "OTHER_READ", similes: ["READ"] });
+		const parent = makeAction({
+			name: "PARENT",
+			subActions: [canonical, other],
+		});
+		const execute = vi.fn(async () => ({ success: true, text: "read done" }));
+		await runSubPlanner({
+			runtime: makeRuntime(
+				[parent, canonical, other],
+				vi.fn(async () => ({
+					text: "",
+					toolCalls: [{ name: "LEGACY_READ", arguments: {} }],
+				})),
+			),
 			action: parent,
 			context: { id: "ctx", events: [] },
 			ctx: { message: makeMessage() },
@@ -211,16 +335,14 @@ describe("sub-planner helpers", () => {
 			evaluate: async () => ({
 				success: true,
 				decision: "FINISH",
-				thought: "Done.",
 				messageToUser: "Done.",
 			}),
 		});
-
 		expect(execute).toHaveBeenCalledWith(
 			expect.any(Object),
 			expect.any(Object),
-			expect.objectContaining({ name: "GOOGLE_CALENDAR" }),
-			expect.objectContaining({ actions: [child] }),
+			expect.objectContaining({ name: "READ" }),
+			expect.objectContaining({ actions: [canonical, other] }),
 		);
 	});
 

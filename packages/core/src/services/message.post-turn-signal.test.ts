@@ -34,6 +34,28 @@ describe("post-turn semantic signal", () => {
 		).toBe(false);
 	});
 
+	it("preserves Stage-1 evidence even when the lexical shortcut misses it", () => {
+		for (const text of [
+			"I generally prefer replies without emojis.",
+			"Prefiero respuestas sin emojis.",
+		]) {
+			expect(hasPostTurnSemanticSignal(message(text), state(), reply)).toBe(
+				false,
+			);
+			expect(
+				hasPostTurnSemanticSignal(message(text), state(), reply, {
+					facts: ["User prefers replies without emojis."],
+				}),
+			).toBe(true);
+		}
+		expect(
+			hasPostTurnSemanticSignal(message("hi"), state(), reply, {
+				facts: [],
+				relationships: [],
+			}),
+		).toBe(false);
+	});
+
 	it("keeps reflection for durable user information", () => {
 		expect(
 			hasPostTurnSemanticSignal(

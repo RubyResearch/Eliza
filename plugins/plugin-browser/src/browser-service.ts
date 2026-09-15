@@ -54,6 +54,10 @@ import {
   isIdempotentBrowserSubaction,
 } from "./dispatch-types.js";
 import {
+  type NativeBrowserClientTransport,
+  readNativeBrowserPage,
+} from "./native-page-reader.js";
+import {
   BROWSER_BRIDGE_ROUTE_SERVICE_TYPE,
   type BrowserBridgeRouteService,
 } from "./service.js";
@@ -63,7 +67,10 @@ import {
   ensureBrowserWorkspaceDefaultTabWithRetry,
   getBrowserWorkspaceSnapshot,
 } from "./workspace/browser-workspace.js";
-import { normalizeBrowserWorkspaceCommand } from "./workspace/browser-workspace-helpers.js";
+import {
+  assertBrowserWorkspaceUrl,
+  normalizeBrowserWorkspaceCommand,
+} from "./workspace/browser-workspace-helpers.js";
 import type {
   BrowserWorkspaceCommand,
   BrowserWorkspaceCommandResult,
@@ -210,8 +217,16 @@ export class BrowserService extends Service {
   private readonly targets = new Map<string, BrowserTarget>();
   /** Registration order — used as the default preference order. */
   private readonly targetOrder: string[] = [];
+  private nativeClientTransport: NativeBrowserClientTransport | null = null;
+
+  setNativeClientTransport(
+    transport: NativeBrowserClientTransport | null,
+  ): void {
+    this.nativeClientTransport = transport;
+  }
 
   async stop(): Promise<void> {
+    this.nativeClientTransport = null;
     this.targets.clear();
     this.targetOrder.length = 0;
   }
@@ -413,6 +428,7 @@ export class BrowserService extends Service {
   async execute(
     command: BrowserWorkspaceCommand,
     targetId?: string,
+    nativeClientId?: string,
   ): Promise<BrowserWorkspaceCommandResult> {
     command = normalizeBrowserWorkspaceCommand(command);
     const blockedCommand = findBlockedGenericCommand(command);
@@ -442,6 +458,46 @@ export class BrowserService extends Service {
           { targetId: targetId ?? null },
         );
       }
+    }
+    if (
+      nativeClientId &&
+      (!targetId || targetId === "workspace" || targetId === "native-client")
+    ) {
+      if (["open", "navigate", "show"].includes(command.subaction)) {
+        if (command.id)
+          throw new BrowserDispatchFailure(
+            "UNSUPPORTED",
+            "Server tab IDs cannot address the requesting client's native tabs.",
+            { targetId: "native-client" },
+          );
+        if (command.subaction !== "show" && !command.url)
+          throw new Error("Native Browser navigation requires a URL.");
+        if (!this.nativeClientTransport)
+          throw new BrowserDispatchFailure(
+            "UNAVAILABLE",
+            "Native Browser client transport is unavailable.",
+            { targetId: "native-client" },
+          );
+        const url = command.url
+          ? assertBrowserWorkspaceUrl(command.url)
+          : undefined;
+        await this.nativeClientTransport.navigate(nativeClientId, url);
+        return {
+          targetId: "native-client",
+          mode: "web",
+          subaction: command.subaction,
+          value: {
+            dispatched: true,
+            ...(command.url ? { url: command.url } : {}),
+            note: "Navigation delivered to the requesting client; read the native page to verify loaded content.",
+          },
+        };
+      }
+      return readNativeBrowserPage(
+        command,
+        nativeClientId,
+        this.nativeClientTransport?.readPage ?? null,
+      );
     }
     return this.executeSelected(command, targetId);
   }

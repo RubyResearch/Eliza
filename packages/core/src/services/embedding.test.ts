@@ -46,6 +46,7 @@ function makeRuntime(opts: RuntimeMockOpts): IAgentRuntime {
 		log: async () => {},
 		emitEvent: async () => {},
 		registerEvent: vi.fn(),
+		unregisterEvent: vi.fn(),
 		registerTaskWorker: vi.fn(),
 		getTasksByName: async () => [],
 		getTask: async () => null,

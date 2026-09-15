@@ -104,6 +104,7 @@ type NativeOperation =
   | "occlusions"
   | "navigate"
   | "reload"
+  | "back"
   | "present"
   | "destroy"
   | "state"
@@ -119,6 +120,39 @@ class StatefulNativeManager implements ElizaSurfaceManagerPlugin {
   readonly bounds: SurfaceBounds[] = [];
   readonly occlusions: Array<readonly SurfaceOcclusionRect[]> = [];
   readonly surfaces = new Map<string, NativeSurfaceRecord>();
+  readonly navigationListeners = new Set<(event: unknown) => void>();
+
+  async addListener(
+    _event: "navigationChanged",
+    listener: (event: unknown) => void,
+  ) {
+    this.navigationListeners.add(listener);
+    return {
+      remove: async () => {
+        this.navigationListeners.delete(listener);
+      },
+    };
+  }
+
+  emitNavigation(identity = IDENTITY_A, id = CREATE_A.id): void {
+    for (const listener of this.navigationListeners)
+      listener({ ...identity, id });
+  }
+
+  goBack(options: NativeSurfaceOwnerIdentity & { id: string }): Promise<void> {
+    return this.execute("back", `back:${options.id}`, () => {
+      this.requireOwned(options);
+    });
+  }
+  async readPage(options: NativeSurfaceOwnerIdentity & { id: string }) {
+    this.requireOwned(options);
+    return {
+      url: "https://a.example/",
+      title: "Native page",
+      text: "Visible page text",
+      truncated: false,
+    };
+  }
   private readonly failures = new Map<NativeOperation, number>();
   private readonly appliedFailures = new Map<NativeOperation, number>();
   private readonly gates = new Map<NativeOperation, Array<Deferred<void>>>();
@@ -439,6 +473,119 @@ class StatefulNativeManager implements ElizaSurfaceManagerPlugin {
 }
 
 describe("CapacitorNativeSurfaceShell", () => {
+  it("preserves complete long native reads and rejects clipped payloads", async () => {
+    const manager = new StatefulNativeManager();
+    const shell = new CapacitorNativeSurfaceShell(() => manager, IDENTITY_A);
+    await shell.createSurface(CREATE_A);
+    await expect(shell.readPage(CREATE_A.id, "h1")).resolves.toMatchObject({
+      text: "Visible page text",
+      truncated: false,
+    });
+    const complete = "x".repeat(32_001) + " 終端 Ω";
+    const read = vi.spyOn(manager, "readPage").mockResolvedValueOnce({
+      url: "https://a.example/",
+      title: "A",
+      text: complete,
+      truncated: false,
+    });
+    await expect(shell.readPage(CREATE_A.id)).resolves.toMatchObject({
+      text: complete,
+    });
+    read.mockResolvedValueOnce({
+      url: "https://a.example/",
+      title: "A",
+      text: "prefix",
+      truncated: true,
+    });
+    await expect(shell.readPage(CREATE_A.id)).rejects.toThrow(
+      "invalid page read",
+    );
+  });
+
+  it("discards a page read if its surface is destroyed while awaiting native", async () => {
+    const manager = new StatefulNativeManager();
+    const shell = new CapacitorNativeSurfaceShell(() => manager, IDENTITY_A);
+    await shell.createSurface(CREATE_A);
+    const gate = deferred<Awaited<ReturnType<typeof manager.readPage>>>();
+    vi.spyOn(manager, "readPage").mockReturnValueOnce(gate.promise);
+    const read = shell.readPage(CREATE_A.id);
+    const rejected = expect(read).rejects.toThrow();
+    await drainPromises();
+    await shell.destroySurface(CREATE_A.id);
+    gate.resolve({
+      url: "https://a.example/",
+      title: "Old",
+      text: "Old",
+      truncated: false,
+    });
+    await rejected;
+  });
+
+  it("observes the native URL without navigating back to stale desired state", async () => {
+    const manager = new StatefulNativeManager();
+    const shell = new CapacitorNativeSurfaceShell(() => manager, IDENTITY_A);
+    await shell.createSurface(CREATE_A);
+    const listener = vi.fn();
+    const onError = vi.fn();
+    const remove = await shell.subscribeNavigation(listener, onError);
+    const surface = manager.surfaces.get(CREATE_A.id);
+    if (!surface) throw new Error("Expected created native surface");
+    surface.currentUrl = "https://next.example/";
+    manager.emitNavigation();
+    await drainPromises();
+    expect(listener).toHaveBeenLastCalledWith({
+      id: CREATE_A.id,
+      url: "https://next.example/",
+      previousUrl: CREATE_A.url,
+    });
+    await shell.setBounds(CREATE_A.id, BOUNDS);
+    expect(manager.surfaces.get(CREATE_A.id)?.currentUrl).toBe(
+      "https://next.example/",
+    );
+    expect(
+      manager.events.filter((event) => event.startsWith("navigate:")),
+    ).toEqual([]);
+    expect(onError).not.toHaveBeenCalled();
+    await remove();
+    expect(manager.navigationListeners.size).toBe(0);
+  });
+
+  it("ignores foreign-owner events and state reads superseded by navigation or teardown", async () => {
+    const manager = new StatefulNativeManager();
+    const shell = new CapacitorNativeSurfaceShell(() => manager, IDENTITY_A);
+    await shell.createSurface(CREATE_A);
+    const listener = vi.fn();
+    const remove = await shell.subscribeNavigation(listener, vi.fn());
+    listener.mockClear();
+    manager.emitNavigation(IDENTITY_B);
+    await drainPromises();
+    expect(listener).not.toHaveBeenCalled();
+    const readGate = manager.deferNext("state");
+    manager.emitNavigation();
+    await drainPromises();
+    await shell.navigate(CREATE_A.id, "https://new-command.example/");
+    readGate.resolve();
+    await drainPromises();
+    expect(listener).not.toHaveBeenCalled();
+    const lateRead = manager.deferNext("state");
+    manager.emitNavigation();
+    await drainPromises();
+    await remove();
+    lateRead.resolve();
+    await drainPromises();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("never repeats a history step after its acknowledgement is lost", async () => {
+    const manager = new StatefulNativeManager();
+    const shell = new CapacitorNativeSurfaceShell(() => manager, IDENTITY_A);
+    await shell.createSurface(CREATE_A);
+    manager.applyThenRejectNext("back");
+    await expect(shell.back(CREATE_A.id)).rejects.toThrow();
+    expect(
+      manager.events.filter((event) => event === `back:${CREATE_A.id}`),
+    ).toHaveLength(1);
+  });
   it("holds initial geometry, holes, and presentation behind acknowledged create", async () => {
     const manager = new StatefulNativeManager();
     const gate = manager.deferNext("create");

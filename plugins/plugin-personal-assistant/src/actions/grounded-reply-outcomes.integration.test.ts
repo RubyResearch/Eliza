@@ -70,53 +70,71 @@ describe("grounded reply outcomes — real PGlite", () => {
     } as Memory;
   }
 
-  it("keeps one persisted definition and its applied receipt after reply failure", async () => {
-    const renderReply = vi
-      .spyOn(agent, "renderGroundedActionReply")
-      .mockResolvedValue({ kind: "unavailable", failure });
-    const callback = vi.fn(async () => []);
-    const title = "Reply unavailable daily task";
-    const result = await runLifeOperationHandler(
-      runtime,
-      message(`Remind me about ${title}`),
-      undefined,
-      {
-        parameters: {
-          action: "create",
-          kind: "definition",
-          title,
-          intent: `Remind me about ${title}`,
-          details: {
-            confirmed: true,
-            kind: "habit",
-            cadence: { kind: "daily", windows: ["morning"] },
-            timeZone: "UTC",
+  it.each(["unavailable", "deferred"] as const)(
+    "keeps one persisted definition and receipt with %s presentation",
+    async (kind) => {
+      const renderReply = vi
+        .spyOn(agent, "renderGroundedActionReply")
+        .mockResolvedValue(
+          kind === "unavailable"
+            ? { kind, failure }
+            : { kind, grounding: "All action facts and reply rules" },
+        );
+      const callback = vi.fn(async () => []);
+      const title = `Reply ${kind} daily task`;
+      const result = await runLifeOperationHandler(
+        runtime,
+        message(`Remind me about ${title}`),
+        undefined,
+        {
+          parameters: {
+            action: "create",
+            kind: "definition",
+            title,
+            intent: `Remind me about ${title}`,
+            details: {
+              confirmed: true,
+              kind: "habit",
+              cadence: { kind: "daily", windows: ["morning"] },
+              timeZone: "UTC",
+            },
           },
         },
-      },
-      callback,
-    );
+        callback,
+      );
 
-    expectUnavailable(result);
-    const records = (await service.listDefinitions()).filter(
-      (record) => record.definition.title === title,
-    );
-    expect(records).toHaveLength(1);
-    expect(result.data).toMatchObject({
-      definition: { id: records[0].definition.id },
-    });
-    expect(result.effectReceipts).toMatchObject([
-      {
-        outcome: "applied",
-        operation: "lifeops.definition.create",
-        resource: { id: records[0].definition.id },
-        commit: { kind: "durable" },
-        idempotency: { replayed: false },
-      },
-    ]);
-    expect(renderReply).toHaveBeenCalledOnce();
-    expect(callback).not.toHaveBeenCalled();
-  });
+      if (kind === "unavailable") {
+        expectUnavailable(result);
+      } else {
+        expect(result).toMatchObject({
+          success: true,
+          transcriptVisibility: "internal",
+          turnComplete: false,
+          data: { replyGrounding: "All action facts and reply rules" },
+        });
+        expect(result.replyFailure).toBeUndefined();
+        expect(result.userFacingText).toBeUndefined();
+      }
+      const records = (await service.listDefinitions()).filter(
+        (record) => record.definition.title === title,
+      );
+      expect(records).toHaveLength(1);
+      expect(result.data).toMatchObject({
+        definition: { id: records[0].definition.id },
+      });
+      expect(result.effectReceipts).toMatchObject([
+        {
+          outcome: "applied",
+          operation: "lifeops.definition.create",
+          resource: { id: records[0].definition.id },
+          commit: { kind: "durable" },
+          idempotency: { replayed: false },
+        },
+      ]);
+      expect(renderReply).toHaveBeenCalledOnce();
+      expect(callback).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps one persisted entity contact and its applied receipt after reply failure", async () => {
     const renderReply = vi

@@ -113,7 +113,7 @@ export function applyClientAction(
  *   speaking_end     → complete → (caller loops to listening)
  *   interrupted      → interrupted → (caller loops to listening)
  *   error            → records error; retryable=false is fatal (caller re-mints)
- *   usage            → no phase change (settlement telemetry)
+ *   usage            → complete if the current thinking turn settled without speech
  */
 export function applyServerEvent(
   state: VoiceSessionMachineState,
@@ -190,8 +190,13 @@ export function applyServerEvent(
         lastError: { code: event.code, retryable: event.retryable },
       };
     case "usage":
-      // Settlement telemetry; no client phase impact.
-      return { ...state, traceId: event.traceId };
+      // finishTurn emits usage even when the model deliberately stays silent.
+      // There is no speaking_end in that case. Settle only the matching turn;
+      // delayed receipts must not complete a newer utterance or cut off audio.
+      if (state.traceId !== event.traceId) return state;
+      return state.phase === "thinking"
+        ? { ...state, phase: "complete" }
+        : state;
     case "assistant_playing":
     case "human_double_talk":
     case "echo_rejected":

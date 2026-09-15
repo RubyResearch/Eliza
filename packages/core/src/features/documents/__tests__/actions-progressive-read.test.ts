@@ -103,6 +103,23 @@ function harness(text: string) {
 }
 
 describe("DOCUMENT progressive read", () => {
+	it("records a missing ID as a failed read without accessing any document", async () => {
+		const { runtime, service } = harness("private source");
+		const result = await documentAction.handler?.(
+			runtime,
+			request(),
+			undefined,
+			options({ action: "read" }),
+		);
+		expect(result).toMatchObject({
+			success: false,
+			values: { error: "invalid_id" },
+			data: { readOnlyOperation: true },
+		});
+		expect(service.readDocumentRange).not.toHaveBeenCalled();
+		expect(service.getDocumentById).not.toHaveBeenCalled();
+	});
+
 	it("returns the complete document when pagination was not requested", async () => {
 		const source = Array.from(
 			{ length: 501 },

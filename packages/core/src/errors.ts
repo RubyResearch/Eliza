@@ -18,6 +18,8 @@ export type ElizaErrorSeverity = "ephemeral" | "fatal";
 
 /** Options accepted by the {@link ElizaError} constructor. */
 export interface ElizaErrorOptions {
+	/** Earliest retry time in epoch milliseconds; schedulers may wait longer. */
+	retryAt?: number;
 	/**
 	 * Stable, grep-able classification key (e.g. `DB_QUERY_FAILED`). Drives the
 	 * per-code counter and escalation threshold in `runtime.reportError`.
@@ -38,6 +40,7 @@ export interface ElizaErrorOptions {
 export class ElizaError extends Error {
 	override readonly name: string = "ElizaError";
 	readonly code: string;
+	readonly retryAt?: number;
 	readonly context?: Record<string, unknown>;
 	readonly severity?: ElizaErrorSeverity;
 
@@ -49,6 +52,7 @@ export class ElizaError extends Error {
 			options.cause !== undefined ? { cause: options.cause } : undefined,
 		);
 		this.code = options.code;
+		this.retryAt = options.retryAt;
 		this.context = options.context;
 		this.severity = options.severity;
 		// Restore the prototype chain for reliable `instanceof` across the

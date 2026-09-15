@@ -45,6 +45,27 @@ describe("commitment ledger extraction and audit", () => {
     expect(rows[0]?.summary).toContain("send the deck Friday");
   });
 
+  it("ignores purpose clauses while retaining a separate promise", () => {
+    const input = {
+      agentId: AGENT_ID,
+      source: "chat" as const,
+      sourceKey: "purpose-clause",
+      observedAt: OBSERVED_AT,
+    };
+    expect(
+      extractCommitmentLedgerRecords({
+        ...input,
+        text: "Open Notes so I can see it.",
+      }),
+    ).toEqual([]);
+    const rows = extractCommitmentLedgerRecords({
+      ...input,
+      text: "Open Notes so I can see it. I'll send the deck Friday.",
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.summary).toBe("I'll send the deck Friday");
+  });
+
   it("does not create rows for speculative chit-chat", () => {
     const rows = extractCommitmentLedgerRecords({
       agentId: AGENT_ID,

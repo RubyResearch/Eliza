@@ -814,30 +814,27 @@ export async function extractDeferredLifeDraftFollowupWithLlm(args: {
     recentConversation.join("\n").trim() || "(empty)",
   ].join("\n");
 
-  try {
-    const result = await runWithTrajectoryPurpose(
-      "lifeops-deferred-draft",
-      () =>
-        args.runtime.useModel(ModelType.TEXT_LARGE, {
-          prompt,
-        }),
-    );
-    const raw = typeof result === "string" ? result : "";
-    const parsed = parseJsonModelRecord<Record<string, unknown>>(raw);
-    const mode =
-      parsed && typeof parsed.mode === "string"
-        ? parsed.mode.trim().toLowerCase()
-        : "";
-    switch (mode) {
-      case "confirm":
-      case "edit":
-      case "cancel":
-        return mode;
-      default:
-        return null;
-    }
-  } catch {
-    return null;
+  // A failed classification cannot mean "unrelated": that would start a new
+  // extraction and may replace the pending draft. Let action settlement retain
+  // the provider failure, including terminal context overflow, without effects.
+  const result = await runWithTrajectoryPurpose("lifeops-deferred-draft", () =>
+    args.runtime.useModel(ModelType.TEXT_LARGE, {
+      prompt,
+    }),
+  );
+  const raw = typeof result === "string" ? result : "";
+  const parsed = parseJsonModelRecord<Record<string, unknown>>(raw);
+  const mode =
+    parsed && typeof parsed.mode === "string"
+      ? parsed.mode.trim().toLowerCase()
+      : "";
+  switch (mode) {
+    case "confirm":
+    case "edit":
+    case "cancel":
+      return mode;
+    default:
+      return null;
   }
 }
 

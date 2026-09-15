@@ -13,7 +13,6 @@ import type {
 	ViewType,
 } from "@elizaos/core";
 import { getStreamingContext, logger, satisfiesRoleGate } from "@elizaos/core";
-import { SHARED_NAV_TARGETS } from "@elizaos/shared/views/shared-nav-targets";
 import { resolveSettingsSectionToken } from "@elizaos/ui/components/settings/settings-section-tokens";
 import { getAppControlApiBase } from "../loopback-api.js";
 import { describeTargetReference, targetReferenceLogView } from "../params.js";
@@ -28,6 +27,11 @@ import {
 } from "./view-catalog-scope.js";
 import { matchViewCommand } from "./view-command-matcher.js";
 import { isRealtimeVoiceTurn } from "./view-delivery.js";
+import {
+	NAVIGATION_CAPABILITY_READ_INSTRUCTION,
+	navigationDestinationReference,
+} from "./view-navigation-context.js";
+import { resolveCanonicalViewTarget } from "./view-target.js";
 import type { ViewSummary, ViewsClient } from "./views-client.js";
 import { createViewsRequestHeaders } from "./views-request-auth.js";
 import { scoreView } from "./views-search.js";
@@ -511,7 +515,17 @@ export async function runViewsShow({
 			transcriptVisibility: "internal",
 			turnComplete: false,
 			text: "A planner navigation step requires an explicit view and navigationStepId. Domain work has not completed by navigation.",
-			data: { navigation: receipt("invalid", null, "VIEW_STEP_INVALID") },
+			data: {
+				navigation: receipt("invalid", null, "VIEW_STEP_INVALID"),
+				// Use the planner's existing malformed-call recovery contract. A
+				// later successful retry must still preserve this call's destination.
+				parameterErrors: ["view", "navigationStepId"]
+					.filter((name) => !readStringOpt(options, name))
+					.map((name) => ({
+						name,
+						message: `${name} is required when navigationIntent is planner-step.`,
+					})),
+			},
 		};
 	}
 	if (!target) {
@@ -547,11 +561,7 @@ export async function runViewsShow({
 	const catalogBlock = blockedResult();
 	if (catalogBlock) return catalogBlock;
 	// Resolve only the structured destination; other request clauses cannot replace it.
-	const canonicalTarget = Object.entries(SHARED_NAV_TARGETS).find(
-		([id, entry]) =>
-			id.toLowerCase() === target.toLowerCase() ||
-			entry.label.toLowerCase() === target.toLowerCase(),
-	)?.[1];
+	const canonicalTarget = resolveCanonicalViewTarget(target);
 	const resolution = resolveView(target, views, canonicalTarget?.viewId);
 
 	if (resolution.kind === "none") {
@@ -691,9 +701,9 @@ export async function runViewsShow({
 		success: navigationSucceeded,
 		text: JSON.stringify(navigation),
 		// Navigation has already been handed to the shell. A confirmed success
-		// requests exactly one post-tool model reply so the acknowledgement stays
-		// natural and model-owned without an evaluator/planner retry loop. Failed or
-		// unconfirmed navigation retains full evaluation and recovery.
+		// requires a model-authored reply. The caller can release a held same-turn
+		// draft after checking this receipt, or synthesize a post-tool reply when
+		// needed. Failed/unconfirmed navigation retains evaluation and recovery.
 		transcriptVisibility: "internal",
 		...(navigationSucceeded
 			? { modelReplyRequired: true }
@@ -717,5 +727,17 @@ export async function runViewsShow({
 			navigation,
 			...(result.subview ? { subview: result.subview } : {}),
 		},
+		// Clients retain the complete catalog object in data. The model receives
+		// the same navigation evidence without eagerly reloading interaction
+		// schemas that were already deferred by the pre-planner handoff.
+		promptData: {
+			view: navigationDestinationReference(view),
+			navigation,
+			...(result.subview ? { subview: result.subview } : {}),
+			...(view.capabilities?.some(({ params }) => params !== undefined)
+				? { capabilityRead: NAVIGATION_CAPABILITY_READ_INSTRUCTION }
+				: {}),
+		},
+		promptDataMode: "replace-data",
 	};
 }

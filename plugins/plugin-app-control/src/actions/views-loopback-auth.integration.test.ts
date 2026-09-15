@@ -128,6 +128,7 @@ async function readRequestBody(req: http.IncomingMessage): Promise<string> {
 
 async function startAuthenticatedViewsServer(
 	expectedToken: string,
+	views: ViewSummary[] = [SETTINGS_VIEW, NOTES_VIEW, CALENDAR_VIEW],
 ): Promise<AuthenticatedViewsServer> {
 	const requests: CapturedRequest[] = [];
 	const server = http.createServer((req, res) => {
@@ -149,7 +150,7 @@ async function startAuthenticatedViewsServer(
 
 			if (request.method === "GET" && request.pathname === "/api/views") {
 				sendJson(res, 200, {
-					views: [SETTINGS_VIEW, NOTES_VIEW, CALENDAR_VIEW],
+					views,
 				});
 				return;
 			}
@@ -533,6 +534,64 @@ describe("authenticated view loopback requests", () => {
 		).not.toContain(token);
 	});
 
+	it.each([
+		"If I have exactly 3 saved notes, open Calendar. Otherwise stay here. Check the live notes first and do not change any records.",
+		"Check my notes before I create a new note.",
+		"Check my notes; do not select anything.",
+		"Comprueba mis notas sin modificarlas.",
+	])(
+		"preserves the selected read across the HTTP boundary: %s",
+		async (text) => {
+			const token = "views-read-selection-token";
+			const server = await startAuthenticatedViewsServer(token, [
+				{
+					...NOTES_VIEW,
+					capabilities: [
+						{ id: "get-notes", description: "Read saved notes." },
+						{ id: "update-note", description: "Change a saved note." },
+						{ id: "create-note", description: "Create a saved note." },
+						{ id: "select-note", description: "Select a saved note." },
+					],
+				},
+			]);
+			process.env.ELIZA_PORT = String(server.port);
+			process.env.ELIZA_API_TOKEN = token;
+			const result = await createViewsAction({
+				hasOwnerAccess: async () => true,
+			}).handler(
+				{ agentId: "agent-1" } as never,
+				{
+					entityId: "user-1",
+					roomId: "room-1",
+					agentId: "agent-1",
+					content: { text },
+				} as never,
+				undefined,
+				{
+					action: "interact",
+					view: "notes",
+					capability: "get-notes",
+					params: {},
+				},
+			);
+			const posts = server.requests.filter(
+				(request) => request.method === "POST",
+			);
+			expect(posts).toHaveLength(1);
+			expect(posts[0]).toMatchObject({
+				pathname: "/api/views/notes/interact",
+				authorization: `Bearer ${token}`,
+			});
+			expect(JSON.parse(posts[0].body)).toMatchObject({
+				capability: "get-notes",
+			});
+			expect(result).toMatchObject({
+				success: true,
+				values: { capability: "get-notes" },
+			});
+		},
+	);
+
 	it("makes a successful view interaction the turn's single terminal receipt", async () => {
 		const token = "views-interaction-token";
 		const server = await startAuthenticatedViewsServer(token);
@@ -673,7 +732,9 @@ describe("authenticated view loopback requests", () => {
 		expect(callbackTexts).toEqual([]);
 		expect(result).toMatchObject({
 			success: false,
-			text: 'Cannot invoke capability "undeclared-capability" on view "tasks": the view catalog does not declare that capability.',
+			text: expect.stringContaining(
+				'Cannot invoke capability "undeclared-capability" on view "tasks": the view catalog does not declare that capability. No interaction was dispatched.',
+			),
 			// Marked internal so core's transcript-visibility resolver can spot
 			// an evaluator echo of the diagnostic.
 			transcriptVisibility: "internal",

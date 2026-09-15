@@ -15,6 +15,9 @@
  * AgentRuntime with call-counting providers; no database or model.
  */
 import { describe, expect, it } from "vitest";
+import { InMemoryDatabaseAdapter } from "../database/inMemoryAdapter";
+import { userPersonalityProvider } from "../features/advanced-capabilities/personality/providers/user-personality";
+import { PersonalityStore } from "../features/advanced-capabilities/personality/services/personality-store";
 import { AgentRuntime } from "../runtime";
 import { stage1ResponseStateProviderNames } from "../services/message";
 import type {
@@ -62,6 +65,72 @@ function countingProvider(name: string): {
 }
 
 describe("stage1ResponseStateProviderNames", () => {
+	it("composes the actual user's saved style before context selection without exposing another user's slot", async () => {
+		const runtime = new AgentRuntime({
+			character: { name: "preference-stage1" } as Character,
+			adapter: new InMemoryDatabaseAdapter(),
+		});
+		const store = (await PersonalityStore.start(runtime)) as PersonalityStore;
+		runtime.services.set(PersonalityStore.serviceType, [store]);
+		await store.addDirective({
+			userId: ENTITY_ID,
+			agentId: runtime.agentId,
+			actorId: ENTITY_ID,
+			directive: "Write headings in sentence case.",
+			source: "user",
+		});
+		runtime.registerProvider(userPersonalityProvider);
+		const message = makeMessage("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1", "hi");
+		const names = stage1ResponseStateProviderNames(runtime, message, ["USER"]);
+		const state = await runtime.composeState(message, names, true);
+		expect(state.text).toContain("Write headings in sentence case.");
+		const other = {
+			...message,
+			id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2" as UUID,
+			entityId: "22222222-2222-2222-2222-222222222223" as UUID,
+		};
+		const otherState = await runtime.composeState(
+			other,
+			stage1ResponseStateProviderNames(runtime, other, ["USER"]),
+			true,
+		);
+		expect(otherState.text).not.toContain("Write headings in sentence case.");
+		expect(
+			stage1ResponseStateProviderNames(runtime, message, ["GUEST"]),
+		).not.toContain(userPersonalityProvider.name);
+	});
+
+	it("does not let always-on opt-in bypass either declared role gate", () => {
+		const runtime = {
+			providers: [
+				{
+					name: "private-reference",
+					alwaysInResponseState: true,
+					private: true,
+				},
+				{
+					name: "admin-reference",
+					alwaysInResponseState: true,
+					roleGate: { minRole: "ADMIN" },
+				},
+				{
+					name: "owner-reference",
+					alwaysInResponseState: true,
+					roleGate: { minRole: "ADMIN" },
+					contextGate: { roleGate: { minRole: "OWNER" } },
+				},
+			],
+			getSetting: () => undefined,
+		} as unknown as IAgentRuntime;
+		const message = makeMessage("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1");
+		for (const role of ["MEMBER", "ADMIN", "OWNER"] as const) {
+			const names = stage1ResponseStateProviderNames(runtime, message, [role]);
+			expect(names).not.toContain("private-reference");
+			expect(names.includes("admin-reference")).toBe(role !== "MEMBER");
+			expect(names.includes("owner-reference")).toBe(role === "OWNER");
+		}
+	});
+
 	it("keeps the core response providers complete on an unexcluded turn", () => {
 		const runtime = {
 			providers: [],

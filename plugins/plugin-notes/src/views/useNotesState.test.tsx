@@ -138,6 +138,36 @@ describe("useNotesState", () => {
     expect((result.current.error as ApiError).data).toEqual(capabilityData);
   });
 
+  it("retains cached data and its sync error until a background retry succeeds", async () => {
+    const cached = snapshot(1);
+    transport.fetchState.mockResolvedValueOnce(cached);
+    const { result } = renderHook(() => useNotesState());
+    await waitFor(() => expect(result.current.snapshot).toBe(cached));
+
+    const offline = new Error("Local agent is offline");
+    transport.fetchState.mockRejectedValueOnce(offline);
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.error).toBe(offline);
+    const retry = deferred<NotesSnapshot>();
+    transport.fetchState.mockReturnValueOnce(retry.promise);
+    act(() => {
+      void result.current.refresh();
+    });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.snapshot).toBe(cached);
+    expect(result.current.error).toBe(offline);
+
+    await act(async () => {
+      retry.resolve(snapshot(2));
+      await retry.promise;
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.snapshot?.revision).toBe(2);
+    expect(result.current.error).toBeNull();
+  });
+
   it("recovers stale state from the client's websocket reconnect event", async () => {
     transport.fetchState.mockResolvedValueOnce(snapshot(1));
     const { result } = renderHook(() => useNotesState());

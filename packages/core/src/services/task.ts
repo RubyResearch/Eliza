@@ -903,9 +903,10 @@ export class TaskService extends Service {
 					const neverPause =
 						rawMax === Infinity || (typeof rawMax === "number" && rawMax <= 0);
 					const maxFailures = neverPause ? Infinity : (rawMax ?? 5);
+					const failedAt = this.clock.now();
 					const newMeta: TaskMetadata & Record<string, unknown> = {
 						...(meta ?? {}),
-						updatedAt: this.clock.now(),
+						updatedAt: failedAt,
 						failureCount,
 						lastError: error instanceof Error ? error.message : String(error),
 					};
@@ -932,6 +933,18 @@ export class TaskService extends Service {
 							baseInterval * 2 ** failureCount,
 							300_000,
 						);
+						if (
+							error instanceof ElizaError &&
+							typeof error.retryAt === "number" &&
+							Number.isFinite(error.retryAt)
+						) {
+							// Provider deadlines are floors, not capped exponential backoff.
+							// Compensate for the scheduler's optional early-run tolerance.
+							newMeta.updateInterval = Math.max(
+								newMeta.updateInterval,
+								error.retryAt - failedAt + (meta?.notBefore ?? 0),
+							);
+						}
 					}
 					await this.runtime.updateTask(task.id, { metadata: newMeta });
 				} else if (task.id) {

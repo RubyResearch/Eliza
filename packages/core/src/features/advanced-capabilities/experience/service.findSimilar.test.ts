@@ -10,7 +10,7 @@ import { createMockRuntime } from "../../../testing/mock-runtime";
 import type { Memory } from "../../../types/memory.ts";
 import type { UUID } from "../../../types/primitives.ts";
 import type { IAgentRuntime } from "../../../types/runtime.ts";
-import { ExperienceType, OutcomeType } from "./types.ts";
+import { type Experience, ExperienceType, OutcomeType } from "./types.ts";
 
 // Force the shared recall-query embedder to fail open (error → null) so we can
 // assert findSimilarExperiences falls back to the recency/quality sort instead
@@ -29,7 +29,11 @@ const AGENT_ID = "00000000-0000-0000-0000-0000000000aa" as UUID;
 const EXP_OLD = "00000000-0000-0000-0000-00000000e001" as UUID;
 const EXP_NEW = "00000000-0000-0000-0000-00000000e002" as UUID;
 
-function experienceMemory(id: UUID, createdAt: number): Memory {
+function experienceMemory(
+	id: UUID,
+	createdAt: number,
+	overrides: Partial<Experience> = {},
+): Memory {
 	return {
 		id,
 		entityId: AGENT_ID,
@@ -57,6 +61,7 @@ function experienceMemory(id: UUID, createdAt: number): Memory {
 				updatedAt: createdAt,
 				accessCount: 0,
 				embedding: [0.1, 0.2, 0.3],
+				...overrides,
 			},
 		},
 	} as unknown as Memory;
@@ -83,6 +88,37 @@ function makeRuntime(): {
 describe("ExperienceService.findSimilarExperiences — shared recall embed fail-open", () => {
 	afterEach(() => {
 		embedRecallQuery.mockReset();
+	});
+
+	test("stronger similarity precedes quality while all candidates remain retrievable", async () => {
+		embedRecallQuery.mockResolvedValue([1, 0, 0]);
+		const memories = [
+			experienceMemory(EXP_OLD, 1_000, {
+				embedding: [0.5, Math.sqrt(0.75), 0],
+				confidence: 0.4,
+				importance: 0.4,
+			}),
+			experienceMemory(EXP_NEW, Date.now(), {
+				embedding: [0.4, Math.sqrt(0.84), 0],
+				confidence: 0.99,
+				importance: 0.99,
+			}),
+		];
+		const { runtime, useModel } = makeRuntime();
+		vi.mocked(runtime.getMemories).mockResolvedValue(memories);
+		const service = await ExperienceService.start(runtime);
+		expect(
+			(await service.findSimilarExperiences("matching situation")).map(
+				(e) => e.id,
+			),
+		).toEqual([EXP_OLD, EXP_NEW]);
+		expect(
+			(await service.findSimilarExperiences("matching situation", 1)).map(
+				(e) => e.id,
+			),
+		).toEqual([EXP_OLD]);
+		expect(useModel).not.toHaveBeenCalled();
+		await service.stop();
 	});
 
 	test("a null recall embed (timeout/error) falls open to the recency/quality sort, never calling useModel directly", async () => {

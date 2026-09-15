@@ -21,8 +21,10 @@ import {
   MemoryType as CoreMemoryType,
   ElizaError,
   factClaimsEquivalent,
+  getActionReplyOwner,
   getRelatedEntityIds,
   inflectionTermKeys,
+  isActiveMemoryEvidence,
   logger,
   ModelType,
   readStoredFactKeywords,
@@ -39,6 +41,7 @@ type MemoryOp = (typeof MEMORY_OPS)[number];
 
 const MEMORY_TYPES = ["messages", "memories", "facts", "documents"] as const;
 type MemoryType = (typeof MEMORY_TYPES)[number];
+type MemoryQueryMode = "keywords" | "literal";
 const FORGET_BY_QUERY_TABLES: readonly MemoryType[] = ["facts", "memories"];
 
 const UUID_SCHEMA_PATTERN =
@@ -53,8 +56,10 @@ interface MemoryParams {
   tags?: string[];
   type?: MemoryType;
   entityId?: string;
+  author?: "requester" | "assistant" | "any";
   roomId?: string;
   query?: string;
+  queryMode?: MemoryQueryMode;
   limit?: number;
   offset?: number;
   snapshot?: string;
@@ -63,6 +68,8 @@ interface MemoryParams {
 }
 
 interface MemoryListItem {
+  /** Historical/review evidence remains searchable but is never presented as an active claim. */
+  evidenceStatus?: "inactive";
   id: string;
   type: MemoryType;
   text: string;
@@ -128,6 +135,27 @@ const SEARCH_QUERY_STOP_WORDS = new Set([
   "user",
   "users",
   "named",
+  // Imperatives and memory verbs the planner copies from the user's sentence
+  // ("remember that my favorite tea is yerba" → forget-by-query, live
+  // 2026-09-10): they never appear in the stored fact, and delete needs every
+  // remaining term to match, so one such word sank an otherwise exact hit.
+  "remember",
+  "remembered",
+  "forget",
+  "forgot",
+  "recall",
+  "note",
+  "noted",
+  "save",
+  "saved",
+  "store",
+  "stored",
+  "please",
+  "know",
+  "knew",
+  "said",
+  "told",
+  "mentioned",
   "called",
 ]);
 
@@ -139,7 +167,7 @@ function fail(
   return { success: false, text, data: { error, ...context } };
 }
 
-type UuidParamName = "entityId" | "roomId" | "memoryId";
+type UuidParamName = "entityId" | "roomId" | "memoryId" | "author";
 
 type ParsedUuidParam =
   | { ok: true; id: UUID | undefined }
@@ -251,6 +279,9 @@ function toListItem(memory: Memory, type: MemoryType): MemoryListItem {
     id: memory.id ?? "",
     type,
     text: searchableMemoryText(memory),
+    ...(!isActiveMemoryEvidence(memory)
+      ? { evidenceStatus: "inactive" as const }
+      : {}),
     entityId: memory.entityId,
     roomId: memory.roomId,
     agentId: memory.agentId ?? null,
@@ -647,6 +678,7 @@ function memoryPageSnapshot(items: readonly MemoryListItem[]): string {
       item.roomId,
       item.agentId,
       item.createdAt,
+      item.evidenceStatus ?? null,
     ]);
     hash.update(String(Buffer.byteLength(canonical)));
     hash.update(":");
@@ -787,6 +819,7 @@ async function collectCandidates(
     entityId?: UUID;
     roomId?: UUID;
     query?: string;
+    queryMode?: MemoryQueryMode;
   },
 ): Promise<CandidateScan> {
   const tables: readonly MemoryType[] =
@@ -818,12 +851,15 @@ async function collectCandidates(
   if (scope.query) {
     const query = scope.query;
     filtered = filtered.filter((c) => {
-      return scoreText(searchableMemoryText(c.memory), query) > 0;
+      const text = searchableMemoryText(c.memory);
+      return scope.queryMode === "literal"
+        ? text.includes(query)
+        : scoreText(text, query) > 0;
     });
   }
 
   filtered.sort((a, b) => {
-    if (scope.query) {
+    if (scope.query && scope.queryMode !== "literal") {
       const leftText = searchableMemoryText(a.memory);
       const rightText = searchableMemoryText(b.memory);
       const relevance =
@@ -841,9 +877,11 @@ function describeSearchScope(scope: {
   entityId?: UUID;
   roomId?: UUID;
   query?: string;
+  queryMode?: MemoryQueryMode;
 }): string {
   const parts: string[] = [];
   if (scope.query) parts.push(`query="${scope.query}"`);
+  if (scope.queryMode === "literal") parts.push("queryMode=literal");
   if (scope.type) parts.push(`type=${scope.type}`);
   if (scope.entityId) parts.push(`entityId=${scope.entityId}`);
   if (scope.roomId) parts.push(`roomId=${scope.roomId}`);
@@ -857,10 +895,73 @@ function describeCompleteScan(scan: CandidateScan): string {
 
 async function doSearch(
   runtime: IAgentRuntime,
+  message: Memory,
   params: MemoryParams,
 ): Promise<ActionResult> {
+  if (
+    params.queryMode !== undefined &&
+    params.queryMode !== "keywords" &&
+    params.queryMode !== "literal"
+  ) {
+    return fail(
+      "queryMode must be keywords or literal.",
+      "MEMORY_INVALID_QUERY_MODE",
+    );
+  }
+  if (
+    params.queryMode === "literal" &&
+    (typeof params.query !== "string" || params.query.length === 0)
+  ) {
+    return fail(
+      "Literal search requires a nonempty query copied exactly from the requested text.",
+      "MEMORY_LITERAL_QUERY_REQUIRED",
+    );
+  }
+  const author = params.author === "any" ? undefined : params.author;
   const type =
-    params.type && MEMORY_TYPES.includes(params.type) ? params.type : undefined;
+    author !== undefined
+      ? "messages"
+      : params.type && MEMORY_TYPES.includes(params.type)
+        ? params.type
+        : undefined;
+  let authorId: UUID | undefined;
+  if (author !== undefined) {
+    if (author !== "requester" && author !== "assistant") {
+      return fail(
+        "author must be requester, assistant, or any.",
+        "MEMORY_INVALID_AUTHOR",
+      );
+    }
+    if (params.type !== undefined && params.type !== "messages") {
+      return fail(
+        "author applies only to messages.",
+        "MEMORY_INVALID_AUTHOR_SCOPE",
+      );
+    }
+    const resolved = parseUuidParam(
+      author === "requester" ? message.entityId : runtime.agentId,
+      "author",
+    );
+    if (!resolved.ok || !resolved.id) {
+      return fail(
+        "The requested author could not be resolved from this turn.",
+        "MEMORY_AUTHOR_UNAVAILABLE",
+      );
+    }
+    authorId = resolved.id;
+    if (params.entityId !== undefined) {
+      const explicit = parseUuidParam(params.entityId, "entityId");
+      if (
+        !explicit.ok ||
+        explicit.id?.toLowerCase() !== authorId.toLowerCase()
+      ) {
+        return fail(
+          "entityId conflicts with author. Use author alone for the current requester or assistant.",
+          "MEMORY_AUTHOR_CONFLICT",
+        );
+      }
+    }
+  }
   // Read-only salvage (matrix F16): a mangled planner-copied UUID is an
   // unusable *filter*, and failing the whole search over it turns a
   // recoverable turn into a failed one. Searching without the filter is a
@@ -880,7 +981,8 @@ async function doSearch(
       `ignored invalid roomId "${params.roomId?.trim()}" (searched all rooms)`,
     );
   }
-  const query = params.query?.trim();
+  const query =
+    params.queryMode === "literal" ? params.query : params.query?.trim();
   const limit = params.limit;
   const offset = params.offset ?? 0;
   const requestedSnapshot = params.snapshot?.trim();
@@ -906,9 +1008,10 @@ async function doSearch(
 
   const scope = {
     type,
-    entityId: entityParam.ok ? entityParam.id : undefined,
+    entityId: authorId ?? (entityParam.ok ? entityParam.id : undefined),
     roomId: roomParam.ok ? roomParam.id : undefined,
     query,
+    queryMode: params.queryMode,
   };
   const scan = await collectCandidates(runtime, scope);
 
@@ -919,13 +1022,28 @@ async function doSearch(
   const snapshot = memoryPageSnapshot(allItems);
   if (requestedSnapshot && requestedSnapshot !== snapshot) {
     return fail(
-      "The ordered memory matches changed after the previous page. Restart this search at offset 0.",
+      "The snapshot does not match this search's ordered results. The records or filters may have changed. Restart at offset 0 WITHOUT snapshot, keeping the intended query, author and other filters. Do not remove filters to reuse an old snapshot. retryParameters contains the fresh search arguments.",
       "MEMORY_PAGE_SNAPSHOT_CHANGED",
+      {
+        retryParameters: {
+          action: "search",
+          ...(type ? { type } : {}),
+          ...(params.author ? { author: params.author } : {}),
+          ...(entityParam.ok && entityParam.id
+            ? { entityId: entityParam.id }
+            : {}),
+          ...(scope.roomId ? { roomId: scope.roomId } : {}),
+          ...(query ? { query } : {}),
+          ...(params.queryMode === "literal" ? { queryMode: "literal" } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+          offset: 0,
+        },
+      },
     );
   }
   if (limit === undefined && totalMatches > MAX_MEMORY_PAGE_ITEMS) {
     return fail(
-      `The complete search has ${totalMatches} matches, which exceeds the maximum safe result size of ${MAX_MEMORY_PAGE_ITEMS} records. Retry with limit at most ${MAX_MEMORY_PAGE_ITEMS}.`,
+      `The complete search has ${totalMatches} matches, which exceeds the maximum safe result size of ${MAX_MEMORY_PAGE_ITEMS} records. Retry with limit at most ${MAX_MEMORY_PAGE_ITEMS}. If narrowing the query, author or other filters, start at offset 0 without snapshot; the snapshot below belongs only to the current filters.`,
       "MEMORY_SEARCH_REQUIRES_PAGINATION",
       {
         totalMatches,
@@ -941,16 +1059,40 @@ async function doSearch(
     limit !== undefined && offset + items.length < totalMatches
       ? offset + items.length
       : undefined;
-  // The text projection carries enough of each hit for model reasoning; the
-  // complete records remain machine data for state and trajectory consumers.
-  const lines = items.map(
-    (m) =>
-      `- [${m.type}] ${m.id} at ${new Date(m.createdAt).toISOString()}: ${toWellFormedUnicode(m.text)}`,
-  );
+  // The trusted planner consumes structured results, so keep source bodies in
+  // data once. Standalone/text-only callers retain their full text rendering.
+  // Keeping strings structured also lets the model boundary redact credentials
+  // before JSON escaping, without changing any stored source.
+  const plannerOwnsReply = getActionReplyOwner(message.id) === "planner";
+  const authorRole = (entityId: string | null): string => {
+    if (entityId === runtime.agentId) return "assistant";
+    return entityId !== null && entityId === message.entityId
+      ? "requester"
+      : "other speaker";
+  };
+  const records = plannerOwnsReply
+    ? items.map((m) => ({
+        ...m,
+        createdAtIso: new Date(m.createdAt).toISOString(),
+        ...(m.type === "messages"
+          ? {
+              authorRole: authorRole(m.entityId),
+            }
+          : {}),
+      }))
+    : items;
+  const lines = plannerOwnsReply
+    ? [
+        "Complete source records are in data.memories; text contains the original source wording. Records with evidenceStatus=inactive are historical evidence, not current facts.",
+      ]
+    : items.map(
+        (m) =>
+          `- [${m.type}${m.evidenceStatus === "inactive" ? "; INACTIVE source evidence: historical record, not a current fact" : ""}] ${m.id} at ${new Date(m.createdAt).toISOString()}${m.type === "messages" ? ` [author=${authorRole(m.entityId)}; entityId=${m.entityId}]` : ""}: ${toWellFormedUnicode(m.text)}`,
+      );
   const renderNote =
     limit === undefined
-      ? `Showing all ${lines.length} match(es) found in the complete scan`
-      : `Showing ${lines.length} match(es) at offset ${offset} of ${totalMatches} found in the complete scan`;
+      ? `Showing all ${items.length} match(es) found in the complete scan`
+      : `Showing ${items.length} match(es) at offset ${offset} of ${totalMatches} found in the complete scan`;
   const continuationNote =
     nextOffset === undefined
       ? []
@@ -966,12 +1108,17 @@ async function doSearch(
         ? [`Note: ${ignoredIdNotes.join("; ")}.`]
         : []),
       describeCompleteScan(scan),
+      ...(items.some((item) => item.type === "messages")
+        ? [
+            "Authorship matters: assistant replies are not original user statements. For the current requester's original correction, use author=requester and verify their message; do not call an assistant restatement the original correction.",
+          ]
+        : []),
       ...lines,
       ...continuationNote,
     ].join("\n"),
     values: {
       count: items.length,
-      rendered: lines.length,
+      rendered: items.length,
       totalMatches,
       scanned: scan.scanned,
       offset,
@@ -981,7 +1128,7 @@ async function doSearch(
     data: {
       actionName: "MEMORY",
       op: "search" as const,
-      memories: items,
+      memories: records,
       totalMatches,
       scanned: scan.scanned,
       offset,
@@ -992,7 +1139,7 @@ async function doSearch(
       actionName: "MEMORY",
       op: "search" as const,
       totalMatches,
-      rendered: lines.length,
+      rendered: items.length,
       scanned: scan.scanned,
       offset,
       nextOffset: nextOffset ?? null,
@@ -1465,7 +1612,7 @@ export const memoryAction: Action = {
   descriptionCompressed:
     "manage agent memory create search update delete; update/delete by memoryId or query; update/delete require confirm:true",
   routingHint:
-    "NOTES ARE NOT MEMORY: 'make a note', 'note to self', 'jot this down', 'what notes do i have' -> the NOTES action, which writes the durable note store the user sees in the Notes view. MEMORY is the agent's own recall of the conversation. store/search/edit the agent's OWN memory records about the user or conversation -> MEMORY. This includes recalling or COUNTING what was said earlier than the messages shown in context ('how many times have I mentioned X', 'have I ever told you about X', 'what did we say about X last week') — the conversation block in context is only the most recent turns, so answer those from op:search over the stored record, never from that block alone. Do NOT use for open-web lookups -> WEB_SEARCH, for searching connected external channels such as email or another platform's inbox -> MESSAGE (action=search), or for the skill catalog -> SKILL",
+    "NOTES ARE NOT MEMORY: 'make a note', 'note to self', 'jot this down', 'what notes do i have' -> NOTES. MEMORY manages the agent's stored knowledge: create/search/update/delete. Use supplied conversation and fact evidence directly when it answers the question, applying later corrections; referring to an earlier turn alone does not require a search. Use op:search for evidence absent from supplied context, other conversations, or exact stored-message counts (rendered dialogue may filter internal rows and duplicates). Search type=facts for saved facts/preferences; type=messages for conversation history. Do NOT use for open-web lookups -> WEB_SEARCH, connected external inboxes -> MESSAGE, or skill catalog -> SKILL",
   validate: async () => true,
   handler: async (
     runtime: IAgentRuntime,
@@ -1494,7 +1641,7 @@ export const memoryAction: Action = {
         case "create":
           return await doCreate(runtime, message, params);
         case "search":
-          return await doSearch(runtime, params);
+          return await doSearch(runtime, message, params);
         case "update":
           return await doUpdate(runtime, message, params);
         case "delete":
@@ -1551,6 +1698,17 @@ export const memoryAction: Action = {
       required: false,
       schema: { type: "string" as const, enum: [...MEMORY_TYPES] },
     },
+    {
+      name: "author",
+      description:
+        "search: choose requester for the current user's original statements or corrections, assistant for your own replies, or any for no author restriction. Requester/assistant resolve the author from this turn and imply type=messages. Use any for other record types or an explicit other entityId. Existing access, type, entityId, and roomId filters still apply.",
+      required: false,
+      requiredForSubactions: ["search"],
+      schema: {
+        type: "string" as const,
+        enum: ["requester", "assistant", "any"],
+      },
+    },
     // entityId/roomId carry no schema `pattern` on purpose (matrix F16): a
     // planner-copied UUID arrives mangled often enough (live: a dropped hex
     // char in the roomId first segment, tj-b0c123243cb39e) that the
@@ -1560,7 +1718,7 @@ export const memoryAction: Action = {
     {
       name: "entityId",
       description:
-        "search: optional entity UUID from a previous result. Omit it when no exact UUID is known.",
+        "search: optional exact author/entity UUID for another known speaker. Prefer author=requester for my original statements and author=assistant for your replies; do not copy your own UUID to search the requester. Omit when no exact UUID is known.",
       required: false,
       schema: { type: "string" as const },
     },
@@ -1574,9 +1732,17 @@ export const memoryAction: Action = {
     {
       name: "query",
       description:
-        'search: filter text. update/delete: the memory to change or forget, quoted in the user\'s own words from this message (never paraphrase: "like my coffee with oat milk", not "prefer oat milk"). Either a valid memoryId or a nonempty query is required. memoryId alone selects one exact record and takes precedence when both are supplied.',
+        'search: ranked keyword matching, not an all-words filter. Prefer a distinctive subject or name; combining unrelated topics broadens matches and can require pagination. update/delete: the memory to change or forget, quoted in the user\'s own words from this message (never paraphrase: "like my coffee with oat milk", not "prefer oat milk"). Either a valid memoryId or a nonempty query is required. memoryId alone selects one exact record and takes precedence when both are supplied.',
       required: false,
       schema: { type: "string" as const },
+    },
+    {
+      name: "queryMode",
+      description:
+        "search: literal finds a case-sensitive substring of source text, preserving punctuation, whitespace and Unicode. Use literal for an exact quotation; copy only its text into query, without adding quote delimiters. keywords (default) ranks related terms for conceptual recall. Literal searches require a nonempty query and still honor every other filter and pagination.",
+      required: false,
+      subactions: ["search"],
+      schema: { type: "string" as const, enum: ["keywords", "literal"] },
     },
     {
       name: "limit",
@@ -1598,7 +1764,7 @@ export const memoryAction: Action = {
     {
       name: "snapshot",
       description:
-        "search: continuation fingerprint returned by the previous page. Required with a positive offset so changed results reject instead of shifting pages.",
+        "search: continuation fingerprint for the same filters and ordered results. Required with a positive offset. Omit when starting or restarting at offset 0, including after changing query, author, type or roomId.",
       required: false,
       schema: { type: "string" as const, pattern: "^[0-9a-f]{64}$" },
     },

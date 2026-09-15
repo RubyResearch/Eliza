@@ -22,6 +22,7 @@ package ai.eliza.plugins.browsersurface
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Region
@@ -31,6 +32,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
 import android.widget.FrameLayout
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
@@ -42,6 +46,7 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.security.MessageDigest
 import java.util.UUID
+import org.json.JSONObject
 
 internal data class NativeOwnerIdentity(
     val owner: String,
@@ -122,6 +127,8 @@ class ElizaSurfaceManagerPlugin : Plugin() {
         val profileName: String?,
         var foregrounded: Boolean,
         var disposed: Boolean = false,
+        var pageRevision: Long = 0,
+        var pageError: String? = null,
         var x: Double = 0.0,
         var y: Double = 0.0,
         var outerClip: HostOuterClip? = null,
@@ -133,6 +140,9 @@ class ElizaSurfaceManagerPlugin : Plugin() {
     private val retiredProfiles = HashSet<String>()
     private val profileProcessNonce = UUID.randomUUID().toString()
     private var profileSerial = 0L
+    private val pageReader by lazy {
+        context.assets.open("read-page.js").bufferedReader().use { it.readText() }
+    }
 
     override fun load() {
         super.load()
@@ -270,6 +280,32 @@ class ElizaSurfaceManagerPlugin : Plugin() {
 
             val container = OccludingSurfaceLayout(activity)
             val webView = WebView(activity)
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                    surfaces.values.firstOrNull { it.webView === view }?.let {
+                        it.pageRevision += 1
+                        it.pageError = null
+                    }
+                }
+
+                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                    if (request.isForMainFrame) {
+                        surfaces.values.firstOrNull { it.webView === view }?.pageError = error.description.toString()
+                    }
+                }
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    val surface = surfaces[id] ?: return
+                    if (surface.webView !== view || surface.disposed || view.url != url) return
+                    if (!activeOwners.isActive(NativeOwnerIdentity(surface.owner, surface.session, surface.epoch))) return
+                    notifyListeners("navigationChanged", JSObject().apply {
+                        put("id", id)
+                        put("owner", surface.owner)
+                        put("session", surface.session)
+                        put("epoch", surface.epoch)
+                    })
+                }
+            }
             webView.settings.javaScriptEnabled = true
             webView.settings.domStorageEnabled = true
             webView.settings.databaseEnabled = true
@@ -478,6 +514,74 @@ class ElizaSurfaceManagerPlugin : Plugin() {
                 ?: return@runOnUiThread
             surface.webView.reload()
             call.resolve()
+        }
+    }
+
+    @PluginMethod
+    fun goBack(call: PluginCall) {
+        val id = call.getString("id") ?: run {
+            call.reject("goBack requires an id")
+            return
+        }
+        activity.runOnUiThread {
+            val identity = requireActiveIdentity(call, "goBack") ?: return@runOnUiThread
+            val surface = ownedSurface(call, id, identity, "goBack") ?: return@runOnUiThread
+            if (surface.webView.canGoBack()) surface.webView.goBack()
+            call.resolve()
+        }
+    }
+
+    @PluginMethod
+    fun readPage(call: PluginCall) {
+        val id = call.getString("id") ?: run {
+            call.reject("readPage requires an id")
+            return
+        }
+        val selector = call.getString("selector") ?: "body"
+        if (selector.isBlank() || selector.length > 2048) {
+            call.reject("readPage requires a nonempty selector of at most 2048 characters")
+            return
+        }
+        activity.runOnUiThread {
+            val identity = requireActiveIdentity(call, "readPage") ?: return@runOnUiThread
+            val surface = ownedSurface(call, id, identity, "readPage") ?: return@runOnUiThread
+            if (!surface.foregrounded || surface.webView.progress < 100 || surface.pageError != null) {
+                call.reject(surface.pageError ?: "The native page is hidden or still loading")
+                return@runOnUiThread
+            }
+            val revision = surface.pageRevision
+            val url = surface.webView.url
+            var settled = false
+            val timeout = Runnable {
+                if (!settled) {
+                    settled = true
+                    call.reject("Native page read timed out")
+                }
+            }
+            surface.webView.postDelayed(timeout, 5000)
+            try {
+                surface.webView.evaluateJavascript("($pageReader)(${JSONObject.quote(selector)})") { raw ->
+                    if (settled) return@evaluateJavascript
+                    settled = true
+                    surface.webView.removeCallbacks(timeout)
+                    if (!activeOwners.isActive(identity) || surfaces[id] !== surface || surface.disposed ||
+                        !surface.foregrounded || surface.pageRevision != revision || surface.webView.url != url) {
+                        call.reject("Native page changed while reading; discard this result")
+                        return@evaluateJavascript
+                    }
+                    try {
+                        val result = JSObject(raw)
+                        if (result.has("error")) call.reject(result.getString("error"))
+                        else call.resolve(result)
+                    } catch (error: Exception) {
+                        call.reject("Native page returned an invalid read result", error)
+                    }
+                }
+            } catch (error: Exception) {
+                settled = true
+                surface.webView.removeCallbacks(timeout)
+                call.reject("Native page read failed", error)
+            }
         }
     }
 

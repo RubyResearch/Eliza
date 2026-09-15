@@ -408,6 +408,71 @@ describe("view bundle import guard", () => {
     ).toThrow("mismatched relative specifier");
   });
 
+  test("accepts optional named importer scope arguments without accepting required arguments", () => {
+    const loader = (parameters: string) => `
+      async function importUiRootCompat(${parameters}) { return {}; }
+      const HOST_EXTERNAL_IMPORTERS = { "@elizaos/ui": importUiRootCompat };
+      function resolveHostExternal(specifier) { return HOST_EXTERNAL_IMPORTERS[specifier]; }
+      function importHostExternalForScope(specifier, scope) {
+        return resolveHostExternal(specifier)(scope);
+      }
+      export const hostImport = (specifier) => importHostExternalForScope(specifier, null);
+    `;
+    for (const parameters of ["", "scope = null", "scope?: unknown"]) {
+      expect(hostExternalSpecifiersFromSources(loader(parameters), [])).toEqual(
+        new Set(["@elizaos/ui"]),
+      );
+    }
+    for (const parameters of [
+      "scope",
+      "scope: unknown",
+      "scope = null, required: unknown",
+      "...scopes: unknown[]",
+      "{ scope }?: { scope?: unknown }",
+      "[scope]?: unknown[]",
+      "{ scope } = {}",
+      "[scope] = []",
+    ]) {
+      expect(() =>
+        hostExternalSpecifiersFromSources(loader(parameters), []),
+      ).toThrow("expected callable importer");
+    }
+    expect(() =>
+      hostExternalSpecifiersFromSources(
+        `
+      const HOST_EXTERNAL_IMPORTERS = { react: (scope = null) => import("react") };
+      export function hostImport(specifier) { return HOST_EXTERNAL_IMPORTERS[specifier](); }
+    `,
+        [],
+      ),
+    ).toThrow("may not require arguments");
+  });
+
+  test("requires scoped importer lookup to be called, not hidden in an unused closure", () => {
+    const loader = (body: string) => `
+      const HOST_EXTERNAL_IMPORTERS = { react: () => import("react") };
+      function importHostExternalForScope(specifier, scope) {
+        return HOST_EXTERNAL_IMPORTERS[specifier](scope);
+      }
+      export function hostImport(specifier) { ${body} }
+    `;
+    expect(
+      hostExternalSpecifiersFromSources(
+        loader("return importHostExternalForScope(specifier, null);"),
+        [],
+      ),
+    ).toEqual(new Set(["react"]));
+    for (const body of [
+      "return () => importHostExternalForScope(specifier, null);",
+      "const unused = () => importHostExternalForScope(specifier, null); return {};",
+      "const importHostExternalForScope = () => ({}); return importHostExternalForScope(specifier, null);",
+    ]) {
+      expect(() => hostExternalSpecifiersFromSources(loader(body), [])).toThrow(
+        "not consumed by the exported hostImport call path",
+      );
+    }
+  });
+
   test("rejects shadowed, non-callable, dead-branch, and mismatched registrations", () => {
     const loader = `
       const HOST_EXTERNAL_IMPORTERS = { react: () => import("react") };

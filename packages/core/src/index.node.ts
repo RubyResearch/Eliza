@@ -260,6 +260,7 @@ export {
 	normalizeActionName,
 	type RuntimeActionLike,
 } from "./runtime/action-catalog";
+export { actionGateRejection } from "./runtime/action-gate";
 export { warnOnUnmatchedActionRolePolicyKeys } from "./runtime/action-role-policy";
 export * from "./runtime/builtin-field-evaluators";
 export {
@@ -503,6 +504,7 @@ export * from "./utils/deterministic";
 // Export browser-compatible utilities
 export * from "./utils/environment";
 export { getEnv } from "./utils/environment";
+export * from "./utils/extraction-evidence";
 export { formatError } from "./utils/format-error";
 export * from "./utils/html-raw-text";
 /** Single-lane local inference scheduling: interactive-over-background gate + device-class background budgets (#11914). */
@@ -541,3 +543,8 @@ export * from "./validation";
 // Node-specific exports
 export const isBrowser = false;
 export const isNode = true;
+
+export {
+	isPermanentQuotaError,
+	providerRetryAfterMs,
+} from "./utils/model-retry";

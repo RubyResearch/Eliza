@@ -4,10 +4,109 @@ import { logger } from "../../../logger.ts";
 import { createMockRuntime } from "../../../testing/mock-runtime.ts";
 import type { UUID } from "../../../types/primitives.ts";
 import type { IAgentRuntime } from "../../../types/runtime.ts";
+import { LongTermMemoryCategory } from "../types.ts";
 import { MemoryService } from "./memory-service.ts";
 
 const ENTITY_ID = "00000000-0000-0000-0000-0000000000e1" as UUID;
 const ROOM_ID = "00000000-0000-0000-0000-0000000000f1" as UUID;
+
+describe("MemoryService incremental storage capability", () => {
+	it("hides retired derived memories from retrieval while preserving full audit reads and explicit memories", async () => {
+		const base = {
+			agentId: ENTITY_ID,
+			entityId: ENTITY_ID,
+			category: LongTermMemoryCategory.SEMANTIC,
+			createdAt: new Date(0),
+			updatedAt: new Date(0),
+		};
+		const records = [
+			{
+				...base,
+				id: ROOM_ID,
+				content: "old derived fact",
+				metadata: { extractionStatus: "source_invalidated" },
+			},
+			{
+				...base,
+				id: ENTITY_ID,
+				content: "explicit memory",
+				source: "MEMORY",
+				metadata: { extractionStatus: "source_invalidated" },
+			},
+		];
+		const storage = {
+			storeLongTermMemory: vi.fn(),
+			getLongTermMemories: vi.fn(async () => records),
+		};
+		const runtime = createMockRuntime({
+			hasService: (name) => name === "memoryStorage",
+			getService: () => null,
+			getServiceLoadPromise: vi.fn(
+				async () => storage,
+			) as unknown as IAgentRuntime["getServiceLoadPromise"],
+		});
+		const service = new MemoryService(runtime);
+		await service.initialize(runtime);
+		expect(
+			(await service.getLongTermMemories(ENTITY_ID, undefined, 1)).map(
+				(row) => row.content,
+			),
+		).toEqual(["explicit memory"]);
+		expect(
+			await service.getLongTermMemories(ENTITY_ID, undefined, undefined, {
+				includeInactive: true,
+			}),
+		).toHaveLength(2);
+	});
+
+	it("holds unsupported provider storage explicitly while keeping legacy writes available", async () => {
+		const storeLongTermMemory = vi.fn(async (input) => ({
+			...input,
+			id: ROOM_ID,
+		}));
+		const storage = { storeLongTermMemory };
+		const runtime = createMockRuntime({
+			hasService: vi.fn((name) => name === "memoryStorage"),
+			getService: vi.fn(() => null),
+			getServiceLoadPromise: vi.fn(
+				async () => storage,
+			) as unknown as IAgentRuntime["getServiceLoadPromise"],
+		});
+		const service = new MemoryService(runtime);
+		await service.initialize(runtime);
+		expect(service.supportsIncrementalExtraction).toBe(false);
+		const input = {
+			agentId: runtime.agentId,
+			entityId: ENTITY_ID,
+			category: LongTermMemoryCategory.SEMANTIC,
+			content: "A durable fact",
+		};
+		await expect(
+			service.storeLongTermMemory({ ...input, id: ROOM_ID }),
+		).rejects.toMatchObject({ code: "MEMORY_INCREMENTAL_STORAGE_UNSUPPORTED" });
+		expect(storeLongTermMemory).not.toHaveBeenCalled();
+		await expect(service.storeLongTermMemory(input)).resolves.toMatchObject({
+			content: input.content,
+		});
+	});
+
+	it("selects incremental extraction only after a replay-safe backend resolves", async () => {
+		const storage = {
+			supportsIdempotentWrites: true,
+			storeLongTermMemory: vi.fn(),
+		};
+		const runtime = createMockRuntime({
+			hasService: vi.fn((name) => name === "memoryStorage"),
+			getServiceLoadPromise: vi.fn(
+				async () => storage,
+			) as unknown as IAgentRuntime["getServiceLoadPromise"],
+		});
+		const service = new MemoryService(runtime);
+		expect(service.supportsIncrementalExtraction).toBe(false);
+		await service.initialize(runtime);
+		expect(service.supportsIncrementalExtraction).toBe(true);
+	});
+});
 
 describe("MemoryService extraction checkpoints", () => {
 	it("treats a missing checkpoint as the initial zero value", async () => {
@@ -52,6 +151,23 @@ describe("MemoryService extraction checkpoints", () => {
 			service.getLastExtractionCheckpoint(ENTITY_ID, ROOM_ID),
 		).resolves.toBe(7);
 		expect(getCache).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects false checkpoint acknowledgements without updating the local cache", async () => {
+		const service = new MemoryService(
+			createMockRuntime({
+				getCache: vi.fn(async () => 7),
+				setCache: vi.fn(async () => false),
+			}),
+		);
+		await expect(
+			service.setLastExtractionCheckpoint(ENTITY_ID, ROOM_ID, 42),
+		).rejects.toMatchObject({
+			code: "MEMORY_EXTRACTION_CHECKPOINT_FAILED",
+		});
+		await expect(
+			service.getLastExtractionCheckpoint(ENTITY_ID, ROOM_ID),
+		).resolves.toBe(7);
 	});
 
 	it("does not let an older cache read replace a concurrent checkpoint write", async () => {

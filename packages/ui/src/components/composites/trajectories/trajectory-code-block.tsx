@@ -10,6 +10,7 @@ import { CodeBlock } from "../../ui/code-block";
 import { PagePanel } from "../page-panel";
 
 export interface TrajectoryCodeBlockProps {
+  compact?: boolean;
   collapseLabel: React.ReactNode;
   content: string;
   copyLabel: React.ReactNode;
@@ -21,6 +22,7 @@ export interface TrajectoryCodeBlockProps {
 }
 
 export function TrajectoryCodeBlock({
+  compact = false,
   collapseLabel,
   content,
   copyLabel,
@@ -37,6 +39,43 @@ export function TrajectoryCodeBlock({
   const displayContent = shouldTruncate
     ? `${contentLines.slice(0, 20).join("\n")}\n...`
     : content;
+
+  if (compact && content.length === 0)
+    return (
+      <p role="status" className="py-3 text-sm text-muted">
+        Not recorded.
+      </p>
+    );
+  if (compact)
+    return (
+      <div className="developer-code-block min-w-0 space-y-2">
+        <p className="text-sm font-medium text-txt">{label}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+          <span>
+            {lines.toLocaleString()} {lines === 1 ? "line" : "lines"} ·{" "}
+            {content.length.toLocaleString()} characters
+          </span>
+          <Button
+            variant="outline"
+            size="touch"
+            type="button"
+            onClick={() => onCopy(content)}
+            aria-label={`Copy ${typeof label === "string" ? label : "content"}`}
+          >
+            {copyLabel}
+          </Button>
+        </div>
+        <CodeBlock
+          value={content}
+          presentation="attachment"
+          role="region"
+          wrap
+          tabIndex={0}
+          aria-label={typeof label === "string" ? label : "Trajectory content"}
+          className="developer-raw-text max-h-[50dvh] break-words p-3"
+        />
+      </div>
+    );
 
   return (
     <PagePanel variant="inset" className="overflow-hidden">

@@ -249,6 +249,47 @@ describe("voice == text delivery parity through handleMessage", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it.each([
+		{ channel: ChannelType.DM, metadata: { uiView: "notes" } },
+		{
+			channel: ChannelType.VOICE_DM,
+			metadata: { clientTransport: "realtime_voice" },
+		},
+	])(
+		"keeps model-selected app tools focused on $channel without a voice view snapshot",
+		async ({ channel, metadata }) => {
+			const useModel = makeUseModel({
+				responseHandler: [
+					stage1ToolRouted("", ["VIEWS"]),
+					finishDecision("Home is open."),
+				],
+				actionPlanner: [plannerToolCall("VIEWS")],
+			});
+			const runtime = makePipelineRuntime(
+				useModel,
+				[makeAction("VIEWS"), makeAction("UNRELATED")],
+				channel,
+			);
+			const message = makeMessage(channel, "Go home.");
+			message.content.source = "client_chat";
+			message.content.metadata = metadata;
+			await new DefaultMessageService().handleMessage(
+				runtime,
+				message,
+				async () => [],
+			);
+			const plannerCalls = vi
+				.mocked(useModel)
+				.mock.calls.filter(([type]) => type === ModelType.ACTION_PLANNER);
+			expect(plannerCalls.length).toBeGreaterThan(0);
+			for (const [, params] of plannerCalls) {
+				const tools = JSON.stringify(params.tools);
+				expect(tools).toContain('"VIEWS"');
+				expect(tools).not.toContain('"UNRELATED"');
+			}
+		},
+	);
+
 	it("a synchronous tool-routed turn delivers the same bubbles on VOICE_DM and DM (no pre-planner filler)", async () => {
 		const base = {
 			utterance: "what did we decide about the standup time?",

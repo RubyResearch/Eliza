@@ -29,6 +29,18 @@ function message(index: number): Memory {
 }
 
 describe("conversation message service", () => {
+  it("uses the runtime mutation boundary ahead of a direct legacy adapter delete", async () => {
+    const ids = [message(1).id as UUID, message(2).id as UUID];
+    const deleteMemories = vi.fn(async () => undefined);
+    const deleteManyMemories = vi.fn(async () => undefined);
+    await deleteConversationMemories(
+      runtime({ deleteMemories, deleteManyMemories }),
+      ids,
+    );
+    expect(deleteMemories).toHaveBeenCalledWith(ids);
+    expect(deleteManyMemories).not.toHaveBeenCalled();
+  });
+
   it("uses the runtime bulk deletion contract", async () => {
     const deleteManyMemories = vi.fn(async () => undefined);
     const ids = ["00000000-0000-4000-8000-000000000002" as UUID];

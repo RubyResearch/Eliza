@@ -8,12 +8,13 @@
  * they must not silently activate an unrelated skill on a new standalone ask.
  *
  * Three tiers of injection:
- *   - No match:  1-line footer (~25 tokens)
+ *   - No match:  Short discovery notice
  *   - Moderate:  Every relevant skill with its complete description
- *   - Strong:    Complete instructions of the best match
+ *   - Strong, explicitly named: Complete instructions of the best match
  */
 
 import {
+  getUserMessageText,
   type IAgentRuntime,
   type Memory,
   type Provider,
@@ -110,6 +111,21 @@ const STOPWORDS = new Set([
   "want",
   "need",
   "please",
+  "open",
+  "close",
+  "show",
+  "create",
+  "delete",
+  "edit",
+  "read",
+  "write",
+  "list",
+  "add",
+  "update",
+  "remove",
+  "view",
+  "run",
+  "find",
 ]);
 
 // ── Tokenizer ────────────────────────────────────────────────────────────────
@@ -299,6 +315,16 @@ export function normalizeDescription(desc: string): string {
 const THRESHOLD_RELEVANT = 3;
 const THRESHOLD_HIGHLY_RELEVANT = 8;
 
+function explicitlyNamesSkill(text: string, skill: ScoredSkill): boolean {
+  return [skill.slug, skill.name].some((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`,
+      "iu",
+    ).test(text);
+  });
+}
+
 // ── Provider ─────────────────────────────────────────────────────────────────
 
 import type { AgentSkillsServiceLike } from "../types/agent-skills.ts";
@@ -350,15 +376,14 @@ export function createDynamicSkillProvider(): Provider {
         // of irrelevant instruction characters into every later planner call.
         // Conversational history is already rendered separately for the model;
         // this provider only owns retrieval of instructions for the present ask.
-        const messageText =
-          ((message.content as Record<string, unknown>)?.text as string) ?? "";
+        const messageText = getUserMessageText(message);
         const scored = scoreQuery(indexCache, messageText);
         const topMatch = scored[0];
 
         // Tier 0: No relevant match — 1-line footer only
         if (!topMatch || topMatch.score < THRESHOLD_RELEVANT) {
           return {
-            text: `Skills: ${skills.length} installed. Ask "what can you do?" or describe a task to activate relevant skills.`,
+            text: `Skills: ${skills.length} installed; SEARCH_SKILLS to discover.`,
             values: { skillMatchTier: "none" as never },
             data: { matchedSkills: [] },
           };
@@ -369,13 +394,20 @@ export function createDynamicSkillProvider(): Provider {
         const compactList = topMatches
           .map(
             (s) =>
-              `- **${s.name}** (${s.slug}): ${toWellFormedUnicode(s.description)}`,
+              `- ${s.name === s.slug ? s.slug : `${s.name} (${s.slug})`}: ${toWellFormedUnicode(s.description)}`,
           )
           .join("\n");
 
-        if (topMatch.score < THRESHOLD_HIGHLY_RELEVANT) {
+        // A shared word such as "notes" can rank Apple Notes highly while the
+        // user means the app's own Notes view. Search scores are candidates,
+        // not authority to load an external app's operating instructions.
+        if (
+          topMatch.score < THRESHOLD_HIGHLY_RELEVANT ||
+          !explicitlyNamesSkill(messageText, topMatch)
+        ) {
           return {
-            text: `## Relevant Skills\n\n${compactList}\n\n*Use USE_SKILL to invoke one.*`,
+            text: `## Skill search matches (not activated)\n\n${compactList}\n\nUSE_SKILL loads instructions if a match fits the actual target app and task.`,
+            discoveryText: `Skill candidates (not activated): ${topMatches.map((s) => (s.name === s.slug ? s.slug : `${s.name} (${s.slug})`)).join(", ")}. Read elizaDynamicSkills for descriptions; USE_SKILL loads the selected instructions.`,
             values: {
               skillMatchTier: "relevant" as never,
               topSkill: topMatch.slug as never,

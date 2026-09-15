@@ -23,6 +23,8 @@ import {
   type ModuleCacheTelemetryEvent,
 } from "../../cache-telemetry";
 import { APP_PAUSE_EVENT } from "../../events";
+import { DATABASE_VECTOR_VIEW } from "../../navigation/builtin-route-descriptors";
+
 import { Field } from "../../spatial/primitives";
 import {
   SurfaceRealmDeniedError,
@@ -463,6 +465,7 @@ describe("DynamicViewLoader", () => {
     sendWsMessage.mockClear();
     rawRequest.mockReset();
     cleanup();
+    setActiveSurfaceRealmScope(null);
     __resetDynamicViewLoaderCacheForTests();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -648,10 +651,321 @@ describe("DynamicViewLoader", () => {
     render(<DynamicViewLoader bundleUrl={bundleUrl} viewId="remote.panel" />);
 
     await screen.findByText("Remote capability panel loaded");
-    expect(importBundle).toHaveBeenCalledWith(bundleUrl);
+    expect(importBundle).toHaveBeenCalledWith(bundleUrl, expect.any(Function));
     expect(importBundle).not.toHaveBeenCalledWith(
       expect.stringContaining("/api/views/remote.panel/bundle.js"),
     );
+  });
+
+  it("rebinds current controls on scope rotation while old callbacks remain denied", async () => {
+    const makeScope = (navigate: (path: string) => void, granted = true) =>
+      new SurfaceRealmScope(
+        resolveSurfaceManifest({
+          surface: { capabilities: granted ? ["navigate"] : [] },
+        }),
+        "cloud",
+        window.localStorage,
+        navigate,
+      );
+    const firstNavigate = vi.fn();
+    const firstScope = makeScope(firstNavigate);
+    setActiveSurfaceRealmScope(firstScope);
+    const callbacks: Array<(path: string) => void> = [];
+    const cleanups: Array<ReturnType<typeof vi.fn>> = [];
+    const importBundle = vi.fn(async (_url, importHost) => {
+      const { navigateBrowserPath } = await importHost(
+        "@elizaos/ui/app-navigate-view",
+      );
+      const navigate = navigateBrowserPath as (path: string) => void;
+      callbacks.push(navigate);
+      const generation = callbacks.length;
+      const dispose = vi.fn();
+      cleanups.push(dispose);
+      return {
+        default: function CurrentControl() {
+          const [denied, setDenied] = useState(false);
+          return (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    navigate("/settings");
+                  } catch {
+                    setDenied(true);
+                  }
+                }}
+              >
+                Open settings {generation}
+              </button>
+              {denied ? <p role="alert">Navigation denied</p> : null}
+            </>
+          );
+        },
+        cleanup: dispose,
+      };
+    });
+    window.__ELIZA_DYNAMIC_VIEW_BUNDLE_IMPORT__ = importBundle;
+    const { rerender } = render(
+      <DynamicViewLoader
+        bundleUrl="/api/views/cloud/bundle.js"
+        viewId="cloud"
+        surface={{ capabilities: ["navigate"] }}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open settings 1" }),
+    );
+    expect(firstNavigate).toHaveBeenCalledWith("/settings");
+
+    act(() => setActiveSurfaceRealmScope(firstScope));
+    rerender(
+      <DynamicViewLoader
+        bundleUrl="/api/views/cloud/bundle.js"
+        viewId="cloud"
+        surface={{ capabilities: ["navigate"] }}
+      />,
+    );
+    expect(importBundle).toHaveBeenCalledTimes(1);
+    const nextNavigate = vi.fn();
+    act(() => setActiveSurfaceRealmScope(makeScope(nextNavigate)));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open settings 2" }),
+    );
+    expect(nextNavigate).toHaveBeenCalledWith("/settings");
+    expect(() => callbacks[0]("/stale")).toThrow(SurfaceRealmDeniedError);
+    await waitFor(() => expect(cleanups[0]).toHaveBeenCalledTimes(1));
+
+    act(() => setActiveSurfaceRealmScope(makeScope(nextNavigate, false)));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open settings 3" }),
+    );
+    expect(screen.getByRole("alert").textContent).toBe("Navigation denied");
+    expect(() => callbacks[1]("/stale")).toThrow(SurfaceRealmDeniedError);
+    expect(nextNavigate).toHaveBeenCalledTimes(1);
+    act(() => setActiveSurfaceRealmScope(makeScope(nextNavigate)));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open settings 4" }),
+    );
+    expect(nextNavigate).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not let a retired async import borrow the new scope or replace its view", async () => {
+    const makeScope = () =>
+      new SurfaceRealmScope(
+        resolveSurfaceManifest({ surface: { capabilities: ["navigate"] } }),
+        "cloud",
+        window.localStorage,
+        vi.fn(),
+      );
+    setActiveSurfaceRealmScope(makeScope());
+    let resume: (() => void) | undefined;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let oldImport:
+      | ((specifier: string) => Promise<Record<string, unknown>>)
+      | undefined;
+    let generation = 0;
+    window.__ELIZA_DYNAMIC_VIEW_BUNDLE_IMPORT__ = vi.fn(
+      async (_url, importHost) => {
+        const current = ++generation;
+        if (current === 1) {
+          oldImport = importHost;
+          await paused;
+        }
+        const module = await importHost("@elizaos/ui/app-navigate-view");
+        return {
+          default: () => (
+            <button
+              type="button"
+              onClick={() =>
+                (module.navigateBrowserPath as (path: string) => void)(
+                  "/settings",
+                )
+              }
+            >
+              Current {current}
+            </button>
+          ),
+        };
+      },
+    );
+    render(
+      <DynamicViewLoader
+        bundleUrl="/api/views/cloud/bundle.js"
+        viewId="cloud"
+      />,
+    );
+    await waitFor(() => expect(oldImport).toBeDefined());
+    act(() => setActiveSurfaceRealmScope(makeScope()));
+    await screen.findByRole("button", { name: "Current 2" });
+    await act(async () => {
+      resume?.();
+      await paused;
+    });
+    await expect(oldImport?.("@elizaos/ui/app-navigate-view")).rejects.toThrow(
+      SurfaceRealmDeniedError,
+    );
+    expect(screen.queryByRole("button", { name: "Current 1" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Current 2" })).toBeTruthy();
+  });
+
+  it("keeps a retained inactive view from borrowing the foreground scope and reloads on return", async () => {
+    const navigate = vi.fn();
+    const makeScope = (viewId: string) =>
+      new SurfaceRealmScope(
+        resolveSurfaceManifest({ surface: { capabilities: ["navigate"] } }),
+        viewId,
+        window.localStorage,
+        navigate,
+      );
+    setActiveSurfaceRealmScope(makeScope("cloud"));
+    const callbacks: Array<(path: string) => void> = [];
+    const importBundle = vi.fn(async (_url, importHost) => {
+      const module = await importHost("@elizaos/ui/app-navigate-view");
+      const callback = module.navigateBrowserPath as (path: string) => void;
+      callbacks.push(callback);
+      return {
+        default: () => (
+          <button type="button" onClick={() => callback("/settings")}>
+            Connect
+          </button>
+        ),
+      };
+    });
+    window.__ELIZA_DYNAMIC_VIEW_BUNDLE_IMPORT__ = importBundle;
+    render(
+      <DynamicViewLoader
+        bundleUrl="/api/views/cloud/bundle.js"
+        viewId="cloud"
+      />,
+    );
+    await screen.findByRole("button", { name: "Connect" });
+    act(() => setActiveSurfaceRealmScope(makeScope("another-view")));
+    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
+    expect(importBundle).toHaveBeenCalledTimes(1);
+    expect(() => callbacks[0]("/stale")).toThrow(SurfaceRealmDeniedError);
+    act(() => setActiveSurfaceRealmScope(makeScope("cloud")));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(importBundle).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith("/settings");
+    expect(() => callbacks[0]("/stale")).toThrow(SurfaceRealmDeniedError);
+  });
+
+  it("loads explicit layout members without adding grants and revokes removed children", async () => {
+    const navigate = vi.fn();
+    const makeScope = (members: readonly string[]) =>
+      new SurfaceRealmScope(
+        resolveSurfaceManifest({}),
+        "composed-owner",
+        window.localStorage,
+        navigate,
+        members,
+      );
+    const initialMembers = ["notes", "calendar"];
+    const firstScope = makeScope(initialMembers);
+    // The shell's caller-owned collection cannot mutate published authority.
+    initialMembers.push("unrelated");
+    setActiveSurfaceRealmScope(firstScope);
+    const callbacks: Array<(path: string) => void> = [];
+    const importBundle = vi.fn(async (url, importHost) => {
+      const module = await importHost("@elizaos/ui/app-navigate-view");
+      callbacks.push(module.navigateBrowserPath as (path: string) => void);
+      const label = url.includes("calendar") ? "Calendar" : "Notes";
+      return {
+        default: function PaneControl() {
+          const [count, setCount] = useState(0);
+          return (
+            <button type="button" onClick={() => setCount(count + 1)}>
+              {label} {count}
+            </button>
+          );
+        },
+      };
+    });
+    window.__ELIZA_DYNAMIC_VIEW_BUNDLE_IMPORT__ = importBundle;
+    render(
+      <>
+        <DynamicViewLoader
+          viewId="notes"
+          bundleUrl="/api/views/notes/bundle.js"
+        />
+        <DynamicViewLoader
+          viewId="calendar"
+          bundleUrl="/api/views/calendar/bundle.js"
+        />
+        <DynamicViewLoader
+          viewId="unrelated"
+          bundleUrl="/api/views/unrelated/bundle.js"
+        />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Notes 0" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Calendar 0" }));
+    expect(screen.getByRole("button", { name: "Notes 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Calendar 1" })).toBeTruthy();
+    expect(importBundle).toHaveBeenCalledTimes(2);
+    expect(() => callbacks[0]("/settings")).toThrow(/no "navigate" grant/);
+    expect(navigate).not.toHaveBeenCalled();
+
+    act(() => setActiveSurfaceRealmScope(makeScope(["notes"])));
+    await screen.findByRole("button", { name: "Notes 0" });
+    expect(screen.queryByRole("button", { name: /Calendar/ })).toBeNull();
+    expect(importBundle).toHaveBeenCalledTimes(3);
+    expect(() => callbacks[0]("/stale")).toThrow(/stale host external/);
+    expect(() => callbacks[1]("/stale")).toThrow(/stale host external/);
+
+    act(() => setActiveSurfaceRealmScope(makeScope(["notes", "calendar"])));
+    fireEvent.click(await screen.findByRole("button", { name: "Calendar 0" }));
+    expect(screen.getByRole("button", { name: "Calendar 1" })).toBeTruthy();
+    expect(importBundle).toHaveBeenCalledTimes(5);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("loads the explicitly declared Database vector child and retires it on navigation", async () => {
+    setActiveSurfaceRealmScope(
+      new SurfaceRealmScope(
+        resolveSurfaceManifest({}),
+        "database",
+        window.localStorage,
+        vi.fn(),
+        [DATABASE_VECTOR_VIEW.viewId],
+      ),
+    );
+    const importBundle = vi.fn(async () => ({
+      [DATABASE_VECTOR_VIEW.componentExport]: function VectorControl() {
+        const [selected, setSelected] = useState(false);
+        return (
+          <button type="button" onClick={() => setSelected(true)}>
+            {selected ? "Vector selected" : "Select vector"}
+          </button>
+        );
+      },
+    }));
+    window.__ELIZA_DYNAMIC_VIEW_BUNDLE_IMPORT__ = importBundle;
+    render(<DynamicViewLoader {...DATABASE_VECTOR_VIEW} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select vector" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Vector selected" }),
+    ).toBeTruthy();
+    act(() =>
+      setActiveSurfaceRealmScope(
+        new SurfaceRealmScope(
+          resolveSurfaceManifest({}),
+          "settings",
+          window.localStorage,
+          vi.fn(),
+        ),
+      ),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Vector selected" }),
+    ).toBeNull();
+    expect(importBundle).toHaveBeenCalledTimes(1);
   });
 
   it("renders sandboxed iframe views from frameUrl and does not import bundleUrl", () => {

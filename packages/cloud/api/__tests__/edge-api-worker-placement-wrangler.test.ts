@@ -1,23 +1,32 @@
-/** Pins caller-local placement for the mixed stateful edge/API Worker. */
+/**
+ * Validates the Worker deployment configuration through pinned Wrangler and
+ * prohibits inferred placement for the mixed API/Durable Object workload.
+ * Explicit region hints remain operator choices; this does not prove latency
+ * or remote region availability.
+ */
 
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { unstable_readConfig as readConfig } from "wrangler";
 
-type PlacementConfig = { placement?: { mode?: string } };
-type WorkerConfig = PlacementConfig & {
-  env?: { staging?: PlacementConfig; production?: PlacementConfig };
-};
+const workerConfig = fileURLToPath(
+  new URL("../wrangler.toml", import.meta.url),
+);
 
 describe("edge/API Worker placement", () => {
-  test("declares no Smart Placement in any environment", async () => {
-    const config = Bun.TOML.parse(
-      await Bun.file(new URL("../wrangler.toml", import.meta.url)).text(),
-    ) as WorkerConfig;
-    for (const [label, scope] of [
-      ["top level", config],
-      ["staging", config.env?.staging],
-      ["production", config.env?.production],
-    ] as const) {
-      expect(scope?.placement, label).toBeUndefined();
+  test("validates each deployment environment without inferred placement", () => {
+    for (const env of [undefined, "staging", "production"]) {
+      const config = readConfig(
+        { config: workerConfig, env },
+        { hideWarnings: true },
+      );
+      const placement = config.placement;
+      if (placement === undefined) continue;
+      expect(placement.mode, env ?? "top level").toBe("targeted");
+      expect(
+        placement.region?.trim().length,
+        env ?? "top level",
+      ).toBeGreaterThan(0);
     }
   });
 });

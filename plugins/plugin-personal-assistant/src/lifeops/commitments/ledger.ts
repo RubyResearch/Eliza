@@ -91,7 +91,17 @@ export const COMMITMENT_OBLIGATION_EVENT_KIND = "document.obligation.observed";
 
 /** Cheap deterministic prefilter: does the text contain a first-person commitment cue? */
 export function textHasCommitmentCue(text: string): boolean {
-  return COMMITMENT_RE.test(text);
+  for (const cue of text.matchAll(new RegExp(COMMITMENT_RE, "gi"))) {
+    // A requested affordance's purpose ("open Notes so I can see it") is
+    // not an owner promise. Other cues in the same source still qualify.
+    if (
+      cue[0].toLowerCase() === "i can" &&
+      /\bso(?:\s+that)?\s+$/i.test(text.slice(0, cue.index))
+    )
+      continue;
+    return true;
+  }
+  return false;
 }
 
 /** True when the text hedges ("maybe sometime") and must never become a ledger row. */
@@ -193,7 +203,7 @@ function firstCommitmentSentence(text: string): string | null {
   for (const part of text.split(/(?<=[.!?])\s+/)) {
     const sentence = normalizeText(part);
     if (!sentence) continue;
-    if (!COMMITMENT_RE.test(sentence)) continue;
+    if (!textHasCommitmentCue(sentence)) continue;
     if (SPECULATIVE_RE.test(sentence)) continue;
     let end = sentence.length;
     while (end > 0 && ".!?".includes(sentence[end - 1] ?? "")) end -= 1;

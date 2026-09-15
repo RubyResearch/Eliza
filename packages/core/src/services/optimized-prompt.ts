@@ -364,6 +364,82 @@ function isTask(value: unknown): value is OptimizedPromptTask {
 	);
 }
 
+function isFiniteMetric(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function isCount(value: unknown): value is number {
+	return isFiniteMetric(value) && Number.isSafeInteger(value) && value >= 0;
+}
+
+function optionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+/** Optional experiment evidence is either complete and valid or rejected. */
+function validOptionalEvidence(raw: Record<string, unknown>): boolean {
+	if (raw.fewShotExamples !== undefined) {
+		if (!Array.isArray(raw.fewShotExamples)) return false;
+		for (const entry of raw.fewShotExamples) {
+			if (
+				!isStringRecord(entry) ||
+				!isStringRecord(entry.input) ||
+				typeof entry.input.user !== "string" ||
+				typeof entry.expectedOutput !== "string" ||
+				!optionalString(entry.id) ||
+				!optionalString(entry.input.system) ||
+				(entry.reward !== undefined && !isFiniteMetric(entry.reward)) ||
+				(entry.metadata !== undefined && !isStringRecord(entry.metadata))
+			)
+				return false;
+		}
+	}
+	if (raw.frontier !== undefined) {
+		if (!Array.isArray(raw.frontier)) return false;
+		for (const entry of raw.frontier) {
+			if (
+				!isStringRecord(entry) ||
+				typeof entry.prompt !== "string" ||
+				!isFiniteMetric(entry.score) ||
+				!isCount(entry.promptTokenCount) ||
+				typeof entry.origin !== "string" ||
+				!optionalString(entry.feedback)
+			)
+				return false;
+		}
+	}
+	if (raw.promotionDecision !== undefined) {
+		const decision = raw.promotionDecision;
+		if (!isStringRecord(decision)) return false;
+		if (decision.promote !== undefined && typeof decision.promote !== "boolean")
+			return false;
+		for (const key of [
+			"incumbentMeanScore",
+			"incumbentStdDev",
+			"candidateScore",
+			"delta",
+			"promotionMargin",
+			"noiseThreshold",
+		]) {
+			if (decision[key] !== undefined && !isFiniteMetric(decision[key]))
+				return false;
+		}
+		for (const key of ["incumbentReseeds", "examplesPerPass"]) {
+			if (decision[key] !== undefined && !isCount(decision[key])) return false;
+		}
+		for (const key of ["reason", "incumbentSource", "gateSource"]) {
+			if (!optionalString(decision[key])) return false;
+		}
+		if (
+			decision.incumbentScores !== undefined &&
+			(!Array.isArray(decision.incumbentScores) ||
+				!decision.incumbentScores.every(isFiniteMetric))
+		)
+			return false;
+	}
+	return true;
+}
+
 const OPTIMIZED_PROMPT_ARTIFACT_KEYS = new Set([
 	"task",
 	"optimizer",
@@ -401,32 +477,35 @@ export function parseOptimizedPromptArtifact(
 	if (typeof raw.baseline !== "string" || typeof raw.prompt !== "string") {
 		return null;
 	}
-	if (typeof raw.score !== "number" || typeof raw.baselineScore !== "number") {
+	if (!isFiniteMetric(raw.score) || !isFiniteMetric(raw.baselineScore)) {
+		return null;
+	}
+	if (typeof raw.datasetId !== "string" || !isCount(raw.datasetSize)) {
 		return null;
 	}
 	if (
-		typeof raw.datasetId !== "string" ||
-		typeof raw.datasetSize !== "number"
-	) {
+		typeof raw.generatedAt !== "string" ||
+		!Number.isFinite(Date.parse(raw.generatedAt))
+	)
 		return null;
-	}
-	if (typeof raw.generatedAt !== "string") return null;
+	if (!validOptionalEvidence(raw)) return null;
 	if (!Array.isArray(raw.lineage)) return null;
 	const lineage: OptimizedPromptLineageEntry[] = [];
 	for (const entry of raw.lineage) {
-		if (!isStringRecord(entry)) continue;
 		if (
-			typeof entry.round === "number" &&
-			typeof entry.variant === "number" &&
-			typeof entry.score === "number"
-		) {
-			lineage.push({
-				round: entry.round,
-				variant: entry.variant,
-				score: entry.score,
-				notes: typeof entry.notes === "string" ? entry.notes : undefined,
-			});
-		}
+			!isStringRecord(entry) ||
+			!isCount(entry.round) ||
+			!isCount(entry.variant) ||
+			!isFiniteMetric(entry.score) ||
+			!optionalString(entry.notes)
+		)
+			return null;
+		lineage.push({
+			round: entry.round,
+			variant: entry.variant,
+			score: entry.score,
+			notes: typeof entry.notes === "string" ? entry.notes : undefined,
+		});
 	}
 	const fewShot: OptimizedPromptFewShotExample[] | undefined = Array.isArray(
 		raw.fewShotExamples,

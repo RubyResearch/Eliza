@@ -233,6 +233,40 @@ function expectInternalHandoff(
 }
 
 describe("CALENDAR effect receipt settlement", () => {
+  it.each([
+    ["feed", undefined, false],
+    ["feed", true, true],
+    ["search_events", undefined, true],
+    ["search_events", false, false],
+  ] as const)(
+    "%s honors hidden-calendar scope %s (resolved %s)",
+    async (subaction, includeHiddenCalendars, expected) => {
+      const getCalendarFeed = vi.fn(async () => feed());
+      const result = await execute({
+        action: createCalendarActionRunner(deps()),
+        service: { getCalendarFeed },
+        actor: message("Read the requested calendar window."),
+        delivered: [],
+        parameters: {
+          subaction,
+          ...(subaction === "search_events" ? { query: "School pickup" } : {}),
+          details: {
+            ...(includeHiddenCalendars === undefined
+              ? {}
+              : { includeHiddenCalendars }),
+            timeMin: "2026-07-27T00:00:00.000Z",
+            timeMax: "2026-08-03T00:00:00.000Z",
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(getCalendarFeed).toHaveBeenCalledWith(
+        expect.any(URL),
+        expect.objectContaining({ includeHiddenCalendars: expected }),
+      );
+    },
+  );
+
   it.each(["Unknown", "None", "n/a", "location_missing"])(
     "searches for the literal detail query %s",
     async (title) => {

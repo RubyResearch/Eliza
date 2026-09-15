@@ -8,7 +8,11 @@ import type { IAgentRuntime, Memory } from "@elizaos/core";
 import { runWithStreamingContext } from "@elizaos/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setNavigationConstraint } from "./navigation-execution.js";
-import { createViewsAction, createViewsAliasAction } from "./views.js";
+import {
+	createShowViewAction,
+	createViewsAction,
+	createViewsAliasAction,
+} from "./views.js";
 import { createViewsClient, type ViewSummary } from "./views-client.js";
 import { runViewsList } from "./views-list.js";
 import { runViewsShow } from "./views-show.js";
@@ -26,6 +30,10 @@ const message = {
 	entityId: "actor-1",
 	content: { text: "Add dentist Thursday 2pm, but do not change views." },
 } as unknown as Memory;
+const clientMessage = {
+	...message,
+	content: { ...message.content, metadata: { viewClientId: "client-a" } },
+} as Memory;
 const options = {
 	view: "calendar",
 	navigationIntent: "planner-step",
@@ -101,6 +109,172 @@ function turn<T>(run: () => T, disposition: "allow" | "deny" = "allow"): T {
 }
 
 describe("navigation execution policy", () => {
+	it("opens through the narrow action and preserves its delivery receipt", async () => {
+		const action = createShowViewAction();
+		const result = await turn(() =>
+			action.handler(actionRuntime, clientMessage, undefined, {
+				parameters: { view: "calendar", navigationStepId: "step-1" },
+			}),
+		);
+		expect(posts).toHaveLength(1);
+		expect(result).toMatchObject({
+			success: true,
+			turnComplete: false,
+			data: {
+				navigation: {
+					viewId: "calendar",
+					stepId: "step-1",
+					status: "delivered",
+				},
+			},
+		});
+	});
+
+	it.each(["view", "navigationStepId"] as const)(
+		"requires %s on the narrow action without falling back to user-text routing",
+		async (name) => {
+			const action = createShowViewAction();
+			expect(
+				action.parameters?.find((parameter) => parameter.name === name)
+					?.required,
+			).toBe(true);
+			const result = await turn(() =>
+				action.handler(actionRuntime, clientMessage, undefined, {
+					...options,
+					[name]: undefined,
+				}),
+			);
+			expect(posts).toEqual([]);
+			expect(result).toMatchObject({
+				success: false,
+				data: { parameterErrors: [{ name }] },
+			});
+		},
+	);
+
+	it("keeps navigation denial authoritative on the narrow action", async () => {
+		const result = await turn(
+			() =>
+				createShowViewAction().handler(
+					actionRuntime,
+					message,
+					undefined,
+					options,
+				),
+			"deny",
+		);
+		expect(posts).toEqual([]);
+		expect(result).toMatchObject({
+			success: false,
+			data: { navigation: { status: "forbidden" } },
+		});
+	});
+
+	it("rejects the narrow action on a viewless connector", async () => {
+		const viewless = {
+			...message,
+			content: { text: "Open Calendar", source: "discord" },
+		} as Memory;
+		expect(
+			await createShowViewAction().validate(
+				actionRuntime,
+				viewless,
+				undefined,
+				options,
+			),
+		).toBe(false);
+		expect(posts).toEqual([]);
+	});
+
+	it("does not turn a missing delivery acknowledgment into narrow-action success", async () => {
+		reply = "missing";
+		const result = await turn(() =>
+			createShowViewAction().handler(
+				actionRuntime,
+				clientMessage,
+				undefined,
+				options,
+			),
+		);
+		expect(posts).toHaveLength(1);
+		expect(result).toMatchObject({
+			success: false,
+			data: { navigation: { status: "not-delivered" } },
+		});
+	});
+
+	it.each(["view", "navigationStepId"] as const)(
+		"reports missing %s as a parameter failure without dispatching",
+		async (name) => {
+			const invalid = { ...options, [name]: "" };
+			const result = await turn(() => show({ options: invalid }));
+			expect(result.success).toBe(false);
+			expect(posts).toEqual([]);
+			expect(result.data).toMatchObject({
+				parameterErrors: [{ name, message: expect.any(String) }],
+				navigation: { status: "invalid", reason: "VIEW_STEP_INVALID" },
+			});
+		},
+	);
+
+	it("finishes a corrected navigation without reviving its missing-step failure", async () => {
+		const { runPlannerLoop, actionResultToPlannerToolResult } = await import(
+			"../../../../packages/core/src/runtime/planner-loop"
+		);
+		let modelCalls = 0;
+		let evaluations = 0;
+		const result = await turn(() =>
+			runPlannerLoop({
+				runtime: {
+					useModel: async () => {
+						modelCalls++;
+						if (modelCalls > 2)
+							throw new Error("Unexpected synthesis after recovery");
+						return {
+							text: "",
+							toolCalls: [
+								{
+									id: `navigate-${modelCalls}`,
+									name: "VIEWS",
+									arguments: {
+										action: "show",
+										view: "calendar",
+										navigationIntent: "planner-step",
+										...(modelCalls === 2 ? { navigationStepId: "step-1" } : {}),
+									},
+								},
+							],
+						};
+					},
+				},
+				context: { id: "corrected-navigation" },
+				tools: [
+					{ name: "VIEWS", description: "Navigate to the selected view." },
+				],
+				executeToolCall: async (call) =>
+					actionResultToPlannerToolResult(await show({ options: call.params })),
+				evaluate: async () => {
+					const completed = ++evaluations === 2;
+					return {
+						success: completed,
+						decision: completed ? "FINISH" : "CONTINUE",
+						thought: completed
+							? "The navigation receipt confirms delivery."
+							: "Supply the missing step identity.",
+						...(completed ? { messageToUser: "Calendar is open." } : {}),
+					};
+				},
+			}),
+		);
+		expect(posts).toHaveLength(1);
+		expect(evaluations).toBe(2);
+		expect(modelCalls).toBe(2);
+		expect(result.finalMessage).toBe("Calendar is open.");
+		expect(
+			result.trajectory.steps.filter((step) => step.result?.success === false),
+		).toHaveLength(1);
+	});
+
 	it("keeps caller-filtered catalog absence distinct from a global existence or role claim", async () => {
 		const listed = await runViewsList({ client: createViewsClient() });
 		const missing = await turn(() =>

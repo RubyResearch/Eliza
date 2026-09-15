@@ -10,6 +10,7 @@
  * (in-memory FakeRuntime).
  */
 import { describe, expect, it, vi } from "vitest";
+import { validateSchema } from "../../../actions/validate-tool-args.ts";
 import { logger } from "../../../logger.ts";
 import type {
 	EvaluatorProcessorContext,
@@ -877,4 +878,133 @@ describe("preferenceEvaluator gates and prompt", () => {
 		expect(prompt).not.toContain("add_directive");
 		expect(prompt).toContain("add_preference_fact");
 	});
+});
+
+describe("preference wire operation requirements", () => {
+	it.each(["conversation", "task", "uncertain"])(
+		"keeps %s instructions out of persistent traits, directives, and facts",
+		async (scope) => {
+			const fake = makeFakeRuntime({ agentId: AGENT });
+			await fake.store.applyTrait({
+				scope: "user",
+				userId: USER,
+				agentId: AGENT,
+				actorId: AGENT,
+				trait: "verbosity",
+				value: "verbose",
+				source: "agent_inferred",
+			});
+			const before = fake.store.getSlot(USER, AGENT);
+			const output = mustParse({
+				ops: [
+					{
+						op: "set_trait",
+						scope,
+						trait: "tone",
+						value: "cold",
+						confidence: 1,
+					},
+					{ op: "retract_trait", scope, trait: "verbosity" },
+					{
+						op: "add_directive",
+						scope,
+						text: "Wait for APPROVE VIOLET in this conversation.",
+						confidence: 1,
+					},
+					{
+						op: "add_preference_fact",
+						scope,
+						claim: "Use Calendar for this task only.",
+					},
+				],
+			});
+			const result = await processOps(fake, output);
+			expect(fake.store.getSlot(USER, AGENT)).toEqual(before);
+			expect(fake.memories.get("facts") ?? []).toEqual([]);
+			expect(result?.data).toMatchObject({ notPersistedForScope: 4 });
+		},
+	);
+	it("persists an explicitly classified cross-conversation preference", async () => {
+		const fake = makeFakeRuntime({ agentId: AGENT });
+		await processOps(
+			fake,
+			mustParse({
+				ops: [
+					{
+						op: "add_directive",
+						scope: "across_conversations",
+						text: "No emojis",
+						confidence: 0.9,
+					},
+				],
+			}),
+		);
+		expect(fake.store.getSlot(USER, AGENT).custom_directives).toEqual([
+			"No emojis",
+		]);
+	});
+
+	const cases = [
+		{
+			op: {
+				op: "set_trait",
+				trait: "verbosity",
+				value: "terse",
+				confidence: 0.9,
+			},
+			required: ["trait", "value", "confidence"],
+		},
+		{
+			op: { op: "add_directive", text: "No emojis", confidence: 0.9 },
+			required: ["text", "confidence"],
+		},
+		{
+			op: { op: "add_preference_fact", claim: "Prefers morning check-ins" },
+			required: ["claim"],
+		},
+		{ op: { op: "retract_trait", trait: "verbosity" }, required: ["trait"] },
+	];
+	for (const entry of cases) {
+		it(`requires a valid scope on new ${entry.op.op} output while preserving staged legacy output`, () => {
+			const schema = preferenceEvaluator.schema;
+			if (!schema) throw new Error("Missing preference schema");
+			const legacy = { ops: [entry.op] };
+			const missing: string[] = [];
+			validateSchema(schema, legacy, "", missing);
+			expect(missing.length).toBeGreaterThan(0);
+			expect(
+				parsePreferenceOutputTolerant(legacy, { requireComplete: true }),
+			).not.toBeNull();
+			const invalid = { ops: [{ ...entry.op, scope: "invented_scope" }] };
+			const errors: string[] = [];
+			validateSchema(schema, invalid, "", errors);
+			expect(errors.length).toBeGreaterThan(0);
+			expect(
+				parsePreferenceOutputTolerant(invalid, { requireComplete: true }),
+			).toBeNull();
+		});
+		it(`requires parser fields for ${entry.op.op} before dispatch`, () => {
+			const schema = preferenceEvaluator.schema;
+			if (!schema) throw new Error("Missing preference schema");
+			const scopedOp = { ...entry.op, scope: "across_conversations" };
+			const output = { ops: [scopedOp] };
+			const errors: string[] = [];
+			validateSchema(schema, output, "", errors);
+			expect(errors).toEqual([]);
+			expect(
+				parsePreferenceOutputTolerant(output, { requireComplete: true }),
+			).not.toBeNull();
+			for (const field of entry.required) {
+				const incomplete: Record<string, unknown> = { ...scopedOp };
+				delete incomplete[field];
+				const invalid = { ops: [incomplete] };
+				const missing: string[] = [];
+				validateSchema(schema, invalid, "", missing);
+				expect(missing.length).toBeGreaterThan(0);
+				expect(
+					parsePreferenceOutputTolerant(invalid, { requireComplete: true }),
+				).toBeNull();
+			}
+		});
+	}
 });

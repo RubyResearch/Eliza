@@ -13,6 +13,7 @@ import {
   defaultAgentHostBridge,
   setAgentHostBridge,
 } from "../runtime/host-bridge.ts";
+import { registerTokenRoleResolver } from "./boundary-role-resolver.ts";
 import { startApiServer } from "./server.ts";
 
 type ApiServer = Awaited<ReturnType<typeof startApiServer>>;
@@ -22,7 +23,9 @@ const HOSTILE_ORIGIN = "https://hostile.example";
 const EXTENSION_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const REMOTE_HEADERS = { "x-forwarded-for": "203.0.113.10" } as const;
 const touchedEnv = [
+  "AGENT_SERVER_SHARED_SECRET",
   "ELIZA_ALLOWED_ORIGINS",
+  "ELIZA_API_AUTH_TOKEN",
   "ELIZA_API_BIND_HOST",
   "ELIZA_API_PORT",
   "ELIZA_API_TOKEN",
@@ -35,6 +38,7 @@ const touchedEnv = [
 ] as const;
 
 let api: ApiServer | null = null;
+let unregisterResolver: (() => void) | undefined;
 let stateDir: string | null = null;
 const originalEnv = new Map<string, string | undefined>();
 
@@ -56,6 +60,8 @@ beforeEach(async () => {
   process.env.ELIZA_API_BIND_HOST = "127.0.0.1";
   process.env.ELIZA_CLOUD_PROVISIONED = "1";
   process.env.ELIZA_ALLOWED_ORIGINS = TRUSTED_ORIGIN;
+  delete process.env.AGENT_SERVER_SHARED_SECRET;
+  delete process.env.ELIZA_API_AUTH_TOKEN;
   delete process.env.ELIZA_API_TOKEN;
   delete process.env.ELIZA_REQUIRE_LOCAL_AUTH;
 
@@ -102,6 +108,8 @@ afterEach(async () => {
   await api?.close();
   api = null;
   _resetAgentHostBridge();
+  unregisterResolver?.();
+  unregisterResolver = undefined;
   if (stateDir) {
     await rm(stateDir, {
       recursive: true,
@@ -319,5 +327,113 @@ describe("browser companion owner enrollment boundary", () => {
     const ownerPairing = await preflight("/api/browser-bridge/companions/pair");
     expect(ownerPairing.status).toBe(403);
     expect(ownerPairing.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+describe("trajectory viewer owner authority", () => {
+  const readPaths = [
+    "/api/trajectories",
+    "/api/trajectories/stats",
+    "/api/trajectories/example-run",
+  ];
+
+  it("rejects a non-owner host session on every trajectory read", async () => {
+    for (const pathname of readPaths) {
+      const response = await fetch(endpointPath(pathname), {
+        headers: browserHeaders(TRUSTED_ORIGIN, {
+          Cookie: "eliza_session=machine-session",
+        }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "Owner role required" });
+    }
+  });
+
+  it("keeps owner sessions on the real read-service path", async () => {
+    for (const pathname of readPaths) {
+      const response = await fetch(endpointPath(pathname), {
+        headers: browserHeaders(TRUSTED_ORIGIN, {
+          Cookie: "eliza_session=browser-session",
+        }),
+      });
+      // This host has no runtime. Reaching the core service-unavailable
+      // response proves the owner was admitted without fabricating data.
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        error: "Trajectory service unavailable",
+      });
+    }
+  });
+
+  it("does not promote shared service credentials to viewer ownership", async () => {
+    process.env.AGENT_SERVER_SHARED_SECRET = "trajectory-boundary-test-secret";
+    const response = await fetch(endpointPath("/api/trajectories"), {
+      headers: {
+        ...REMOTE_HEADERS,
+        "x-server-token": "trajectory-boundary-test-secret",
+      },
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("keeps unauthenticated remote reads unauthorized", async () => {
+    const response = await fetch(endpointPath("/api/trajectories"), {
+      headers: REMOTE_HEADERS,
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("admits the standalone API owner credential", async () => {
+    process.env.ELIZA_API_TOKEN = "trajectory-api-owner-test";
+    const response = await fetch(endpointPath("/api/trajectories"), {
+      headers: {
+        ...REMOTE_HEADERS,
+        Authorization: "Bearer trajectory-api-owner-test",
+      },
+    });
+    expect(response.status).toBe(503);
+  });
+
+  it("preserves an explicit non-owner session even on loopback", async () => {
+    const response = await fetch(endpointPath("/api/trajectories"), {
+      headers: { Cookie: "eliza_session=machine-session" },
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
+    { role: "OWNER", inScope: true, isAdmin: false, status: 503 },
+    { role: "OWNER", inScope: false, isAdmin: false, status: 401 },
+    { role: "OWNER", inScope: false, isAdmin: true, status: 503 },
+    { role: "USER", inScope: true, isAdmin: false, status: 403 },
+    { role: "USER", inScope: true, isAdmin: true, status: 403 },
+    { role: "GUEST", inScope: true, isAdmin: false, status: 403 },
+  ] as const)(
+    "honors registered $role authority with scope=$inScope admin=$isAdmin",
+    async ({ role, inScope, isAdmin, status }) => {
+      unregisterResolver = registerTokenRoleResolver({
+        id: "trajectory-boundary-test",
+        resolve: () => ({
+          providerId: "trajectory-boundary-test",
+          principal: "synthetic-principal",
+          worldRole: role,
+          isAdmin,
+          isRouteInScope: () => inScope,
+          claims: {},
+        }),
+      });
+      const response = await fetch(endpointPath("/api/trajectories"), {
+        headers: REMOTE_HEADERS,
+      });
+      expect(response.status).toBe(status);
+    },
+  );
+
+  it("retains standalone trusted-local access without a host session", async () => {
+    const response = await fetch(endpointPath("/api/trajectories"));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Trajectory service unavailable",
+    });
   });
 });

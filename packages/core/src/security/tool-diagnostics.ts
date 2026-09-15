@@ -78,6 +78,15 @@ export type ToolDiagnosticTextRedactor = (text: string) => string;
 
 const TOOLS_MODE: { mode: RedactSensitiveMode } = { mode: "tools" };
 
+/** Durable transport/recovery state may contain context from a private audience. */
+function isPrivateToolField(key: string): boolean {
+	return (
+		key === "chatIdempotency" ||
+		key === "replyRecoveryJson" ||
+		isSensitiveKeyName(key)
+	);
+}
+
 /**
  * Composes runtime-known-secret redaction with shared tool-shape redaction —
  * the established order from the action-output work: literal character
@@ -145,7 +154,7 @@ function projectValue(
 		let changed = false;
 		const projected: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
-			if (isSensitiveKeyName(key)) {
+			if (isPrivateToolField(key)) {
 				projected[key] = TOOL_DIAGNOSTIC_MASK;
 				changed = true;
 				continue;
@@ -208,7 +217,7 @@ function projectCompleteModelValue(
 		let changed = false;
 		const projected: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
-			if (isSensitiveKeyName(key)) {
+			if (isPrivateToolField(key)) {
 				projected[key] = TOOL_DIAGNOSTIC_MASK;
 				changed = true;
 				continue;
@@ -359,7 +368,7 @@ function projectJsonSchemaNode(
 			) {
 				// Both map keys and array values are schema property identifiers.
 				next = entry;
-			} else if (isSensitiveKeyName(key)) {
+			} else if (isPrivateToolField(key)) {
 				next = TOOL_DIAGNOSTIC_MASK;
 			} else {
 				next = complete
@@ -453,7 +462,7 @@ function projectModelToolDefinition(
 					depth + 1,
 					complete,
 				);
-			} else if (isSensitiveKeyName(key)) {
+			} else if (isPrivateToolField(key)) {
 				next = TOOL_DIAGNOSTIC_MASK;
 			} else {
 				next = complete

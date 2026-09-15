@@ -180,6 +180,43 @@ function applyNotePatch(
   updatedAt: string,
 ): StickyNote {
   const updated: StickyNote = { ...existing, updatedAt };
+  if (patch.textEdit) {
+    const { field, oldText, newText } = patch.textEdit;
+    const original = existing[field];
+    const first = original.indexOf(oldText);
+    const ambiguous = first >= 0 && original.indexOf(oldText, first + 1) >= 0;
+    if (first < 0 || ambiguous) {
+      throw new ElizaError(
+        first < 0
+          ? "The exact old text is absent from the current note; read it before choosing another edit. Nothing changed."
+          : "The old text matches more than once; include enough surrounding text to identify one occurrence. Nothing changed.",
+        {
+          code:
+            first < 0
+              ? "NOTES_EDIT_TEXT_NOT_FOUND"
+              : "NOTES_EDIT_TEXT_AMBIGUOUS",
+          context: { noteId: existing.id, field },
+          severity: "ephemeral",
+        },
+      );
+    }
+    // A replacement callback keeps $&, $1 and similar text literal. The
+    // match is checked under the same store barrier that commits the update.
+    const replacement = original.replace(oldText, () => newText);
+    const validated = parseUpdateNoteInput({ [field]: replacement });
+    if (validated[field] !== replacement) {
+      throw new ElizaError(
+        "The exact edit would require whitespace normalization; nothing changed.",
+        {
+          code: "NOTES_EDIT_NORMALIZATION_REQUIRED",
+          context: { noteId: existing.id, field },
+          severity: "ephemeral",
+        },
+      );
+    }
+    updated[field] = replacement;
+    return updated;
+  }
   if (patch.title !== undefined) updated.title = patch.title;
   if (patch.body !== undefined) updated.body = patch.body;
   if (patch.color !== undefined) updated.color = patch.color;

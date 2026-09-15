@@ -22,7 +22,6 @@ import {
   ChannelType,
   type Content,
   createMessageMemory,
-  drainRoomPostDeliveryTasks,
   ElizaError,
   EventType,
   emitInferenceTiming,
@@ -38,6 +37,7 @@ import {
   MESSAGE_SOURCE_CLIENT_CHAT,
   type Memory,
   type MessageMetadata,
+  type MessageReplyRecoveryContext,
   ModelType,
   markInference,
   nextInferenceTurnId,
@@ -60,6 +60,7 @@ import {
   toWellFormedUnicode,
   trackPostDeliveryTask,
   type UUID,
+  withRoomDeliverySettlement,
 } from "@elizaos/core";
 import type {
   ChatFailureKind,
@@ -306,6 +307,8 @@ export interface ChatMessageIdOutcome {
   actionResults?: ChatActionResultSummary[];
   failureKind?: ChatFailureKind;
   terminalFailure?: ChatTerminalFailure;
+  /** A server-persisted reply can be regenerated without re-running this turn. */
+  replyRecoveryAvailable?: true;
   accountConnect?: AccountConnectRequest;
   localInference?: LocalInferenceChatMetadata;
   noResponseReason?: "ignored";
@@ -478,6 +481,10 @@ export interface ChatGenerationResult {
   usedActionCallbacks?: boolean;
   actionCallbackHistory?: string[];
   actionResults?: ChatActionResultSummary[];
+  /** Server-only complete evidence; never serialize this into a chat DTO. */
+  replyRecovery?: MessageReplyRecoveryContext & {
+    actionResults: ActionResult[];
+  };
   responseContent?: Content | null;
   responseMessages?: Memory[];
   /** Exact response IDs durably committed by the message service before return. */
@@ -583,6 +590,10 @@ function recoverSettledMutatingActionTurn(
     ) {
       return true;
     }
+    // Promoted read operations may inherit their mixed-capability parent's
+    // write tags. The result's explicit read-only classification overrides
+    // that legacy fallback, never receipt or unresolved-commit evidence.
+    if (result.data?.readOnlyOperation === true) return false;
     const actionName =
       typeof result.data?.actionName === "string" ? result.data.actionName : "";
     return (
@@ -878,6 +889,8 @@ function getLatestVisibleResponseMessageText(
 // Do NOT use as the generic empty-response fallback; that mislabels every
 // IGNORE / empty-action / empty-normalized-text path as a provider failure.
 const PROVIDER_ISSUE_CHAT_REPLY = "Sorry, I'm having a provider issue";
+const REPLY_GROUNDING_FAILURE_REPLY =
+  "I couldn't verify my reply against the available results.";
 // Shared with the connector failure-reply path in @elizaos/core so every
 // delivery surface phrases credit exhaustion identically.
 const INSUFFICIENT_CREDITS_CHAT_REPLY = INSUFFICIENT_CREDITS_REPLY;
@@ -942,6 +955,9 @@ function classifySyntheticChatFailureText(
     .replace(/[’]/g, "'")
     .replace(/\s+/g, " ");
   if (!normalized) return null;
+  if (normalized === REPLY_GROUNDING_FAILURE_REPLY.toLowerCase()) {
+    return "handler_error";
+  }
   if (normalized === PROVIDER_ISSUE_CHAT_REPLY.toLowerCase()) {
     return "provider_issue";
   }
@@ -1437,6 +1453,9 @@ export function getChatFailureReply(
   err: unknown,
   logBuffer: LogEntry[],
 ): string {
+  if (asRecord(err)?.code === "REPLY_GROUNDING_FAILED") {
+    return REPLY_GROUNDING_FAILURE_REPLY;
+  }
   if (
     isInsufficientCreditsError(err) ||
     findRecentInsufficientCreditsLog(logBuffer)
@@ -1460,6 +1479,9 @@ export function classifyChatFailure(
   err: unknown,
   logBuffer: LogEntry[],
 ): ChatFailureKind {
+  if (asRecord(err)?.code === "REPLY_GROUNDING_FAILED") {
+    return "handler_error";
+  }
   if (
     isInsufficientCreditsError(err) ||
     findRecentInsufficientCreditsLog(logBuffer)
@@ -1651,7 +1673,7 @@ function listResponseActions(
     .filter((action) => action.length > 0);
 }
 
-function isIntentionalNoResponseResult(
+export function isIntentionalNoResponseResult(
   result:
     | {
         didRespond?: boolean;
@@ -2723,6 +2745,17 @@ async function generateChatResponseWithTiming(
     // Inbound event consumers may persist correlation state or apply
     // turn-shaping policy. Generation cannot safely continue when that
     // prerequisite fails.
+    // Stamp the request trace before trajectory listeners mint their own ID.
+    // Preserve an existing originating trace on forwarded messages.
+    const requestTraceId = getInferenceTimer()?.traceId;
+    const originatingTraceId = asRecord(message.metadata)?.traceId;
+    if (
+      requestTraceId &&
+      !(typeof originatingTraceId === "string" && originatingTraceId.trim())
+    ) {
+      message.metadata ??= { type: "message" };
+      (message.metadata as { traceId?: string }).traceId = requestTraceId;
+    }
     if (typeof runtime.emitEvent === "function") {
       await timeInferenceSpan("chat:ingress:received-event", () =>
         runtime.emitEvent(EventType.MESSAGE_RECEIVED, {
@@ -3485,6 +3518,14 @@ async function generateChatResponseWithTiming(
       ...(actionResultSummaries.length > 0
         ? { actionResults: actionResultSummaries }
         : {}),
+      ...(replyFailure && result?.replyRecovery && result.actionResults
+        ? {
+            replyRecovery: {
+              ...result.replyRecovery,
+              actionResults: result.actionResults,
+            },
+          }
+        : {}),
       ...(responseContent ? { responseContent } : {}),
       ...(responseMessages.length > 0 ? { responseMessages } : {}),
       ...(persistedResponseMessageIds.length > 0
@@ -3571,21 +3612,24 @@ export async function generateChatResponse(
   const runOwned = async (
     roomHandlerLease: RoomHandlerLease,
   ): Promise<ChatGenerationResult> => {
-    try {
-      const result = await generateOwnedChatResponse(
-        runtime,
-        message,
-        agentName,
-        {
-          ...opts,
-          roomHandlerLease,
-        },
-      );
-      await opts?.onReplyReady?.(result);
-      return result;
-    } finally {
-      await drainRoomPostDeliveryTasks(runtime, message.roomId);
-    }
+    return withRoomDeliverySettlement(
+      runtime,
+      message.roomId,
+      roomHandlerLease,
+      async () => {
+        const result = await generateOwnedChatResponse(
+          runtime,
+          message,
+          agentName,
+          {
+            ...opts,
+            roomHandlerLease,
+          },
+        );
+        await opts?.onReplyReady?.(result);
+        return result;
+      },
+    );
   };
 
   const inheritedLease = runtime.roomHandlerQueue.currentLease(message.roomId);

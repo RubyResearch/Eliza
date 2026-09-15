@@ -1,12 +1,38 @@
 /** Deterministic coverage for chat response-context routing across built-in and dynamic views. */
 
-import { describe, expect, it } from "vitest";
+import { Capacitor } from "@capacitor/core";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildChatViewMetadata,
   resolveChatViewRouting,
 } from "./chat-view-routing";
 
 describe("resolveChatViewRouting", () => {
+  it("keeps native Browser ownership across views and clears stale web hints", () => {
+    const native = vi
+      .spyOn(Capacitor, "isNativePlatform")
+      .mockReturnValue(true);
+    try {
+      expect(
+        buildChatViewMetadata("browser", undefined, "/browser")
+          .uiBrowserSurface,
+      ).toBe("native");
+      expect(
+        buildChatViewMetadata("views", { uiBrowserSurface: "native" }, "/notes")
+          .uiBrowserSurface,
+      ).toBe("native");
+      native.mockReturnValue(false);
+      expect(
+        buildChatViewMetadata(
+          "browser",
+          { uiBrowserSurface: "native" },
+          "/browser",
+        ).uiBrowserSurface,
+      ).toBeUndefined();
+    } finally {
+      native.mockRestore();
+    }
+  });
   it("routes the orchestrator path independently of the selected tab", () => {
     expect(resolveChatViewRouting("chat", "/orchestrator/task-7")).toEqual({
       view: "orchestrator",

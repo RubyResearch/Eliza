@@ -5,10 +5,13 @@
  * task scheduler, embedding each memory's text and writing the vector back via
  * `updateMemory`. When a TEXT_EMBEDDING_BATCH model is registered it collapses a
  * per-turn embed burst into one round-trip, falling back per-item on any batch
- * failure; when neither TEXT_EMBEDDING nor TEXT_EMBEDDING_BATCH exists it starts disabled so text-only
- * deployments still run.
+ * failure. Without a model it waits without a drain task, then activates when
+ * an embedding handler registers, including handlers installed after boot.
  */
-import type { EmbeddingGenerationPayload } from "../types/events";
+import type {
+	EmbeddingGenerationPayload,
+	ModelRegisteredEventPayload,
+} from "../types/events";
 import { EventType } from "../types/events";
 import type { Memory } from "../types/memory";
 import { ModelType } from "../types/model";
@@ -36,6 +39,29 @@ export class EmbeddingGenerationService extends Service {
 
 	private batchQueue: BatchQueue<EmbeddingQueueItem> | null = null;
 	private isDisabled = false;
+	private stopped = false;
+	private initialization: Promise<void> | null = null;
+	private readonly embeddingRequestHandler = (
+		payload: EmbeddingGenerationPayload,
+	) => this.handleEmbeddingRequest(payload);
+	private readonly modelRegistrationHandler = async (
+		payload: ModelRegisteredEventPayload,
+	): Promise<void> => {
+		if (
+			this.stopped ||
+			!this.isDisabled ||
+			(payload.modelType !== ModelType.TEXT_EMBEDDING &&
+				payload.modelType !== ModelType.TEXT_EMBEDDING_BATCH)
+		)
+			return;
+		if (
+			!this.runtime.getModel(ModelType.TEXT_EMBEDDING) &&
+			!this.runtime.getModel(ModelType.TEXT_EMBEDDING_BATCH)
+		)
+			return;
+		this.isDisabled = false;
+		await this.initialize();
+	};
 
 	private static readonly EMBEDDING_DRAIN_TASK = "EMBEDDING_DRAIN";
 
@@ -48,6 +74,11 @@ export class EmbeddingGenerationService extends Service {
 			"Starting embedding generation service",
 		);
 
+		const service = new EmbeddingGenerationService(runtime);
+		runtime.registerEvent(
+			EventType.MODEL_REGISTERED,
+			service.modelRegistrationHandler,
+		);
 		const hasEmbeddingModel = Boolean(
 			runtime.getModel(ModelType.TEXT_EMBEDDING) ||
 				runtime.getModel(ModelType.TEXT_EMBEDDING_BATCH),
@@ -58,30 +89,25 @@ export class EmbeddingGenerationService extends Service {
 					src: "plugin:basic-capabilities:service:embedding",
 					agentId: runtime.agentId,
 				},
-				"No TEXT_EMBEDDING or TEXT_EMBEDDING_BATCH model registered - service will not be initialized",
+				"No embedding model registered yet; waiting for model registration",
 			);
-			const noOpService = new EmbeddingGenerationService(runtime);
-			noOpService.isDisabled = true;
-			return noOpService;
+			service.isDisabled = true;
+			return service;
 		}
 
-		const service = new EmbeddingGenerationService(runtime);
 		await service.initialize();
 		return service;
 	}
 
-	async initialize(): Promise<void> {
-		if (this.isDisabled) {
-			this.runtime.logger.debug(
-				{
-					src: "plugin:basic-capabilities:service:embedding",
-					agentId: this.runtime.agentId,
-				},
-				"Service is disabled, skipping initialization",
-			);
-			return;
-		}
+	initialize(): Promise<void> {
+		if (this.stopped || this.isDisabled) return Promise.resolve();
+		// Model registration and incoming requests can overlap. They share one
+		// queue initialization, including any failure from task registration.
+		this.initialization ??= this.initializeQueue();
+		return this.initialization;
+	}
 
+	private async initializeQueue(): Promise<void> {
 		this.runtime.logger.info(
 			{
 				src: "plugin:basic-capabilities:service:embedding",
@@ -92,7 +118,7 @@ export class EmbeddingGenerationService extends Service {
 
 		this.runtime.registerEvent(
 			EventType.EMBEDDING_GENERATION_REQUESTED,
-			this.handleEmbeddingRequest.bind(this),
+			this.embeddingRequestHandler,
 		);
 
 		// Uses shared `utils/batch-queue` (see `batch-queue.ts` header): same drain/retry/priority
@@ -157,6 +183,9 @@ export class EmbeddingGenerationService extends Service {
 	private async handleEmbeddingRequest(
 		payload: EmbeddingGenerationPayload,
 	): Promise<void> {
+		if (this.stopped) return;
+		await this.initialization;
+		if (this.stopped) return;
 		if (this.isDisabled || !this.batchQueue) {
 			this.runtime.logger.debug(
 				{
@@ -413,6 +442,16 @@ export class EmbeddingGenerationService extends Service {
 	}
 
 	async stop(): Promise<void> {
+		this.stopped = true;
+		this.runtime.unregisterEvent(
+			EventType.MODEL_REGISTERED,
+			this.modelRegistrationHandler,
+		);
+		this.runtime.unregisterEvent(
+			EventType.EMBEDDING_GENERATION_REQUESTED,
+			this.embeddingRequestHandler,
+		);
+		await this.initialization;
 		this.runtime.logger.info(
 			{
 				src: "plugin:basic-capabilities:service:embedding",

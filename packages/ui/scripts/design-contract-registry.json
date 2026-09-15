@@ -2,6 +2,61 @@
   "schemaVersion": 1,
   "organisms": [
     {
+      "id": "organism:reply-inspector",
+      "owner": {
+        "kind": "export",
+        "file": "packages/ui/src/components/developer/DeveloperWorkspace.tsx",
+        "symbol": "DeveloperReplyDetails"
+      },
+      "responsibility": "Owns one reply inspector's focused dialog, lazy message lookup, retained usage, Details and Trajectories tab selection, recorded-run loading, retry and cancellation lifecycle.",
+      "dependsOn": [
+        "atom:badge",
+        "atom:button",
+        "atom:card",
+        "atom:codeBlock",
+        "atom:dialog",
+        "atom:nativeSelect",
+        "atom:separator",
+        "atom:table",
+        "atom:tabs",
+        "atom:textarea"
+      ],
+      "grants": [
+        "layout.container",
+        "layout.region",
+        "layout.scroll-owner",
+        "semantics.content",
+        "interaction.select"
+      ],
+      "lifecycleOwner": "message-scoped-reply-inspection"
+    },
+    {
+      "id": "organism:trajectory-inspector",
+      "owner": {
+        "kind": "export",
+        "file": "packages/ui/src/components/pages/TrajectoryDetailView.tsx",
+        "symbol": "TrajectoryDetailView"
+      },
+      "responsibility": "Owns inspection of one recorded run across loading, retry, live revisions, call and step selection, pipeline selection, diagnostics and full-payload copying in page and embedded presentations.",
+      "dependsOn": [
+        "atom:badge",
+        "atom:button",
+        "atom:card",
+        "atom:codeBlock",
+        "atom:nativeSelect",
+        "atom:separator",
+        "atom:tabs"
+      ],
+      "grants": [
+        "layout.container",
+        "layout.region",
+        "layout.scroll-owner",
+        "semantics.content",
+        "interaction.select"
+      ],
+      "lifecycleOwner": "recorded-run-inspection"
+    },
+    {
       "id": "organism:startup-shell",
       "owner": {
         "kind": "export",

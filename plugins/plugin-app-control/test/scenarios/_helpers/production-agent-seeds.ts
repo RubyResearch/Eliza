@@ -25,7 +25,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { settingsAction } from "@elizaos/agent/actions/settings-actions";
-import { uiWidgetsProvider } from "@elizaos/agent/providers/ui-catalog";
+import { uiWidgetCapabilitiesProvider, uiWidgetsProvider } from "@elizaos/agent/providers/ui-catalog";
 import type { Action, Plugin } from "@elizaos/core";
 import type {
   ScenarioContext,
@@ -93,7 +93,7 @@ export function productionAgentSettingsSeed(): ScenarioSeedStep {
           "and the production agent-level SETTINGS action (both normally " +
           "carried by the @elizaos/agent eliza plugin) so settings-in-chat " +
           "live scenarios run against the runtime shape production ships.",
-        providers: [uiWidgetsProvider],
+        providers: [uiWidgetCapabilitiesProvider, uiWidgetsProvider],
       });
       // Direct host-path registration: `override` is honored here (the
       // registerPlugin path downgrades it to first-wins), and app-control's

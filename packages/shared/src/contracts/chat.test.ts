@@ -58,15 +58,16 @@ describe("ChatTurnStatus contract", () => {
 });
 
 describe("ChatFailureKind contract", () => {
-  it("covers exactly the thirteen turn-failure discriminators", () => {
+  it("covers exactly the fourteen turn-failure discriminators", () => {
     const kinds: ChatFailureKind[] = [...CHAT_FAILURE_KINDS];
     expect(new Set(kinds).size).toBe(kinds.length);
-    expect(kinds).toHaveLength(13);
+    expect(kinds).toHaveLength(14);
     expect(kinds).toEqual([
       "insufficient_credits",
       "missing_capability",
       "no_provider",
       "planner_exhaustion",
+      "context_overflow",
       "provider_issue",
       "generation_timeout",
       "rate_limited",
@@ -104,6 +105,7 @@ describe("ChatFailureKind contract", () => {
     expect(isRetryableChatFailureKind("planner_exhaustion")).toBe(true);
     expect(isRetryableChatFailureKind("generation_timeout")).toBe(true);
     expect(isRetryableChatFailureKind("missing_capability")).toBe(false);
+    expect(isRetryableChatFailureKind("context_overflow")).toBe(false);
     expect(isRetryableChatFailureKind("no_provider")).toBe(false);
     expect(isRetryableChatFailureKind("insufficient_credits")).toBe(false);
     expect(isRetryableChatFailureKind("coding_mutation_unverified")).toBe(

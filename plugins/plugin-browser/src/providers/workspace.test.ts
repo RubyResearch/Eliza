@@ -14,6 +14,19 @@ vi.mock("../workspace/browser-workspace.js", () => ({
 }));
 
 describe("browser workspace context", () => {
+  it("does not inject Mac tabs into native-client page context", async () => {
+    const getService = vi.fn();
+    const result = await browserWorkspaceProvider.get(
+      { getService } as never,
+      {
+        content: { metadata: { uiBrowserSurface: "native" } },
+      } as never,
+    );
+    expect(getService).not.toHaveBeenCalled();
+    expect(result.text).not.toContain("Example Domain");
+    expect(result.text).not.toContain("tab-1");
+    expect(result.data?.nativeClient).toBe(true);
+  });
   it("identifies the workspace tabs and exposes only resolved available targets", async () => {
     const resolveTargets = vi.fn(async () => [
       { id: "workspace", description: "Built-in browser" },

@@ -78,6 +78,29 @@ describe("isUiSpec", () => {
 });
 
 describe("looksLikePatch + tryParsePatch", () => {
+  it("recovers only surplus closing braces while preserving literal string data", () => {
+    const patch = {
+      op: "add",
+      path: "/elements/example",
+      value: {
+        type: "Text",
+        props: { text: 'Braces } { and a quoted "value" with a slash \\' },
+      },
+    };
+    const line = JSON.stringify(patch);
+    expect(tryParsePatch(line + "} }")).toEqual(patch);
+    for (const tail of [
+      " trailing prose",
+      ',"extra":true}',
+      ' {"op":"remove","path":"/root"}',
+      "]",
+    ]) {
+      expect(tryParsePatch(line + tail)).toBeNull();
+    }
+    expect(tryParsePatch(line.slice(0, -1))).toBeNull();
+    expect(tryParsePatch('{"op":"add","path":"/root","value":}')).toBeNull();
+  });
+
   it("detects RFC-6902-shaped JSON lines and rejects the rest", () => {
     expect(looksLikePatch('{"op":"add","path":"/root","value":"n1"}')).toBe(
       true,

@@ -41,6 +41,13 @@ bun run --cwd packages/app-core lint         # Biome
 
 This package supplies host integration to the `packages/app` shell and app-facing plugins. It targets Node `>=24`, with `react`/`react-dom`/`three` as peer dependencies and the `@elizaos/capacitor-*` mobile bridges as optional dependencies.
 
+Renderer reuse compares source modification times with the manifest's build
+start, not its output-write time. Inputs changed during compilation fail the
+build before packaging; retry after edits settle. Older completion-only stamps
+require one fresh renderer build. This is a local timestamp freshness guard,
+not a substitute for reviewing the installed artifact or a content-addressed
+source snapshot.
+
 On the self-hosted dashboard, an owner browser session can authenticate a
 WebSocket without exposing its HttpOnly session cookie to JavaScript. Cookie
 admission uses the canonical session store, requires an owner identity and a

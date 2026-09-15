@@ -291,6 +291,7 @@ function buildTrajectoryParams(
   const params = new URLSearchParams();
   setTruthyNumberParam(params, "limit", options?.limit);
   setTruthyNumberParam(params, "offset", options?.offset);
+  setTruthyStringParam(params, "roomId", options?.roomId);
   setTruthyStringParam(params, "source", options?.source);
   setTruthyStringParam(params, "scenarioId", options?.scenarioId);
   setTruthyStringParam(params, "batchId", options?.batchId);
@@ -316,6 +317,7 @@ declare module "./client-base" {
       noResponseReason?: "ignored";
       failureKind?: ChatFailureKind;
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
       localInference?: LocalInferenceChatMetadata;
       actionResults?: ChatActionResultSummary[];
     }>;
@@ -333,6 +335,7 @@ declare module "./client-base" {
       usage?: ChatTokenUsage;
       failureKind?: ChatFailureKind;
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
       localInference?: LocalInferenceChatMetadata;
       actionResults?: ChatActionResultSummary[];
     }>;
@@ -477,6 +480,16 @@ declare module "./client-base" {
       id: string,
       messageId: string,
     ): Promise<{ ok: boolean; deletedCount: number }>;
+    retryConversationReply(
+      id: string,
+      messageId: string,
+    ): Promise<{
+      text: string;
+      agentName: string;
+      messageId: string;
+      userMessageId: string;
+      actionResults?: ChatActionResultSummary[];
+    }>;
     sendConversationMessage(
       id: string,
       text: string,
@@ -500,6 +513,7 @@ declare module "./client-base" {
       failureKind?: ChatFailureKind;
       /** Typed terminal coding/runtime failure; authoritative over reply prose. */
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
       /** Structured "connect another account" request from CONNECT_ACCOUNT. */
       accountConnect?: AccountConnectRequest;
       localInference?: LocalInferenceChatMetadata;
@@ -554,6 +568,7 @@ declare module "./client-base" {
       failureKind?: ChatFailureKind;
       /** See sendConversationMessage above. */
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
       /** See sendConversationMessage above. */
       accountConnect?: AccountConnectRequest;
       localInference?: LocalInferenceChatMetadata;
@@ -798,8 +813,12 @@ declare module "./client-base" {
     refreshRegistry(): Promise<void>;
     getTrajectories(
       options?: TrajectoryListOptions,
+      init?: RequestInit,
     ): Promise<TrajectoryListResult>;
-    getTrajectoryDetail(trajectoryId: string): Promise<TrajectoryDetailResult>;
+    getTrajectoryDetail(
+      trajectoryId: string,
+      options?: RequestInit & { includePayloads?: boolean },
+    ): Promise<TrajectoryDetailResult>;
     getTrajectoryStats(): Promise<TrajectoryStats>;
     getTrajectoryConfig(): Promise<TrajectoryConfig>;
     updateTrajectoryConfig(
@@ -1328,6 +1347,17 @@ ElizaClient.prototype.deleteConversationMessage = async function (
       messageId,
     )}`,
     { method: "DELETE" },
+  );
+};
+
+ElizaClient.prototype.retryConversationReply = async function (
+  this: ElizaClient,
+  id,
+  messageId,
+) {
+  return this.fetch(
+    `/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/retry-reply`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 };
 
@@ -2105,17 +2135,23 @@ ElizaClient.prototype.refreshRegistry = async function (this: ElizaClient) {
 ElizaClient.prototype.getTrajectories = async function (
   this: ElizaClient,
   options?,
+  init?,
 ) {
   const params = buildTrajectoryParams(options);
   const query = params.toString();
-  return this.fetch(`/api/trajectories${query ? `?${query}` : ""}`);
+  return this.fetch(`/api/trajectories${query ? `?${query}` : ""}`, init);
 };
 
 ElizaClient.prototype.getTrajectoryDetail = async function (
   this: ElizaClient,
   trajectoryId,
+  options?,
 ) {
-  return this.fetch(`/api/trajectories/${encodeURIComponent(trajectoryId)}`);
+  const { includePayloads = true, ...init } = options ?? {};
+  return this.fetch(
+    `/api/trajectories/${encodeURIComponent(trajectoryId)}${includePayloads ? "" : "?includePayloads=0"}`,
+    init,
+  );
 };
 
 ElizaClient.prototype.getTrajectoryStats = async function (this: ElizaClient) {

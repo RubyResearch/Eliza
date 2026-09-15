@@ -14,13 +14,13 @@
     },
     "dialog:button+dialog": {
       "disposition": "distinct-domain-compositions",
-      "rationale": "The three dialogs own unrelated editing, confirmation, and calendar workflows.",
+      "rationale": "The skill editor owns source loading and saving; the confirmation dialog emits a caller-owned decision; the calendar editor owns provider mutations and timed or all-day date validation. Its timing fieldset does not introduce a shared dialog lifecycle.",
       "memberComponentIds": [
         "packages/ui/src/components/pages/skill-detail-panel.tsx:EditSkillModal",
         "packages/ui/src/components/ui/confirm-dialog.tsx:ConfirmDialog",
         "plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:EventEditorDrawer"
       ],
-      "semanticFingerprint": "sha256:7d8e1352a677365c5ff593aa06cecc62fb6ad5b2b4b7f2d6aa195a563c33c0db"
+      "semanticFingerprint": "sha256:20da2a24641576e0c73aca23d9042d1a865c4885e106f53a792be2624a8fe4d7"
     },
     "dialog:button+dialog+input": {
       "disposition": "distinct-domain-compositions",

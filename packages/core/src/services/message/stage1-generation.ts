@@ -24,6 +24,34 @@ import {
 	synthesizeSimpleReplyFromPlainText,
 } from "./stage1-reply-policy.js";
 
+/** Resolve conflicting completion/action declarations without guessing from reply prose. */
+export function getStage1RoutingRepair(
+	parsed: Record<string, unknown> | null,
+): string | undefined {
+	if (
+		parsed?.shouldRespond !== "RESPOND" ||
+		parsed.replyEffectStatus !== "none" ||
+		parsed.requiresTool === true ||
+		typeof parsed.replyText !== "string" ||
+		parsed.replyText.trim().length === 0 ||
+		!Array.isArray(parsed.contexts) ||
+		parsed.contexts.some((context) => context !== "simple") ||
+		!Array.isArray(parsed.candidateActionNames) ||
+		parsed.candidateActionNames.some((name) => typeof name !== "string") ||
+		!Array.isArray(parsed.intents) ||
+		parsed.intents.some((intent) => typeof intent !== "string") ||
+		!parsed.intents.some((intent) => intent.trim().length > 0)
+	)
+		return undefined;
+	return [
+		"response_contract_repair:",
+		"Your previous HANDLE_RESPONSE conflicts: simple context with a reply and replyEffectStatus=none declares a completed conversational answer, but nonempty intents declare pending runtime work. This is validation of that response, not a new user request. Nothing in it has been delivered or executed.",
+		'Return HANDLE_RESPONSE with a consistent decision for the original request. If the supplied context and reply complete it, preserve the answer and use intents=[], candidateActionNames=[], contexts=["simple"], replyEffectStatus="none". If any action or external-state read remains, retain every pending outcome and route to the applicable planning contexts and known action candidates; mark a promised action reply pending. Do not discard pending actions to make the reply terminal, invent tool names, or claim an unverified effect. Use contextRequests if an advertised reference is needed.',
+		"previous_model_response:",
+		JSON.stringify(parsed),
+	].join("\n");
+}
+
 /**
  * Detect a Stage 1 model result with no usable content. Covers an empty
  * string, and the `GenerateTextResult` object shape where `text` is blank

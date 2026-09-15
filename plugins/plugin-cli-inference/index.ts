@@ -1,5 +1,11 @@
-import { createHash } from "node:crypto";
-import type { GenerateTextParams, IAgentRuntime, Plugin, ToolDefinition } from "@elizaos/core";
+import { createHash, randomUUID } from "node:crypto";
+import type {
+  GenerateTextParams,
+  GenerateTextResult,
+  IAgentRuntime,
+  Plugin,
+  ToolDefinition,
+} from "@elizaos/core";
 import {
   ElizaError,
   HANDLE_RESPONSE_TOOL_NAME,
@@ -31,21 +37,22 @@ import {
 } from "./src/clean-routing-planner";
 import { CodexCli } from "./src/codex-cli-exec";
 import { CodexSdkSession, type CodexSdkSessionConfig } from "./src/codex-sdk-session";
+import { generateCodexToolResponse } from "./src/codex-tool-response";
 import { flattenPrompt } from "./src/prompt-flatten";
 
 /**
- * @elizaos/plugin-cli-inference — the TOS-clean SAFE/CLOUD inference route.
+ * @elizaos/plugin-cli-inference — opt-in local CLI/SDK inference.
  *
  * Serves chat/planner inference through sanctioned local routes:
  *   - `claude --print`  (reads ~/.claude/.credentials.json itself), or
  *   - a warm Claude Agent SDK session (reads the Claude subscription creds itself), or
- *   - `codex exec`      (reads ~/.codex/auth.json itself).
+ *   - `codex exec` or the official Codex SDK (owns its stored sign-in).
  *
  * eliza never sees/forwards/logs the subscription token — the child env is
  * filtered (allowlist + secret blocklist) and the CLI loads its own creds.
  *
  * The whole models map is INERT unless `ELIZA_CHAT_VIA_CLI` is `claude`,
- * `claude-sdk`, or `codex`. We register TEXT_LARGE / TEXT_MEGA /
+ * `claude-sdk`, `codex`, or `codex-sdk`. By default we register TEXT_LARGE / TEXT_MEGA /
  * RESPONSE_HANDLER only:
  *
  *   - RESPONSE_HANDLER is the whole point — it generates the user-facing reply,
@@ -53,7 +60,7 @@ import { flattenPrompt } from "./src/prompt-flatten";
  *     turn that actually answers (~3-4s).
  *   - TEXT_LARGE / TEXT_MEGA cover other large free-text generations (e.g. the
  *     post-turn evaluator) — also occasional, also tolerant of plain text.
- *   - ACTION_PLANNER is registered ONLY in text-planner mode
+ *   - The free-text backends register ACTION_PLANNER only in text-planner mode
  *     (`ELIZA_PLANNER_NATIVE_TOOLS=0`), where the planner emits an XML
  *     `<response><actions>` block the free-text CLI CAN produce. With native
  *     tools on (the default), the planner needs GBNF / native-tool /
@@ -62,10 +69,12 @@ import { flattenPrompt } from "./src/prompt-flatten";
  *     `NATIVE_TOOLS=0` lets the SAFE route run STANDALONE (chat + planner +
  *     coding all on the subscription CLI) without ever hijacking a hybrid setup.
  *
- * High-frequency should-respond/triage (TEXT_SMALL/NANO/MEDIUM) is never
- * registered, so per-turn CLI spawn cost stays bounded to the user-facing reply
- * via RESPONSE_HANDLER, the planner (text mode only), and possibly the post-turn
- * evaluator — not the cheap triage calls.
+ * Codex SDK also supports the native Eliza planner contract: structured output
+ * returns tool decisions which Eliza validates and executes. It starts a fresh
+ * thread per request, retaining no independent conversation history. The shared
+ * ELIZA_CLI_CLAUDE_ALL_TIERS setting also enables its small text tiers.
+ * Authentication and permitted usage remain subject to each vendor's terms;
+ * this adapter is not a blanket authorization for hosted subscription reuse.
  */
 
 /** Large-tier free-text model types this plugin registers (when enabled). */
@@ -76,9 +85,8 @@ const LARGE_TIER_MODEL_TYPES: readonly string[] = [
 ];
 
 /**
- * The planner. Registered ONLY in text-planner mode so the SAFE/CLI route can
- * run standalone. The free-text CLI can emit the XML `<actions>` block but cannot
- * honor GBNF/native-tool enforcement, so this REQUIRES `ELIZA_PLANNER_NATIVE_TOOLS=0`.
+ * Codex SDK bridges the native tool contract; other backends require the
+ * existing text-planner mode (ELIZA_PLANNER_NATIVE_TOOLS=0).
  */
 const PLANNER_MODEL_TYPES: readonly string[] = [ModelType.ACTION_PLANNER];
 
@@ -235,7 +243,7 @@ type CodexSdkSessionFactory = (config: CodexSdkSessionConfig) => CodexSdkSession
 
 let createCodexSdkSession: CodexSdkSessionFactory = (config) => new CodexSdkSession(config);
 
-/** Replace the warm Codex-session constructor for deterministic boundary tests. */
+/** Replace the Codex adapter constructor for deterministic boundary tests. */
 export function __setCodexSdkSessionFactoryForTests(factory: CodexSdkSessionFactory): () => void {
   const previous = createCodexSdkSession;
   createCodexSdkSession = factory;
@@ -379,15 +387,15 @@ export async function disposeSdkSessions(): Promise<void> {
   for (const s of codex) s.dispose();
 }
 
-// Warm Codex SDK threads use one stable (model, mode) key. The effective restart
-// cadence is stored beside the session so a change disposes/replaces the thread
-// without leaking cache or account-rotation entries.
+// Cache adapter configuration, not conversation history. Codex starts a fresh
+// thread for each request; runtime identity isolates configuration and account affinity.
 interface CachedCodexSdkSession {
   session: CodexSdkSession;
   lifecycleFingerprint: string;
 }
 
 const codexSdkSessions = new Map<string, CachedCodexSdkSession>();
+const codexRuntimeIds = new WeakMap<IAgentRuntime, string>();
 
 /** The codex model for a given tier (planner/small can differ from large). */
 function resolveCodexModel(runtime: IAgentRuntime, modelType: string): string {
@@ -397,8 +405,13 @@ function resolveCodexModel(runtime: IAgentRuntime, modelType: string): string {
   return ((isSmallTier ? small : large) || large || "gpt-5.5").trim();
 }
 
-function codexSessionKey(model: string, router: boolean): string {
-  return `${model}\u001f${router ? "route" : "text"}`;
+function codexSessionKey(runtime: IAgentRuntime, model: string, router: boolean): string {
+  let id = codexRuntimeIds.get(runtime);
+  if (!id) {
+    id = randomUUID();
+    codexRuntimeIds.set(runtime, id);
+  }
+  return `${id}\u001f${model}\u001f${router ? "route" : "text"}`;
 }
 
 function codexLifecycleFingerprint(config: CodexSdkTimeoutConfiguration): string {
@@ -406,7 +419,7 @@ function codexLifecycleFingerprint(config: CodexSdkTimeoutConfiguration): string
 }
 
 /**
- * Evict + dispose a warm Codex SDK thread by its cache key so the next
+ * Evict + dispose a Codex SDK adapter by its cache key so the next
  * `getCodexSdkSession` re-starts it — re-reading the (rotated) per-account
  * `CODEX_HOME`. Used by account rotation after a subscription limit.
  */
@@ -417,7 +430,7 @@ function evictCodexSdkSession(key: string): void {
   existing.session.dispose();
 }
 
-/** Lazily cache a warm Codex SDK thread for a (model, mode, restart cadence). */
+/** Cache adapter configuration per runtime; request threads are never reused. */
 function getCodexSdkSession(
   runtime: IAgentRuntime,
   model: string,
@@ -425,8 +438,12 @@ function getCodexSdkSession(
   timeoutConfiguration: CodexSdkTimeoutConfiguration,
   subprocessEnv?: RotationSubprocessEnv
 ): CodexSdkSession {
-  const key = codexSessionKey(model, router);
-  const lifecycleFingerprint = codexLifecycleFingerprint(timeoutConfiguration);
+  const key = codexSessionKey(runtime, model, router);
+  const lifecycleFingerprint = JSON.stringify([
+    codexLifecycleFingerprint(timeoutConfiguration),
+    getSetting(runtime, "ELIZA_CLI_CODEX_REASONING_EFFORT"),
+    getSetting(runtime, "ELIZA_CLI_CODEX_BIN"),
+  ]);
   const existing = codexSdkSessions.get(key);
   if (existing?.lifecycleFingerprint === lifecycleFingerprint) {
     return existing.session;
@@ -591,7 +608,7 @@ function resolveClaudeSdkTimeoutConfiguration(
   };
 }
 
-/** Resolve the only numeric setting consumed by the warm Codex backend. */
+/** Parse the legacy Codex restart setting for configuration compatibility. */
 function resolveCodexSdkTimeoutConfiguration(runtime: IAgentRuntime): CodexSdkTimeoutConfiguration {
   return {
     sdkRestartAfterTurns:
@@ -638,7 +655,7 @@ async function generateViaCli(
   runtime: IAgentRuntime,
   params: GenerateTextParams,
   modelType: string
-): Promise<string> {
+): Promise<string | GenerateTextResult> {
   const backend = resolveCliBackend({
     ELIZA_CHAT_VIA_CLI: getSetting(runtime, "ELIZA_CHAT_VIA_CLI"),
   });
@@ -734,10 +751,19 @@ async function generateViaCli(
     const model = resolveCodexModel(runtime, modelType);
     const { system, body } = flattenPrompt(generateParams);
     const framedBody = appendTextDirective(`${frameTextSystemPrompt(system)}\n\n${body}`);
-    const key = codexSessionKey(model, false);
-    return withAccountRotation(
+    const key = codexSessionKey(runtime, model, false);
+    return withAccountRotation<string | GenerateTextResult>(
       (env) =>
-        getCodexSdkSession(runtime, model, false, timeoutConfiguration, env).generate(framedBody),
+        params.tools?.length
+          ? generateCodexToolResponse(
+              getCodexSdkSession(runtime, model, false, timeoutConfiguration, env),
+              params
+            )
+          : getCodexSdkSession(runtime, model, false, timeoutConfiguration, env).generate(
+              framedBody,
+              undefined,
+              params.signal
+            ),
       {
         backend,
         getValue: (k) => getSetting(runtime, k),
@@ -775,7 +801,10 @@ async function generateViaCli(
  * (`parseJsonPlannerOutput` → `normalizeBarePlannerAction`) accepts directly, so
  * no core change is needed.
  */
-async function planViaCli(runtime: IAgentRuntime, params: GenerateTextParams): Promise<string> {
+async function planViaCli(
+  runtime: IAgentRuntime,
+  params: GenerateTextParams
+): Promise<string | GenerateTextResult> {
   const backend = resolveCliBackend({
     ELIZA_CHAT_VIA_CLI: getSetting(runtime, "ELIZA_CHAT_VIA_CLI"),
   });
@@ -803,6 +832,7 @@ async function planViaCli(runtime: IAgentRuntime, params: GenerateTextParams): P
     );
   }
   if (backend === "codex-sdk") {
+    if (params.tools?.length) return generateViaCli(runtime, params, ModelType.ACTION_PLANNER);
     const timeoutConfiguration = resolveCodexSdkTimeoutConfiguration(runtime);
     // codex routes via NATIVE structured output (outputSchema) for a reliable
     // {action, params} shape. The clean-routing prompt (menu + transcript +
@@ -811,9 +841,13 @@ async function planViaCli(runtime: IAgentRuntime, params: GenerateTextParams): P
     const model = resolveCodexModel(runtime, ModelType.ACTION_PLANNER);
     const clean = buildCleanRoutingParams(params);
     const routeBody = `${clean.system ?? ""}\n\n${clean.prompt ?? ""}`;
-    const key = codexSessionKey(model, true);
+    const key = codexSessionKey(runtime, model, true);
     return withAccountRotation(
-      (env) => getCodexSdkSession(runtime, model, true, timeoutConfiguration, env).route(routeBody),
+      (env) =>
+        getCodexSdkSession(runtime, model, true, timeoutConfiguration, env).route(
+          routeBody,
+          params.signal
+        ),
       {
         backend,
         getValue: (k) => getSetting(runtime, k),
@@ -836,7 +870,7 @@ export function buildModels(
   if (!resolveCliBackend(source)) return {};
   const models: Record<
     string,
-    (runtime: IAgentRuntime, params: GenerateTextParams) => Promise<string>
+    (runtime: IAgentRuntime, params: GenerateTextParams) => Promise<string | GenerateTextResult>
   > = {};
   const textTiers = allTiersEnabled()
     ? [...LARGE_TIER_MODEL_TYPES, ...SMALL_TIER_MODEL_TYPES]
@@ -844,7 +878,7 @@ export function buildModels(
   for (const modelType of textTiers) {
     models[modelType] = (runtime, params) => generateViaCli(runtime, params, modelType);
   }
-  if (textPlannerEnabled()) {
+  if (textPlannerEnabled() || resolveCliBackend(source) === "codex-sdk") {
     for (const modelType of PLANNER_MODEL_TYPES) {
       models[modelType] = (runtime, params) => planViaCli(runtime, params);
     }
@@ -893,7 +927,7 @@ export function buildModelMetadata(
       metadata[modelType] = declaration(settings);
     }
   }
-  if (textPlannerEnabled()) {
+  if (textPlannerEnabled() || backend === "codex-sdk") {
     for (const modelType of PLANNER_MODEL_TYPES) {
       metadata[modelType] = declaration(isWarm ? [plannerSetting, largeSetting] : [largeSetting]);
     }
@@ -904,7 +938,7 @@ export function buildModelMetadata(
 export const cliInferencePlugin: Plugin = {
   name: "cli-inference",
   description:
-    "TOS-clean SAFE/CLOUD inference: serves large-tier model handlers through sanctioned claude, claude-sdk, or codex routes; each route reads its own creds. Inert unless ELIZA_CHAT_VIA_CLI=claude|claude-sdk|codex.",
+    "Opt-in local CLI/SDK inference via claude, claude-sdk, codex, or codex-sdk. Each backend manages its own authentication; Codex SDK bridges Eliza tool decisions using isolated requests.",
   modelMetadata: buildModelMetadata(),
   // High priority so that, when ELIZA_CHAT_VIA_CLI is set, this plugin
   // deterministically wins the tiers it registers (TEXT_LARGE / TEXT_MEGA /

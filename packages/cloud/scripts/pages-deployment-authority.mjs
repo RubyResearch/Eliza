@@ -340,7 +340,11 @@ function parseWorkflow(value, label = "workflow") {
  * closed, publishable identity needed by later release jobs. Session-local CLI
  * arguments and log paths are deliberately validated and discarded.
  */
-export function parseWranglerPagesDeploymentOutput(
+export function parseWranglerPagesDeploymentOutput(raw, options) {
+  return readWranglerPagesDeploymentIdentity(raw, options).authority;
+}
+
+function readWranglerPagesDeploymentIdentity(
   raw,
   {
     expectedProject,
@@ -352,6 +356,7 @@ export function parseWranglerPagesDeploymentOutput(
     runId,
     runAttempt,
   },
+  allowMissingAlias = false,
 ) {
   const [sessionValue, summaryValue, detailedValue] = parseNdjson(raw);
   parseWranglerSession(sessionValue, {
@@ -364,10 +369,12 @@ export function parseWranglerPagesDeploymentOutput(
     ["deployment_id", "pages_project", "timestamp", "type", "url", "version"],
     "pages-deploy record",
   );
+  const missingAlias =
+    isRecord(detailedValue) && !Object.hasOwn(detailedValue, "alias");
   const detailed = requireExactKeys(
     detailedValue,
     [
-      "alias",
+      ...(allowMissingAlias && missingAlias ? [] : ["alias"]),
       "deployment_id",
       "deployment_trigger",
       "environment",
@@ -404,7 +411,10 @@ export function parseWranglerPagesDeploymentOutput(
     detailed.url,
     "detailed deployment URL",
   );
-  const aliasUrl = requireHttpsUrl(detailed.alias, "deployment alias");
+  const aliasUrl =
+    allowMissingAlias && missingAlias
+      ? null
+      : requireHttpsUrl(detailed.alias, "deployment alias");
   const commitMetadata = requireExactKeys(
     requireExactKeys(
       detailed.deployment_trigger,
@@ -429,7 +439,8 @@ export function parseWranglerPagesDeploymentOutput(
   }
   if (project !== expectedProject) fail("Pages project does not match release");
   if (sourceSha !== expectedCommit) fail("commit hash does not match release");
-  if (aliasUrl !== expectedAlias) fail("Pages alias does not match release");
+  if (aliasUrl !== null && aliasUrl !== expectedAlias)
+    fail("Pages alias does not match release");
   if (detailed.environment !== expectedEnvironment) {
     fail("Pages environment does not match release");
   }
@@ -442,25 +453,132 @@ export function parseWranglerPagesDeploymentOutput(
     fail("deployment URL is not owned by the expected Pages project");
   }
   const expectedAliasHost = `${expectedBranch}.${project}.pages.dev`;
-  if (new URL(aliasUrl).hostname !== expectedAliasHost) {
+  if (
+    new URL(aliasUrl ?? requireHttpsUrl(expectedAlias, "expected alias"))
+      .hostname !== expectedAliasHost
+  ) {
     fail("Pages alias is not owned by the expected release branch");
   }
 
   return {
-    schema: PAGES_AUTHORITY_SCHEMA,
-    sourceSha,
-    workflow: {
-      runId: requirePositiveInteger(runId, "run ID"),
-      runAttempt: requirePositiveInteger(runAttempt, "run attempt"),
+    deploymentId,
+    authority: {
+      schema: PAGES_AUTHORITY_SCHEMA,
+      sourceSha,
+      workflow: {
+        runId: requirePositiveInteger(runId, "run ID"),
+        runAttempt: requirePositiveInteger(runAttempt, "run attempt"),
+      },
+      project,
+      branch: requireString(expectedBranch, "expected branch", PROJECT),
+      pagesEnvironment: expectedEnvironment,
+      productionBranch: expectedProductionBranch,
+      deploymentUrl,
+      aliasUrl,
+      deploymentIdSha256: sha256(deploymentId),
     },
-    project,
-    branch: requireString(expectedBranch, "expected branch", PROJECT),
-    pagesEnvironment: expectedEnvironment,
-    productionBranch: expectedProductionBranch,
-    deploymentUrl,
-    aliasUrl,
-    deploymentIdSha256: sha256(deploymentId),
   };
+}
+
+/**
+ * Wrangler may report deploy success before Pages exposes its branch alias.
+ * Preserve the original records; reconcile only that absent field against the
+ * exact provider resource. Nothing publishable is returned until it matches.
+ */
+export async function resolveWranglerPagesDeploymentOutput(
+  raw,
+  options,
+  {
+    // biome-ignore lint/suspicious/noUndeclaredEnvVars: Direct protected CLI invocation is never Turbo-cached.
+    accountId = process.env.CLOUDFLARE_ACCOUNT_ID,
+    // biome-ignore lint/suspicious/noUndeclaredEnvVars: Direct protected CLI invocation is never Turbo-cached.
+    apiToken = process.env.CLOUDFLARE_API_TOKEN,
+    fetchImpl = globalThis.fetch,
+    sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  } = {},
+) {
+  const { deploymentId, authority } = readWranglerPagesDeploymentIdentity(
+    raw,
+    options,
+    true,
+  );
+  if (authority.aliasUrl !== null) return authority;
+
+  requireString(accountId, "Cloudflare account ID", /^[0-9a-f]{32}$/);
+  requireString(apiToken, "Cloudflare API token");
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${authority.project}/deployments/${deploymentId}`;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0) await sleep(1000);
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        headers: { Authorization: `Bearer ${apiToken}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      // error-policy:J3 transport failure rejects release proof without exposing credentials.
+      fail("Pages deployment identity lookup failed");
+    }
+    if (!response.ok)
+      fail(`Pages deployment identity lookup returned HTTP ${response.status}`);
+    let rawPayload;
+    try {
+      rawPayload = await response.json();
+    } catch {
+      // error-policy:J3 never include a raw provider error body in release logs.
+      fail("Pages deployment identity response was not readable JSON");
+    }
+    const payload = requireRecord(rawPayload, "Pages API response");
+    if (payload.success !== true)
+      fail("Pages deployment identity lookup was not successful");
+    const deployment = requireRecord(payload.result, "Pages API deployment");
+    const metadata = requireRecord(
+      requireRecord(
+        deployment.deployment_trigger,
+        "Pages API deployment trigger",
+      ).metadata,
+      "Pages API deployment metadata",
+    );
+    const stage = requireRecord(
+      deployment.latest_stage,
+      "Pages API deployment stage",
+    );
+    for (const [label, observed, expected] of [
+      ["deployment ID", deployment.id, deploymentId],
+      ["project", deployment.project_name, authority.project],
+      ["URL", deployment.url, authority.deploymentUrl],
+      ["source", metadata.commit_hash, authority.sourceSha],
+      ["branch", metadata.branch, authority.branch],
+      ["clean commit", metadata.commit_dirty, false],
+      ["environment", deployment.environment, authority.pagesEnvironment],
+      [
+        "production branch",
+        deployment.production_branch,
+        authority.productionBranch,
+      ],
+      ["stage", stage.name, "deploy"],
+      ["stage status", stage.status, "success"],
+    ]) {
+      if (observed !== expected)
+        fail(`Pages API ${label} differs from release identity`);
+    }
+    const aliases = deployment.aliases ?? [];
+    if (
+      !Array.isArray(aliases) ||
+      aliases.some((alias) => typeof alias !== "string")
+    ) {
+      fail("Pages API aliases must be a string array");
+    }
+    const alias = aliases.find((value) => value === options.expectedAlias);
+    if (alias) {
+      return parsePagesDeploymentAuthority({
+        ...authority,
+        aliasUrl: requireHttpsUrl(alias, "Pages API alias"),
+      });
+    }
+  }
+  fail("Pages branch alias did not appear within the bounded identity lookup");
 }
 
 export function parsePagesDeploymentAuthority(value) {
@@ -961,7 +1079,7 @@ async function main(argv) {
         "run-attempt",
       ]),
     );
-    const authority = parseWranglerPagesDeploymentOutput(
+    const authority = await resolveWranglerPagesDeploymentOutput(
       await readFile(resolve(values.get("input")), "utf8"),
       {
         expectedProject: values.get("expected-project"),

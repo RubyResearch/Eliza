@@ -149,7 +149,7 @@ describe("voice-session-state machine (§7.4)", () => {
     expect(retry.lastError?.retryable).toBe(true);
   });
 
-  it("usage events carry trace but never change phase", () => {
+  it("usage settlement does not cut off speaking", () => {
     const speaking = applyServerEvent(fresh(), {
       t: "speaking_start",
       traceId: "T4",
@@ -162,6 +162,26 @@ describe("voice-session-state machine (§7.4)", () => {
     });
     expect(after.phase).toBe("speaking");
     expect(after.traceId).toBe("T4");
+  });
+
+  it("settles a silent thinking turn and ignores an older turn's receipt", () => {
+    const thinking = applyServerEvent(fresh(), {
+      t: "stt_final",
+      text: "Please stay quiet for a moment.",
+      traceId: "T5",
+    });
+    const receipt = {
+      t: "usage" as const,
+      sttMs: 100,
+      ttsChars: 0,
+      traceId: "T5",
+    };
+    expect(applyServerEvent(thinking, { ...receipt, traceId: "T4" })).toBe(
+      thinking,
+    );
+    const settled = applyServerEvent(thinking, receipt);
+    expect(settled.phase).toBe("complete");
+    expect(beginListening(settled).phase).toBe("listening");
   });
 
   it("beginListening only advances from ready/complete", () => {

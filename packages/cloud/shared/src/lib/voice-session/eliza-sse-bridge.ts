@@ -20,7 +20,7 @@
  * decoding path, no live model.
  */
 
-import { REALTIME_VOICE_CLIENT_TRANSPORT } from "@elizaos/shared";
+import { REALTIME_VOICE_CLIENT_TRANSPORT, type VoiceUiContext } from "@elizaos/shared";
 import { ELIZA_TRACE_ID_HEADER } from "../observability/http-telemetry";
 import { logger } from "../utils/logger";
 
@@ -109,6 +109,7 @@ export function parseElizaServerTiming(raw: string | null): ElizaServerTimingRec
 }
 
 export interface ElizaSseBridgeRequest {
+  uiContext?: VoiceUiContext;
   /** API origin hosting the canonical agent conversation routes. */
   endpoint: string;
   /** Bearer token for the existing Eliza session (server-held; never the client's). */
@@ -243,6 +244,7 @@ export async function streamElizaConversation(
           : {}),
         ...(request.transientInput ? { transientInput: true } : {}),
         metadata: {
+          ...request.uiContext,
           clientTransport: REALTIME_VOICE_CLIENT_TRANSPORT,
         },
         // Snapshot-only action replies must remain distinguishable from model

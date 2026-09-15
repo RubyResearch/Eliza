@@ -1,9 +1,13 @@
 /** Tests final reply grounding and recovery against real evaluator parsing and receipt validation. */
 import { describe, expect, it, vi } from "vitest";
+import { renderContextObject, segmentBlock } from "../runtime/context-renderer";
 import { parseEvaluatorOutput } from "../runtime/evaluator";
+import type { PlannerTrajectory } from "../runtime/planner-types";
 import { createMockRuntime } from "../testing/mock-runtime";
 import { type ActionResult, type Memory, ModelType } from "../types";
+import { applyGroundedActionReply } from "../types/action-reply";
 import { resolvePlannedReplyEgress } from "./message";
+import { capturePlannerReplyRecovery } from "./message/egress-policy";
 
 const message: Memory = {
 	id: "00000000-0000-4000-8000-000000000001",
@@ -36,7 +40,327 @@ const savedNote: ActionResult = {
 	],
 };
 
+const withdrawnEditMessage: Memory = {
+	...message,
+	content: {
+		text: "Cancel the unstarted copper-tag edit. Read QA note B, then update note-qa-missing. If it is missing, do not create or substitute anything; leave the existing notes unchanged.",
+	},
+};
+const readThenRejectedUpdate: ActionResult[] = [
+	{
+		success: true,
+		data: {
+			actionName: "NOTES_LIST",
+			readOnlyOperation: true,
+			notes: [{ id: "qa-b", title: "QA note B", body: "silver thermos" }],
+		},
+	},
+	{
+		success: false,
+		error: 'No sticky note matches "note-qa-missing".',
+		data: { actionName: "NOTES_UPDATE" },
+	},
+];
+const withdrawnEditReply =
+	"I will not perform that edit. QA note B says silver thermos. The requested update failed because the target note was not found; neither existing note changed.";
+
 describe("model-backed final reply recovery", () => {
+	it("repairs an unsaved draft without serializing the provider store and retains complete grounding evidence", async () => {
+		const response = "I will not create or change any notes.";
+		let repairPrompt = "";
+		const runtime = createMockRuntime({
+			useModel: vi.fn(async (_type, params) => {
+				repairPrompt = String(params.prompt);
+				return JSON.stringify({ response, effectReceiptIds: [] });
+			}),
+		});
+		const historyStore = "internal-provider-history-copy ".repeat(10000);
+		const walletEvidence = {
+			data: {
+				token: "SOL",
+				balance: "2.000000001",
+				warning: "Exact observation: 紫色; not settlement.",
+			},
+			text: "Observed balance is 2.000000001 SOL; observation-tail.",
+		};
+		const recovery = {
+			context:
+				'Complete saved context: wait for APPROVE VIOLET.\nCorrection: 紫色. Keep "two  spaces", C:\\notes\\draft and literal \\n. context-tail',
+			pendingToolCalls: [],
+			evaluatorOutputs: [],
+		};
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message: {
+					...message,
+					content: {
+						text: "Cancel that unsaved draft. Do not create or change any notes.",
+					},
+				},
+				reply:
+					"Cancelled. The audit note was only a preview and was never saved, so there's nothing to undo. No notes created or changed.",
+				actionResults: [],
+				providers: {
+					RECENT_MESSAGES: {
+						text: historyStore,
+						data: { originalMessages: historyStore },
+					},
+					"get-balance": walletEvidence,
+				},
+				recovery,
+			}),
+		).resolves.toEqual({ text: response, effectReceiptIds: [] });
+		expect(runtime.useModel).toHaveBeenCalledTimes(1);
+		expect(repairPrompt).not.toContain("internal-provider-history-copy");
+		const payloadLine = repairPrompt
+			.split("\n")
+			.find((line) => line.startsWith("Original action payload: "));
+		expect(payloadLine).toBeDefined();
+		const payload = JSON.parse(
+			payloadLine!.replace("Original action payload: ", ""),
+		);
+		expect(payload.providers).toEqual({ "get-balance": walletEvidence });
+		expect(payload.replyOnlyRecovery.context).toBe(recovery.context);
+		expect(payload.request.text).toBe(
+			"Cancel that unsaved draft. Do not create or change any notes.",
+		);
+	});
+
+	it("reuses lossless history references in durable recovery without dropping corrections or replaying effects", async () => {
+		const repeated =
+			"Standing rule: show the full title and wait for separate approval.\n".repeat(
+				40,
+			);
+		const history = [
+			repeated,
+			"Correction: the charger is burgundy, previously teal.",
+			repeated,
+		];
+		const trajectory: PlannerTrajectory = {
+			context: {
+				id: "recovery-context",
+				metadata: { historyReferenceEncoding: true },
+				events: [
+					{ id: "policy", type: "provider", name: "PRIVACY", text: repeated },
+					...history.map((content, index) => ({
+						id: `history-${index}`,
+						type: "segment" as const,
+						source: "prior-dialogue",
+						segment: {
+							id: `history-${index}`,
+							label: "prior_message:user",
+							content,
+							stable: false,
+						},
+					})),
+					{
+						id: "current",
+						type: "message",
+						message: { role: "user", content: message.content },
+					},
+					{
+						id: "effect",
+						type: "tool_result",
+						metadata: { result: savedNote },
+					},
+				],
+			},
+			steps: [],
+			archivedSteps: [],
+			plannedQueue: [{ name: "CALENDAR_READ" }],
+			evaluatorOutputs: [],
+		};
+		const before = structuredClone(trajectory);
+		const reply =
+			"The Picnic note was saved. The calendar read is still pending.";
+		const useModel = vi.fn(async () =>
+			JSON.stringify({ response: reply, effectReceiptIds: ["note-proof"] }),
+		);
+		const processActions = vi.fn();
+		const runtime = createMockRuntime({ useModel, processActions });
+		const recovery = capturePlannerReplyRecovery(runtime, message, trajectory);
+		const original = renderContextObject(trajectory.context)
+			.promptSegments.map(segmentBlock)
+			.join("\n\n");
+		expect(recovery.context.length).toBeLessThan(original.length);
+		// Independently expand the recorded backward reference and its anchor.
+		const expanded = recovery.context
+			.replace(/^History encoding:.*\n\n/m, "")
+			.replace("prior_message:user:\n[h1]\n", "prior_message:user:\n")
+			.replace(
+				"prior_message:user:\n[h3; same_text_as=h1]",
+				`prior_message:user:\n${history[0]}`,
+			);
+		expect(expanded).toBe(original);
+		expect(trajectory).toEqual(before);
+		expect(recovery.pendingToolCalls).toEqual(trajectory.plannedQueue);
+		// Persist/reload the capture before using the real reply-only boundary.
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message,
+				reply: "",
+				actionResults: [savedNote],
+				recovery: JSON.parse(JSON.stringify(recovery)),
+			}),
+		).resolves.toEqual({ text: reply, effectReceiptIds: ["note-proof"] });
+		expect(useModel).toHaveBeenCalledTimes(1);
+		expect(useModel).toHaveBeenCalledWith(
+			ModelType.TEXT_SMALL,
+			expect.objectContaining({
+				prompt: expect.stringContaining("same_text_as=h1"),
+			}),
+		);
+		expect(processActions).not.toHaveBeenCalled();
+		// Voice/group/legacy contexts without the explicit encoding contract stay unchanged.
+		trajectory.context.metadata = {};
+		expect(
+			capturePlannerReplyRecovery(runtime, message, trajectory).context,
+		).toBe(original);
+	});
+	it("accepts withdrawn intent and a pre-write rejection without mutation proof or another call", async () => {
+		const runtime = createMockRuntime({ useModel: vi.fn() });
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message: withdrawnEditMessage,
+				reply: withdrawnEditReply,
+				actionResults: readThenRejectedUpdate,
+			}),
+		).resolves.toEqual({ text: withdrawnEditReply, effectReceiptIds: [] });
+		expect(runtime.useModel).not.toHaveBeenCalled();
+	});
+
+	it("rewrites ambiguous cancellation as withdrawn intent with complete read and failure evidence", async () => {
+		const useModel = vi.fn(async () =>
+			JSON.stringify({ response: withdrawnEditReply, effectReceiptIds: [] }),
+		);
+		const processActions = vi.fn();
+		const runtime = createMockRuntime({ useModel, processActions });
+		const originalResults = structuredClone(readThenRejectedUpdate);
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message: withdrawnEditMessage,
+				reply: "Cancelled the copper-tag edit without modifying either note.",
+				actionResults: readThenRejectedUpdate,
+			}),
+		).resolves.toEqual({ text: withdrawnEditReply, effectReceiptIds: [] });
+		expect(useModel).toHaveBeenCalledTimes(1);
+		for (const evidence of [
+			withdrawnEditMessage.content.text,
+			"silver thermos",
+			"note-qa-missing",
+			"NOTES_LIST",
+			"NOTES_UPDATE",
+		]) {
+			expect(useModel).toHaveBeenCalledWith(
+				ModelType.TEXT_SMALL,
+				expect.objectContaining({ prompt: expect.stringContaining(evidence) }),
+			);
+		}
+		expect(processActions).not.toHaveBeenCalled();
+		expect(readThenRejectedUpdate).toEqual(originalResults);
+	});
+
+	it.each([
+		"I will not perform that edit. I deleted the note.",
+		"I will not perform that edit, and I deleted the note.",
+		"I will not perform that edit. I cancelled the calendar event.",
+		"I will not perform that edit, and I cancelled the calendar event.",
+		"Cancelled the copper-tag edit without modifying either note.",
+	])(
+		"still rejects unproven completed changes in a withdrawal rewrite: %s",
+		async (response) => {
+			const useModel = vi.fn(async () =>
+				JSON.stringify({ response, effectReceiptIds: [] }),
+			);
+			const runtime = createMockRuntime({ useModel });
+			await expect(
+				resolvePlannedReplyEgress({
+					runtime,
+					message: withdrawnEditMessage,
+					reply: "Cancelled the copper-tag edit without modifying either note.",
+					actionResults: readThenRejectedUpdate,
+				}),
+			).rejects.toMatchObject({ code: "REPLY_GROUNDING_FAILED" });
+			expect(useModel).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it("preserves an earlier committed write when a later edit is rejected before writing", async () => {
+		const response =
+			"I will not perform the copper-tag edit. I created the Picnic note. QA note B says silver thermos; the later update failed because the target note was not found.";
+		const useModel = vi.fn(async () =>
+			JSON.stringify({ response, effectReceiptIds: ["note-proof"] }),
+		);
+		const runtime = createMockRuntime({ useModel });
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message: withdrawnEditMessage,
+				reply: "Cancelled the copper-tag edit without modifying either note.",
+				actionResults: [savedNote, ...readThenRejectedUpdate],
+			}),
+		).resolves.toEqual({ text: response, effectReceiptIds: ["note-proof"] });
+		expect(useModel).toHaveBeenCalledTimes(1);
+		for (const evidence of [
+			"bring a charger",
+			"silver thermos",
+			"note-qa-missing",
+		]) {
+			expect(useModel).toHaveBeenCalledWith(
+				ModelType.TEXT_SMALL,
+				expect.objectContaining({ prompt: expect.stringContaining(evidence) }),
+			);
+		}
+	});
+
+	it("retains original constraints and unfinished intents during reply-only recovery", async () => {
+		const response =
+			"I saved Picnic. The calendar change was not completed, and I have not retried it.";
+		const useModel = vi.fn(async () =>
+			JSON.stringify({ response, effectReceiptIds: ["note-proof"] }),
+		);
+		const processActions = vi.fn();
+		const runtime = createMockRuntime({ useModel, processActions });
+		const context = `${"prior constraint ".repeat(2000)}Keep the existing calendar event unchanged.`;
+		const grounding = `${"complete action fact 🦊 ".repeat(2000)}Preserve both original and corrected descriptions.`;
+		await expect(
+			resolvePlannedReplyEgress({
+				runtime,
+				message,
+				reply: "",
+				actionResults: [
+					applyGroundedActionReply(savedNote, { kind: "deferred", grounding }),
+				],
+				recovery: {
+					context,
+					pendingToolCalls: [
+						{ name: "CALENDAR", arguments: { operation: "create" } },
+					],
+					evaluatorOutputs: [
+						{ decision: "CONTINUE", reason: "Calendar is still pending" },
+					],
+					ownerExclusiveDisclosureUsed: true,
+				},
+			}),
+		).resolves.toEqual({ text: response, effectReceiptIds: ["note-proof"] });
+		expect(useModel).toHaveBeenCalledTimes(1);
+		const parameters = useModel.mock.calls[0]?.[1] as { prompt: string };
+		expect(parameters.prompt).toContain(context);
+		expect(parameters.prompt).toContain(grounding);
+		expect(parameters.prompt).toContain("Calendar is still pending");
+		expect(parameters.prompt).toContain(
+			"does not prove the whole request completed",
+		);
+		expect(parameters.prompt).toContain(
+			"not a fresh observation of current state",
+		);
+		expect(processActions).not.toHaveBeenCalled();
+	});
+
 	it("delivers the evaluator's receipt-bound reply without another model call", async () => {
 		const reply = "I've created Picnic with your reminder to bring a charger.";
 		const evaluator = parseEvaluatorOutput(

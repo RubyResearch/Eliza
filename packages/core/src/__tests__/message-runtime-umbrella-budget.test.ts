@@ -133,12 +133,25 @@ describe("complete planner dispatch above the estimated window", () => {
 			// Live shape: Stage 1 invents child names that no plugin registers.
 			stage1Response(["CALENDAR_DELETE_EVENT", "CALENDAR_FIND_EVENT"]),
 			{
+				text: "",
+				toolCalls: [
+					{
+						id: "discover-calendar",
+						name: "DISCOVER_TOOLS",
+						args: {
+							names: ["CALENDAR_DELETE"],
+							eliza_turn_scope: "more_work_pending",
+						},
+					},
+				],
+			},
+			{
 				thought: "Remove the event through the calendar deletion tool.",
 				toolCalls: [
 					{
 						id: "calendar-1",
 						name: "CALENDAR_DELETE",
-						args: { title: "Gym session" },
+						args: { title: "Gym session", eliza_turn_scope: "final" },
 					},
 				],
 			},
@@ -208,20 +221,27 @@ describe("complete planner dispatch above the estimated window", () => {
 		expect(useModelCalls(runtime).map((call) => call[0])).toEqual([
 			ModelType.RESPONSE_HANDLER,
 			ModelType.ACTION_PLANNER,
+			ModelType.ACTION_PLANNER,
 		]);
 
-		const plannerParams = useModelCalls(runtime)[1]?.[1] as {
+		const discoveryParams = useModelCalls(runtime)[1]?.[1] as {
+			tools: { name: string }[];
+		};
+		expect(discoveryParams.tools.map(({ name }) => name)).toContain(
+			"DISCOVER_TOOLS",
+		);
+		expect(discoveryParams.tools.map(({ name }) => name)).not.toContain(
+			"CALENDAR_DELETE",
+		);
+		const plannerParams = useModelCalls(runtime)[2]?.[1] as {
 			tools?: { name: string }[];
 		};
 		const plannerToolNames = plannerParams.tools?.map(({ name }) => name) ?? [];
-		expect(plannerToolNames).toEqual(
-			expect.arrayContaining([
-				"CALENDAR",
-				"CALENDAR_DELETE",
-				"NOTES",
-				"NOTES_CREATE",
-			]),
-		);
+		expect(plannerToolNames).toContain("CALENDAR_DELETE");
+		// The legacy estimate fallback may include the requested child's parent,
+		// but must not refill unrelated families.
+		for (const unrelated of ["NOTES", "NOTES_CREATE"])
+			expect(plannerToolNames).not.toContain(unrelated);
 		if (result.kind === "planned_reply") {
 			expect(result.result.responseContent?.text).toBe("Gym session removed.");
 		}

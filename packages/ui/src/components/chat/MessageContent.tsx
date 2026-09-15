@@ -1395,6 +1395,7 @@ export function MessageContent({
   // Composer prefill for followup `prompt` chips. Outside the chat provider,
   // `useChatComposer` returns an inert setter, so this is safe everywhere.
   const { setChatInput } = useChatComposer();
+  const [replyRecoveryPending, setReplyRecoveryPending] = useState(false);
   const [localDownloadState, setLocalDownloadState] = useState<
     "idle" | "busy" | "queued" | "failed"
   >("idle");
@@ -1504,6 +1505,32 @@ export function MessageContent({
           {localDownloadError ? (
             <div className="text-xs text-danger">{localDownloadError}</div>
           ) : null}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (message.role === "assistant" && message.replyRecoveryAvailable === true) {
+    return (
+      <Alert variant="warning">
+        <AlertDescription>
+          <div className="whitespace-pre-wrap">{message.text}</div>
+          <Button
+            type="button"
+            size="sm"
+            disabled={replyRecoveryPending}
+            onClick={async () => {
+              if (!message.id || replyRecoveryPending) return;
+              setReplyRecoveryPending(true);
+              try {
+                await handleChatRetry(message.id);
+              } finally {
+                setReplyRecoveryPending(false);
+              }
+            }}
+          >
+            {replyRecoveryPending ? "Regenerating reply…" : "Regenerate reply"}
+          </Button>
         </AlertDescription>
       </Alert>
     );

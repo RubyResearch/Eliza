@@ -118,6 +118,13 @@ or floating-chat clearance inside the plugin; the shell owns those layers.
 See [notification-policy.md](notification-policy.md) for shared native delivery,
 viewport fallback ownership, interactive popup exceptions, and platform limits.
 
+The separate `/dev` chat polls recent foreground trajectory summaries for the
+active room. Background activity cannot displace those token counts. Opening
+Inspect retrieves all runs linked to that message, including background work;
+the advanced inspector retains global pagination. Raw payloads remain on demand.
+Token attribution requires a recorded reply link; unlinked legacy messages and
+background notices never borrow the preceding request's counts.
+
 ## Development
 
 ```bash

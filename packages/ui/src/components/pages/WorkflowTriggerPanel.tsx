@@ -293,12 +293,12 @@ export function WorkflowTriggerPanel({
           {type === "event" ? (
             <>
               <NativeSelect
+                presentation="compact"
                 aria-label="Event source"
                 value={eventMode}
                 onChange={(event) =>
                   setEventMode(event.target.value as EventMode)
                 }
-                presentation="compact"
                 className="min-w-28"
               >
                 {EVENT_OPTIONS.map((option) => (
@@ -309,10 +309,10 @@ export function WorkflowTriggerPanel({
               </NativeSelect>
               {eventMode !== "message" ? (
                 <NativeSelect
+                  presentation="compact"
                   aria-label="Source workflow"
                   value={sourceWorkflowId}
                   onChange={(event) => setSourceWorkflowId(event.target.value)}
-                  presentation="compact"
                   className="min-w-32 flex-1"
                 >
                   {sources.length === 0 ? (
@@ -327,10 +327,10 @@ export function WorkflowTriggerPanel({
               ) : null}
               {eventMode === "step" ? (
                 <NativeSelect
+                  presentation="compact"
                   aria-label="Source step"
                   value={sourceStepId}
                   onChange={(event) => setSourceStepId(event.target.value)}
-                  presentation="compact"
                   className="min-w-28 flex-1"
                 >
                   {(sourceWorkflow?.steps ?? []).length === 0 ? (

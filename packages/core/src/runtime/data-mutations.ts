@@ -1,6 +1,7 @@
 /** Owns database mutations and their room, entity, and relationship cache invalidation using the canonical adapter and original runtime hooks. */
 
 import { redactWithSecrets } from "../security/redact.js";
+import type { EvaluatorService } from "../services/evaluator.ts";
 import type {
 	Component,
 	Entity,
@@ -34,6 +35,17 @@ export class RuntimeDataMutations {
 		private readonly runtime: IAgentRuntime,
 		private readonly host: RuntimeDataMutationsHost,
 	) {}
+
+	private async mutateSourceEvidence<T>(
+		ids: UUID[],
+		updates: Array<Partial<Memory> & { id: UUID }> | undefined,
+		write: () => Promise<T>,
+	): Promise<T> {
+		const evaluator = this.runtime.getService<EvaluatorService>("evaluator");
+		return evaluator
+			? evaluator.mutateSourceEvidence(ids, updates, write)
+			: write();
+	}
 
 	async updateEntities(entities: Entity[]): Promise<void> {
 		await this.runtime.adapter.updateEntities(entities);
@@ -147,17 +159,25 @@ export class RuntimeDataMutations {
 				},
 			};
 		}
-		return this.runtime.adapter.upsertMemories(
-			[{ memory, tableName }],
-			options,
-		);
+		return this.upsertMemories([{ memory, tableName }], options);
 	}
 
 	async upsertMemories(
 		memories: Array<{ memory: Memory; tableName: string }>,
 		options?: { entityContext?: UUID },
 	): Promise<void> {
-		return this.runtime.adapter.upsertMemories(memories, options);
+		const messages = memories
+			.filter((entry) => entry.tableName === "messages" && entry.memory.id)
+			.map((entry) => entry.memory as Memory & { id: UUID });
+		return this.mutateSourceEvidence(
+			messages.map((row) => row.id),
+			messages,
+			async () => {
+				await this.runtime.adapter.upsertMemories(memories, options);
+				for (const message of messages)
+					this.host.roomMessagesMemo().invalidate(message.roomId);
+			},
+		);
 	}
 
 	// Batch relationship methods
@@ -221,15 +241,24 @@ export class RuntimeDataMutations {
 	async updateMemories(
 		memories: Array<Partial<Memory> & { id: UUID; metadata?: MemoryMetadata }>,
 	): Promise<void> {
-		await this.runtime.adapter.updateMemories(memories);
+		await this.mutateSourceEvidence(
+			memories.map((row) => row.id),
+			memories,
+			async () => {
+				await this.runtime.adapter.updateMemories(memories);
+				this.host.roomMessagesMemo().invalidate();
+			},
+		);
 		// Partial updates carry no table/room; drop every cached window rather
 		// than risk serving a pre-update snapshot.
 		this.host.roomMessagesMemo().invalidate();
 	}
 
 	async deleteMemories(memoryIds: UUID[]): Promise<void> {
-		await this.runtime.adapter.deleteMemories(memoryIds);
-		this.host.roomMessagesMemo().invalidate();
+		await this.mutateSourceEvidence(memoryIds, undefined, async () => {
+			await this.runtime.adapter.deleteMemories(memoryIds);
+			this.host.roomMessagesMemo().invalidate();
+		});
 	}
 
 	// WHY createMemory is special: it performs secret redaction before
@@ -300,14 +329,12 @@ export class RuntimeDataMutations {
 	async updateMemory(
 		memory: Partial<Memory> & { id: UUID; metadata?: MemoryMetadata },
 	): Promise<boolean> {
-		await this.runtime.adapter.updateMemories([memory]);
-		this.host.roomMessagesMemo().invalidate();
+		await this.updateMemories([memory]);
 		return true; // Successfully updated if no error thrown
 	}
 
 	async deleteMemory(memoryId: UUID): Promise<void> {
-		await this.runtime.adapter.deleteMemories([memoryId]);
-		this.host.roomMessagesMemo().invalidate();
+		await this.deleteMemories([memoryId]);
 	}
 
 	// ── Participant passthroughs & wrappers ──────────────────────────────

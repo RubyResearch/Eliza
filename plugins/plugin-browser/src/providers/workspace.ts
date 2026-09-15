@@ -8,6 +8,7 @@
  */
 
 import type { Provider } from "@elizaos/core";
+import { asRecord } from "@elizaos/shared";
 import {
   BROWSER_SERVICE_TYPE,
   type BrowserService,
@@ -32,7 +33,20 @@ export const browserWorkspaceProvider: Provider = {
   // context (#12094 item 3: gate travels with the provider so a rename can't
   // silently drop it).
   roleGate: { minRole: "OWNER" },
-  get: async (runtime) => {
+  get: async (runtime, message) => {
+    if (asRecord(message.content?.metadata)?.uiBrowserSurface === "native") {
+      return {
+        text: JSON.stringify({
+          browser_workspace: {
+            target: "native-client",
+            description:
+              "The requesting client's native Browser page. BROWSER open/navigate/show target this client's Browser view. For open-and-read, navigate to the requested URL then read the native page to verify it loaded. A read alone does not open a closed view; use VIEWS show Browser first when needed. Use BROWSER snapshot or get text/title/url to observe it. Do not use Mac workspace tab IDs or assume their page content matches this client.",
+            supportedReads: ["snapshot", "get text", "get title", "get url"],
+          },
+        }),
+        data: { nativeClient: true, availableTargetIds: ["native-client"] },
+      };
+    }
     try {
       const mode = getBrowserWorkspaceMode();
       const tabs = await listBrowserWorkspaceTabs();

@@ -6,6 +6,7 @@ import {
 } from "../../actions/to-tool";
 import { recordInferenceSpan, timeInferenceSpan } from "../../inference-timing";
 import { getCandidateActionBackstopRules } from "../../runtime/candidate-action-backstop";
+import { withRequiredCompletionSourceIdentity } from "../../runtime/completion-context";
 import { computePrefixHashes, hashString } from "../../runtime/context-hash";
 import { getMessageHandlerReply } from "../../runtime/message-handler";
 import {
@@ -30,17 +31,35 @@ import type { MessageHandlerResult } from "../../types/components";
 import type { GenerateTextResult } from "../../types/model";
 import { ModelType } from "../../types/model";
 import { ChannelType } from "../../types/primitives";
+import { getEvaluatorProgressState } from "../evaluator-progress.ts";
+import { HISTORY_RETENTION_EVALUATOR } from "../history-retention.ts";
 import { CODING_SUB_AGENT_CONTEXTS } from "./action-surface.js";
-import type {
+import {
 	listAvailableContextsForRole,
 	resolveStage1SenderRole,
 } from "./addressing.js";
-import type { createV5MessageContextObject } from "./context-assembly.js";
+import { createV5MessageContextObject } from "./context-assembly.js";
+import {
+	projectDiscoverableContext,
+	withAvailableContextRequests,
+} from "./context-discovery.js";
 import {
 	getActionInferenceMessageText,
 	isSubAgentCompletionArtifact,
 	resolveContinuationInferenceMessageText,
 } from "./dialogue-context.js";
+import {
+	canRepairIncompleteHistorySelection,
+	HISTORY_REFERENCE_PREFIX,
+	type HistoryDiscovery,
+	historyReferences,
+	loadHistoryReferences,
+	projectReviewedHistory,
+	readHistoryContextRequests,
+	requestedHistory,
+	withReviewedHistorySelection,
+} from "./history-discovery.js";
+import { composeResponseState } from "./provider-state.js";
 import {
 	getStage1FinishReason,
 	stage1HitCompletionLimit,
@@ -48,6 +67,7 @@ import {
 } from "./stage1-completion.js";
 import {
 	getStage1RetryReason,
+	getStage1RoutingRepair,
 	isEmptyStage1Result,
 	parseMessageHandlerModelOutput,
 	readStage1EmptyRetryLimit,
@@ -55,7 +75,11 @@ import {
 	shouldUseStage1PlannerFallback,
 	synthesizePlannerFallbackFromStage1Failure,
 } from "./stage1-generation.js";
-import { renderMessageHandlerModelInput } from "./stage1-input.js";
+import {
+	CONTEXT_CATALOG_REFERENCE,
+	createContextCatalogReference,
+	renderMessageHandlerModelInput,
+} from "./stage1-input.js";
 import {
 	extractMessageHandlerRawParsed,
 	messageHandlerFromFieldResult,
@@ -133,23 +157,88 @@ export async function generateStage1Decision(
 	};
 	const selectedResponseHandlerFields =
 		args.runtime.responseHandlerFieldRegistry.list();
-	const responseHandlerFieldPrompt =
+	let responseHandlerFieldPrompt =
 		await args.runtime.responseHandlerFieldRegistry.composePromptSlices(
 			responseHandlerFieldContext,
 		);
 	const responseHandlerSchema =
 		args.runtime.responseHandlerFieldRegistry.composeSchema();
-	const messageHandlerInput = renderMessageHandlerModelInput(
+	const loadedContext = new Set<string>();
+	const discoveryEnabled =
+		directMessageChannel && !voiceDirectMessageChannel && !args.codingMode;
+	let history: HistoryDiscovery | undefined;
+	if (
+		discoveryEnabled &&
+		args.runtime.evaluators?.some(
+			(evaluator) => evaluator.name === HISTORY_RETENTION_EVALUATOR,
+		) &&
+		!args.runtime.providers?.some((provider) =>
+			provider.name.startsWith(HISTORY_REFERENCE_PREFIX),
+		)
+	) {
+		const started = performance.now();
+		try {
+			const checkpoint = await getEvaluatorProgressState(
+				args.runtime,
+				args.message,
+				HISTORY_RETENTION_EVALUATOR,
+			);
+			history = projectReviewedHistory(
+				context,
+				{
+					agentId: args.runtime.agentId,
+					roomId: args.message.roomId,
+					entityId: args.message.entityId,
+					roles: [senderRole],
+				},
+				checkpoint,
+			);
+		} catch (error) {
+			// error-policy:J4 Report the optional index failure and render complete
+			// original history instead; no unavailable source is treated as absent.
+			args.runtime.reportError("MessageService.historyRetention", error, {
+				roomId: args.message.roomId,
+			});
+		}
+		recordInferenceSpan(
+			"message:history-checkpoint",
+			performance.now() - started,
+			{
+				applied: !!history,
+				retainedSourceCount: history?.visibleEventIds.size ?? 0,
+			},
+		);
+	}
+	// A plugin that owns this name retains its ordinary provider-reference
+	// contract; framework catalog discovery must not shadow its requests.
+	let contextCatalogRead = false;
+	let contextCatalog =
+		discoveryEnabled &&
+		Array.isArray(args.runtime.providers) &&
+		!args.runtime.providers.some(
+			(provider) => provider.name === CONTEXT_CATALOG_REFERENCE,
+		)
+			? createContextCatalogReference(args.runtime, availableContexts)
+			: undefined;
+	let discovery = discoveryEnabled
+		? projectDiscoverableContext(context, args.state, loadedContext)
+		: { context, available: new Set<string>() };
+	if (contextCatalog) discovery.available.add(CONTEXT_CATALOG_REFERENCE);
+	for (const reference of historyReferences(context, history))
+		discovery.available.add(reference);
+	let messageHandlerInput = renderMessageHandlerModelInput(
 		args.runtime,
-		context,
+		discovery.context,
 		availableContexts,
 		{
-			directMessage: directMessageChannel && !voiceDirectMessageChannel,
+			directMessage: directMessageChannel,
 			voiceDirectMessage: voiceDirectMessageChannel,
 			responseHandlerFields: responseHandlerFieldPrompt.rendered,
+			contextCatalog,
+			history,
 		},
 	);
-	const stage1PrefixHashes = computePrefixHashes(
+	let stage1PrefixHashes = computePrefixHashes(
 		messageHandlerInput.promptSegments,
 	);
 	const stableStage1Segments = messageHandlerInput.promptSegments.filter(
@@ -160,17 +249,34 @@ export async function generateStage1Decision(
 		typeof messageHandlerInput.messages[0]?.content === "string"
 			? messageHandlerInput.messages[0].content
 			: "";
-	const stage1PrefixHash =
+	let stage1PrefixHash =
 		stableStage1PrefixHashes[stableStage1PrefixHashes.length - 1]?.hash ??
 		hashString(`stage1:${stage1SystemContent}`);
-	const messageHandlerTools = [
-		createHandleResponseTool({
-			directMessage: directMessageChannel,
-			parameters: responseHandlerSchema,
-			description:
-				"Stage 1: populate registered response-handler fields once before action tools. Empty values for non-applicable fields.",
-		}),
-	];
+	const createMessageHandlerTools = () => {
+		const referenceSchema =
+			discoveryEnabled && !history
+				? withAvailableContextRequests(
+						responseHandlerSchema,
+						discovery.available,
+					)
+				: responseHandlerSchema;
+		return [
+			createHandleResponseTool({
+				directMessage: directMessageChannel,
+				parameters: voiceDirectMessageChannel
+					? referenceSchema
+					: withRequiredCompletionSourceIdentity(
+							history
+								? withReviewedHistorySelection(referenceSchema)
+								: referenceSchema,
+							discovery.context,
+						),
+				description:
+					"Stage 1: populate registered response-handler fields once before action tools. Empty values for non-applicable fields.",
+			}),
+		];
+	};
+	let messageHandlerTools = createMessageHandlerTools();
 	const messageHandlerProviderOptions = withModelInputBudgetProviderOptions(
 		cacheProviderOptions({
 			prefixHash: stage1PrefixHash,
@@ -262,7 +368,7 @@ export async function generateStage1Decision(
 			{}),
 		thinking: "off",
 	};
-	const stage1ModelParams = {
+	let stage1ModelParams = {
 		messages: messageHandlerInput.messages,
 		promptSegments: messageHandlerInput.promptSegments,
 		tools: messageHandlerTools,
@@ -343,6 +449,220 @@ export async function generateStage1Decision(
 			stage1ModelParams,
 		)) as string | GenerateTextResult;
 		stage1RetryReason = getStage1RetryReason(rawMessageHandler);
+	}
+	// A context request is an incomplete decision. Recompose through the same
+	// permission/disclosure gates before another model call, and never dispatch
+	// its draft, extraction fields, or action candidates. Each provider can be
+	// expanded once; there is no action-planner loop for reading provider text.
+	let routingRepairAttempted = false;
+	while (discoveryEnabled) {
+		const parsedDecision = extractMessageHandlerRawParsed(rawMessageHandler);
+		const explicit = readHistoryContextRequests(
+			context,
+			history,
+			parsedDecision,
+			discovery.available,
+		);
+		const historyRequested = requestedHistory(
+			context,
+			history,
+			parsedDecision,
+			explicit,
+		);
+		const requested = [...new Set([...explicit, ...historyRequested])];
+		const routingRepair =
+			!routingRepairAttempted &&
+			explicit.length === 0 &&
+			(requested.length === 0 ||
+				canRepairIncompleteHistorySelection(context, history, parsedDecision))
+				? getStage1RoutingRepair(parsedDecision)
+				: undefined;
+		if (requested.length === 0 && !routingRepair) break;
+		stage1TurnSignal.throwIfAborted();
+		if (routingRepair) {
+			// One correction before field processors/effects. If it remains
+			// contradictory, normal pending-intent guards still own routing.
+			routingRepairAttempted = true;
+			messageHandlerInput = {
+				...messageHandlerInput,
+				messages: [
+					...messageHandlerInput.messages,
+					{ role: "user", content: routingRepair },
+				],
+				promptSegments: [
+					...messageHandlerInput.promptSegments,
+					{
+						content: routingRepair,
+						stable: false,
+					},
+				],
+			};
+		} else {
+			const contextReadStartedAt = performance.now();
+			for (const name of requested) {
+				if (history && name.startsWith(HISTORY_REFERENCE_PREFIX)) continue;
+				if (name === CONTEXT_CATALOG_REFERENCE && contextCatalog) {
+					contextCatalogRead = true;
+					contextCatalog.loaded = true;
+				} else loadedContext.add(name);
+			}
+			if (contextCatalog?.loaded) {
+				// Re-read role-filtered definitions for this read. Never restore an
+				// old catalog after the requester's role or registrations changed.
+				const role = await resolveStage1SenderRole(args.runtime, args.message);
+				const current = listAvailableContextsForRole(
+					args.runtime.contexts,
+					role,
+				);
+				const refreshedCatalog = createContextCatalogReference(
+					args.runtime,
+					current,
+				);
+				if (refreshedCatalog) {
+					contextCatalog = { ...refreshedCatalog, loaded: true };
+				} else {
+					// A small/currently empty catalog or an optimized prompt needs no
+					// deferred representation. Render its complete current definitions.
+					contextCatalog = undefined;
+				}
+				availableContexts = current;
+			}
+			const refreshed = await composeResponseState(
+				args.runtime,
+				args.message,
+				true,
+			);
+			Object.assign(args.state, refreshed);
+			if (history) {
+				const currentRole = await resolveStage1SenderRole(
+					args.runtime,
+					args.message,
+				);
+				if (currentRole !== senderRole) {
+					senderRole = currentRole;
+					availableContexts = listAvailableContextsForRole(
+						args.runtime.contexts,
+						currentRole,
+					);
+					responseHandlerFieldPrompt =
+						await args.runtime.responseHandlerFieldRegistry.composePromptSlices(
+							{
+								...responseHandlerFieldContext,
+								senderRole: currentRole as ResponseHandlerSenderRole,
+							},
+						);
+					if (contextCatalog) {
+						const freshCatalog = createContextCatalogReference(
+							args.runtime,
+							availableContexts,
+						);
+						contextCatalog = freshCatalog
+							? { ...freshCatalog, loaded: contextCatalog.loaded }
+							: undefined;
+					}
+				}
+				if (
+					history.scope.roles.length !== 1 ||
+					history.scope.roles[0] !== currentRole ||
+					args.runtime.providers?.some((provider) =>
+						provider.name.startsWith(HISTORY_REFERENCE_PREFIX),
+					)
+				)
+					history = undefined;
+			}
+			const refreshedRole = await resolveStage1SenderRole(
+				args.runtime,
+				args.message,
+			);
+			const refreshedContext = await createV5MessageContextObject({
+				...args,
+				includeActionDiscovery: discoveryEnabled ? "index" : true,
+				userRoles: [refreshedRole],
+				availableContexts,
+			});
+			Object.assign(context, refreshedContext, { id: context.id });
+			if (history)
+				history = loadHistoryReferences(context, history, historyRequested);
+			discovery = projectDiscoverableContext(
+				context,
+				args.state,
+				loadedContext,
+			);
+			if (contextCatalog && !contextCatalog.loaded)
+				discovery.available.add(CONTEXT_CATALOG_REFERENCE);
+			for (const reference of historyReferences(context, history))
+				discovery.available.add(reference);
+			if (historyRequested.length)
+				recordInferenceSpan(
+					"message:history-reference-read",
+					performance.now() - contextReadStartedAt,
+					{
+						requestedCount: historyRequested.length,
+						fullRestoration: !history,
+					},
+				);
+			messageHandlerInput = renderMessageHandlerModelInput(
+				args.runtime,
+				discovery.context,
+				availableContexts,
+				{
+					directMessage: directMessageChannel,
+					voiceDirectMessage: voiceDirectMessageChannel,
+					responseHandlerFields: responseHandlerFieldPrompt.rendered,
+					contextCatalog,
+					history,
+				},
+			);
+		}
+		stage1PrefixHashes = computePrefixHashes(
+			messageHandlerInput.promptSegments,
+		);
+		const stableHashes = computePrefixHashes(
+			messageHandlerInput.promptSegments.filter((segment) => segment.stable),
+		);
+		stage1PrefixHash =
+			stableHashes.at(-1)?.hash ?? hashString("context-discovery");
+		const expandedCacheOptions = cacheProviderOptions({
+			prefixHash: stage1PrefixHash,
+			segmentHashes: stage1PrefixHashes.map((entry) => entry.segmentHash),
+			promptSegments: messageHandlerInput.promptSegments,
+			conversationId: args.message.roomId
+				? String(args.message.roomId)
+				: undefined,
+		});
+		// Full restoration returns to the ordinary selection contract. Keep the
+		// actual tool schema aligned with the newly rendered history policy.
+		messageHandlerTools = createMessageHandlerTools();
+		stage1ModelParams = {
+			...stage1ModelParams,
+			tools: messageHandlerTools,
+			messages: messageHandlerInput.messages,
+			promptSegments: messageHandlerInput.promptSegments,
+			providerOptions: withModelInputBudgetProviderOptions(
+				{
+					...stage1ProviderOptions,
+					...expandedCacheOptions,
+					eliza: {
+						...(stage1ProviderOptions.eliza as object),
+						...(expandedCacheOptions.eliza as object),
+					},
+				},
+				buildModelInputBudget({
+					messages: messageHandlerInput.messages,
+					promptSegments: messageHandlerInput.promptSegments,
+					tools: messageHandlerTools,
+				}),
+			),
+		};
+		args.runtime.logger.debug(
+			{ providers: requested, routingRepair: Boolean(routingRepair) },
+			"[message] Resolving context or routing before final response decision",
+		);
+		stage1TurnSignal.throwIfAborted();
+		rawMessageHandler = (await args.runtime.useModel(
+			ModelType.RESPONSE_HANDLER,
+			stage1ModelParams,
+		)) as string | GenerateTextResult;
 	}
 	const messageHandlerEndedAt = Date.now();
 	// Capture the provider that served the Stage-1 (RESPONSE_HANDLER) call
@@ -533,7 +853,7 @@ export async function generateStage1Decision(
 				messages: messageHandlerInput.messages,
 				tools: messageHandlerTools,
 				toolChoice: "required",
-				providerOptions: messageHandlerProviderOptions,
+				providerOptions: stage1ModelParams.providerOptions,
 				raw: rawMessageHandler,
 				parsed: messageHandler,
 				startedAt: messageHandlerStartedAt,
@@ -549,6 +869,9 @@ export async function generateStage1Decision(
 
 	return {
 		messageHandler,
+		providerDiscoveryEnabled: discoveryEnabled,
+		loadedContextProviders: [...loadedContext],
+		contextCatalogRead,
 		fieldRunResult,
 		inferenceMessageText,
 		parsedResponseHandlerReply,

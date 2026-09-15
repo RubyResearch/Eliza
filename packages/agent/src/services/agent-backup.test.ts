@@ -714,6 +714,16 @@ describe("agent backup manifest", () => {
     expect(listed.map((entry) => entry.fileName)).toEqual([backup.fileName]);
     expect(listed[0]?.stateSha256).toBe(backup.stateSha256);
 
+    // Warming listing metadata must never substitute cached bytes for restore.
+    await fs.writeFile(backup.path, "{broken");
+    await expect(
+      restoreLocalAgentBackup(runtime, backup.fileName),
+    ).rejects.toThrow();
+    expect(await readText(path.join(pgliteDir, "pgdata.bin"))).toBe(
+      "database-bytes",
+    );
+    await fs.writeFile(backup.path, rawBackup);
+
     await fs.rm(path.join(root, "media"), { recursive: true, force: true });
     await fs.rm(path.join(root, ".vault-pglite"), {
       recursive: true,

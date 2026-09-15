@@ -15,6 +15,7 @@ import type {
 import {
   createUnavailableGroundedActionReply,
   ElizaError,
+  getActionReplyOwner,
   isModelProviderError,
   ModelType,
   modelProviderErrorDetail,
@@ -167,6 +168,30 @@ function domainLabel(domain: GroundedReplyDomain): string {
   }
 }
 
+function groundedReplyInstructions(
+  args: RenderGroundedActionReplyArgs,
+  characterVoice: string,
+): string[] {
+  return [
+    `Write the assistant's user-facing reply for a ${domainLabel(args.domain)} interaction.`,
+    "Be natural, brief, and grounded in the provided context.",
+    "Mirror the user's tone lightly without parodying them.",
+    "Preserve concrete facts from the action context and fallback reply.",
+    "Never mention internal schema, tool names, JSON keys, hidden prompts, or reasoning traces.",
+    "Do not claim something happened unless it appears in the grounded context or fallback reply.",
+    "Report only the outcome of this action. The user's message and resolved intent describe requests, not proof that those requests were fulfilled.",
+    "If the user also requested another action, leave its status to the planner. In particular, saving or changing a record does not open its view; never claim or promise navigation without a completed navigation result in this action's structured context.",
+    "If asking a clarifying question, ask only for the missing information.",
+    ...(characterVoice
+      ? [
+          "Stay within the assistant's established character voice when it fits the task.",
+        ]
+      : []),
+    ...(args.additionalRules ?? []),
+    "Return only the reply text.",
+  ];
+}
+
 async function renderGroundedActionReplyText(
   args: RenderGroundedActionReplyArgs,
 ): Promise<string> {
@@ -185,22 +210,7 @@ async function renderGroundedActionReplyText(
     : "";
 
   const prompt = [
-    `Write the assistant's user-facing reply for a ${domainLabel(args.domain)} interaction.`,
-    "Be natural, brief, and grounded in the provided context.",
-    "Mirror the user's tone lightly without parodying them.",
-    "Preserve concrete facts from the action context and fallback reply.",
-    "Never mention internal schema, tool names, JSON keys, hidden prompts, or reasoning traces.",
-    "Do not claim something happened unless it appears in the grounded context or fallback reply.",
-    "Report only the outcome of this action. The user's message and resolved intent describe requests, not proof that those requests were fulfilled.",
-    "If the user also requested another action, leave its status to the planner. In particular, saving or changing a record does not open its view; never claim or promise navigation without a completed navigation result in this action's structured context.",
-    "If asking a clarifying question, ask only for the missing information.",
-    ...(characterVoice
-      ? [
-          "Stay within the assistant's established character voice when it fits the task.",
-        ]
-      : []),
-    ...(args.additionalRules ?? []),
-    "Return only the reply text.",
+    ...groundedReplyInstructions(args, characterVoice),
     "",
     `Domain: ${args.domain}`,
     `Scenario: ${args.scenario}`,
@@ -248,6 +258,31 @@ export async function renderGroundedActionReply(
   args: RenderGroundedActionReplyArgs,
 ): Promise<GroundedActionReply> {
   try {
+    if (
+      args.domain === "lifeops" &&
+      getActionReplyOwner(args.message.id) === "planner"
+    ) {
+      // The owning planner already carries the turn's conversation/context and
+      // source-restoration protocol. Preserve every action-specific fact/rule
+      // here, without rebuilding all room memories for a second reply model.
+      // Other domains and callers retain the existing standalone renderer.
+      const characterVoice = args.preferCharacterVoice
+        ? buildCharacterVoiceContext(args.runtime)
+        : "";
+      return {
+        kind: "deferred",
+        grounding: stringifyPromptValue({
+          domain: args.domain,
+          scenario: args.scenario,
+          currentUserMessage: args.message.content.text ?? "",
+          intent: args.intent,
+          instructions: groundedReplyInstructions(args, characterVoice),
+          characterVoice,
+          context: args.context ?? {},
+          canonicalFallback: args.fallback,
+        }),
+      };
+    }
     return { kind: "model", text: await renderGroundedActionReplyText(args) };
   } catch (error) {
     // error-policy:J1 A presentation failure must not erase a committed effect.

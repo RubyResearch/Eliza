@@ -16,7 +16,7 @@ import {
   type JsonValue,
   omitUnvalidatedProviderSpans,
   parseTrajectorySemanticStages,
-  projectModelCallDiagnosticValue,
+  projectProtectedModelCallValue,
   projectToolDiagnosticValue,
   type RecordedStage,
   recordedStageToSemanticStage,
@@ -749,54 +749,85 @@ function startChildTrajectoryStep(
       if (!shouldWrite()) return;
       const tableReady = await ensureTrajectoriesTable(runtime);
       if (!tableReady) return;
-      const trajectory = await timeInferenceSpan(
-        "trajectory:child-start-batch-load",
-        () => loadTrajectoryById(runtime, normalizedTrajectoryId),
-        { count: starts.length },
-      );
-      if (!trajectory) {
-        throw new ElizaError(
-          "Parent trajectory is unavailable for child step",
-          {
-            code: "TRAJECTORY_PARENT_NOT_FOUND",
-            context: { trajectoryId: normalizedTrajectoryId, stepId },
-          },
+      for (
+        let attempt = 0;
+        attempt < MAX_ACTIVE_CAPTURE_WRITE_ATTEMPTS;
+        attempt += 1
+      ) {
+        const trajectory = await timeInferenceSpan(
+          "trajectory:child-start-batch-load",
+          () => loadTrajectoryById(runtime, normalizedTrajectoryId),
+          { count: starts.length },
         );
-      }
-      const changedStepIds = new Set<string>();
-      for (const child of starts) {
-        const step = ensureStep(trajectory, child.stepId, child.timestamp);
-        changedStepIds.add(child.stepId);
-        if (child.kind !== undefined) step.kind = child.kind;
-        if (child.evaluatorName !== undefined) {
-          step.evaluatorName = child.evaluatorName;
+        if (!trajectory) {
+          throw new ElizaError(
+            "Parent trajectory is unavailable for child step",
+            {
+              code: "TRAJECTORY_PARENT_NOT_FOUND",
+              context: { trajectoryId: normalizedTrajectoryId, stepId },
+            },
+          );
         }
-        if (child.parentStepId !== undefined) {
-          step.parentStepId = child.parentStepId;
-          const parentStep = ensureStep(
-            trajectory,
-            child.parentStepId,
+        const expectedUpdatedAt = trajectory.updatedAt;
+        const changedStepIds = new Set<string>();
+        for (const child of starts) {
+          const step = ensureStep(trajectory, child.stepId, child.timestamp);
+          changedStepIds.add(child.stepId);
+          if (child.kind !== undefined) step.kind = child.kind;
+          if (child.evaluatorName !== undefined) {
+            step.evaluatorName = child.evaluatorName;
+          }
+          if (child.parentStepId !== undefined) {
+            step.parentStepId = child.parentStepId;
+            const parentStep = ensureStep(
+              trajectory,
+              child.parentStepId,
+              child.timestamp,
+            );
+            changedStepIds.add(child.parentStepId);
+            if (!parentStep.childSteps?.includes(child.stepId)) {
+              parentStep.childSteps = [
+                ...(parentStep.childSteps ?? []),
+                child.stepId,
+              ];
+            }
+          }
+          trajectory.startTime = Math.min(
+            trajectory.startTime,
             child.timestamp,
           );
-          changedStepIds.add(child.parentStepId);
-          if (!parentStep.childSteps?.includes(child.stepId)) {
-            parentStep.childSteps = [
-              ...(parentStep.childSteps ?? []),
-              child.stepId,
-            ];
-          }
+          trajectory.updatedAt = nextTrajectoryUpdatedAt(
+            expectedUpdatedAt,
+            child.timestamp,
+          );
         }
-        trajectory.startTime = Math.min(trajectory.startTime, child.timestamp);
-        trajectory.updatedAt = new Date(child.timestamp).toISOString();
+        try {
+          // The loaded parent must still be active and at this revision. Updating
+          // it also avoids sending an unused full legacy snapshot in an upsert.
+          await timeInferenceSpan(
+            "trajectory:child-start-batch-persist",
+            () =>
+              saveTrajectory(runtime, trajectory, {
+                changedStepIds: [...changedStepIds],
+                requireActiveExisting: true,
+                expectedUpdatedAt,
+              }),
+            { count: starts.length },
+          );
+          return;
+        } catch (error) {
+          // error-policy:J7 Reload active conflicts so concurrent children and
+          // captures survive; other failures reject the atomic batch unchanged.
+          if (
+            asRecord(error)?.code === "TRAJECTORY_WRITE_CONFLICT" &&
+            attempt + 1 < MAX_ACTIVE_CAPTURE_WRITE_ATTEMPTS
+          ) {
+            await yieldTrajectoryWriteRetry();
+            continue;
+          }
+          throw error;
+        }
       }
-      await timeInferenceSpan(
-        "trajectory:child-start-batch-persist",
-        () =>
-          saveTrajectory(runtime, trajectory, {
-            changedStepIds: [...changedStepIds],
-          }),
-        { count: starts.length },
-      );
     },
   );
   batches.set(normalizedTrajectoryId, { owner, starts, write: writePromise });
@@ -842,7 +873,7 @@ export function projectLlmCallDiagnostics(
   rawParams: Record<string, unknown>,
 ): Record<string, unknown> {
   const redactDiagnosticText = composeToolDiagnosticRedactor(runtime);
-  const projectedParams = projectModelCallDiagnosticValue(
+  const projectedParams = projectProtectedModelCallValue(
     rawParams,
     redactDiagnosticText,
   );
@@ -1826,6 +1857,11 @@ function buildTrajectoryWhereClauses(
   agentId: string,
 ): string[] {
   const whereClauses: string[] = [`agent_id = ${sqlQuote(agentId)}`];
+  if (options.roomId) {
+    whereClauses.push(
+      `COALESCE(metadata_json::jsonb, metadata::jsonb)->>'roomId' = ${sqlQuote(options.roomId)}`,
+    );
+  }
   if (options.source) {
     whereClauses.push(`source = ${sqlQuote(options.source)}`);
   }

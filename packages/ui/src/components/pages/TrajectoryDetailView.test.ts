@@ -9,7 +9,61 @@ import { describe, expect, it } from "vitest";
 import {
   countTrajectoryTextLines,
   normalizeTrajectoryCallText,
+  trajectoryDetailTokenCount,
 } from "./TrajectoryDetailView";
+
+describe("trajectoryDetailTokenCount", () => {
+  const calls = [
+    { promptTokens: 38396, completionTokens: 425 },
+    { promptTokens: 6298, completionTokens: 58 },
+    { promptTokens: 2502, completionTokens: 80 },
+    { promptTokens: 29501, completionTokens: 71 },
+    { promptTokens: 11489, completionTokens: 200 },
+    { promptTokens: 13394, completionTokens: 114 },
+  ];
+
+  it("recovers the live detail shape's missing rollups from all recorded calls", () => {
+    expect(trajectoryDetailTokenCount({ llmCallCount: 6 }, calls)).toBe(102528);
+  });
+
+  it("preserves supplied aggregates including an explicit zero", () => {
+    expect(
+      trajectoryDetailTokenCount(
+        { totalPromptTokens: 0, totalCompletionTokens: 0 },
+        calls,
+      ),
+    ).toBe(0);
+    expect(
+      trajectoryDetailTokenCount(
+        { totalPromptTokens: 101580, totalCompletionTokens: 948 },
+        [],
+      ),
+    ).toBe(102528);
+    expect(
+      trajectoryDetailTokenCount(
+        { totalPromptTokens: 101580, llmCallCount: 6 },
+        calls,
+      ),
+    ).toBe(102528);
+  });
+
+  it("does not invent usage from incomplete or unknown recorded counts", () => {
+    expect(trajectoryDetailTokenCount({}, calls)).toBeUndefined();
+    expect(
+      trajectoryDetailTokenCount({ llmCallCount: 6 }, calls.slice(0, 5)),
+    ).toBeUndefined();
+    expect(
+      trajectoryDetailTokenCount({ llmCallCount: 1 }, [{ promptTokens: 10 }]),
+    ).toBeUndefined();
+    expect(
+      trajectoryDetailTokenCount({ llmCallCount: 1 }, [
+        { promptTokens: 10, completionTokens: Number.NaN },
+      ]),
+    ).toBeUndefined();
+    expect(trajectoryDetailTokenCount({}, [])).toBeUndefined();
+    expect(trajectoryDetailTokenCount({ llmCallCount: 0 }, [])).toBe(0);
+  });
+});
 
 describe("normalizeTrajectoryCallText", () => {
   it("returns empty text when every candidate is absent", () => {

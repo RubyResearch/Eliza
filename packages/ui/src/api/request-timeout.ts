@@ -39,6 +39,10 @@ const CONVERSATION_CREATE_FETCH_TIMEOUT_MS = 120_000;
 // the UI stays stuck instead of wiping local state and returning to first-run
 // setup.
 const AGENT_RESET_FETCH_TIMEOUT_MS = 60_000;
+// Snapshotting the database, media and vault and encrypting the archive can
+// exceed the ordinary REST budget. Keep creation bounded while allowing the
+// server to return its receipt before the owner can start another backup.
+const LOCAL_BACKUP_CREATE_FETCH_TIMEOUT_MS = 120_000;
 
 function requestPathname(path: string): string {
   try {
@@ -57,9 +61,12 @@ export function defaultFetchTimeoutMs(
     return DEFAULT_FETCH_TIMEOUT_MS;
   }
   const pathname = requestPathname(path);
+  // Reply-only recovery awaits text generation just like a new chat turn.
   if (
     pathname === "/api/inbox/messages" ||
-    /^\/api\/conversations\/[^/]+\/messages(?:\/stream)?$/.test(pathname)
+    /^\/api\/conversations\/[^/]+\/messages(?:\/stream|\/[^/]+\/retry-reply)?$/.test(
+      pathname,
+    )
   ) {
     return CHAT_MESSAGE_FETCH_TIMEOUT_MS;
   }
@@ -74,6 +81,9 @@ export function defaultFetchTimeoutMs(
   }
   if (pathname === "/api/agent/reset") {
     return AGENT_RESET_FETCH_TIMEOUT_MS;
+  }
+  if (pathname === "/api/backups") {
+    return LOCAL_BACKUP_CREATE_FETCH_TIMEOUT_MS;
   }
   if (pathname === "/api/conversations") {
     return CONVERSATION_CREATE_FETCH_TIMEOUT_MS;

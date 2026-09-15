@@ -3709,17 +3709,26 @@ export async function saveTrajectory(
   const boundedSteps = trajectory.steps.map((step) =>
     normalizeStepForPersistence(trajectory.id, step),
   );
-  const legacySteps = boundedSteps.map((step) => {
-    if (typeof step.script !== "string") return step;
-    const capped = capScriptForPersistence(step.script);
-    return {
-      ...step,
-      script: capped.script,
-      ...(capped.scriptHash !== undefined
-        ? { scriptHash: capped.scriptHash }
-        : {}),
-    };
-  });
+  // Conditional captures update dedicated step rows. Keep their validation
+  // above, but build the complete compatibility snapshot only if it is written.
+  // Otherwise every small child update serializes all prior model payloads.
+  let serializedLegacySteps: string | undefined;
+  const serializeLegacySteps = (): string => {
+    if (serializedLegacySteps !== undefined) return serializedLegacySteps;
+    const legacySteps = boundedSteps.map((step) => {
+      if (typeof step.script !== "string") return step;
+      const capped = capScriptForPersistence(step.script);
+      return {
+        ...step,
+        script: capped.script,
+        ...(capped.scriptHash !== undefined
+          ? { scriptHash: capped.scriptHash }
+          : {}),
+      };
+    });
+    serializedLegacySteps = sqlQuote(JSON.stringify(legacySteps));
+    return serializedLegacySteps;
+  };
   const boundedMetadata = sanitizeTrajectoryJsonObject(trajectory.metadata);
   if (!boundedMetadata) {
     throw new ElizaError("Trajectory metadata could not be normalized", {
@@ -3727,7 +3736,6 @@ export async function saveTrajectory(
       context: { trajectoryId: trajectory.id },
     });
   }
-  const serializedSteps = sqlQuote(JSON.stringify(legacySteps));
   const serializedMetadata = sqlQuote(JSON.stringify(boundedMetadata));
   // Canonical metrics_json shape required by Core validators and the viewer
   // duck contract. Primary write targets the current schema; legacy
@@ -3768,13 +3776,13 @@ export async function saveTrajectory(
       : "";
   const updateLegacyStepsValueSql =
     replaceAllSteps || options.updateLegacySnapshot
-      ? `steps_json = ${serializedSteps},`
+      ? `steps_json = ${serializeLegacySteps()},`
       : "";
 
   // Current schema (Core TrajectoriesService): metrics_json / metadata_json /
   // reward_components_json. Prefer this so active/completed metrics are always
   // valid for strict Core readers that share the table.
-  const currentSchemaInsertSql = `INSERT INTO trajectories (
+  const currentSchemaInsertSql = () => `INSERT INTO trajectories (
       id,
       agent_id,
       source,
@@ -3822,16 +3830,17 @@ export async function saveTrajectory(
       ${trajectory.episodeId ? sqlQuote(trajectory.episodeId) : "NULL"},
       ${trajectory.batchId ? sqlQuote(trajectory.batchId) : "NULL"},
       ${sqlNumber(trajectory.groupIndex)},
-      ${serializedSteps},
+      ${serializeLegacySteps()},
       ${serializedMetadata},
       ${serializedMetrics},
       ${serializedRewardComponents},
       ${sqlQuote(createdAt)},
       ${sqlQuote(updatedAt)}
     )`;
-  const currentSchemaSql = options.createOnly
-    ? `${currentSchemaInsertSql} ON CONFLICT (id) DO NOTHING RETURNING id`
-    : `${currentSchemaInsertSql}
+  const currentSchemaSql = () =>
+    options.createOnly
+      ? `${currentSchemaInsertSql()} ON CONFLICT (id) DO NOTHING RETURNING id`
+      : `${currentSchemaInsertSql()}
     ON CONFLICT (id) DO UPDATE SET
       source = EXCLUDED.source,
       status = EXCLUDED.status,
@@ -3886,7 +3895,7 @@ export async function saveTrajectory(
 
   // Legacy Eliza schema (metadata TEXT + episode_length) when canonical
   // JSONB columns are missing on the adapter.
-  const legacySchemaInsertSql = `INSERT INTO trajectories (
+  const legacySchemaInsertSql = () => `INSERT INTO trajectories (
       id,
       agent_id,
       source,
@@ -3927,15 +3936,16 @@ export async function saveTrajectory(
       ${sqlNumber(trajectory.totalReward)},
       ${trajectory.scenarioId ? sqlQuote(trajectory.scenarioId) : "NULL"},
       ${trajectory.batchId ? sqlQuote(trajectory.batchId) : "NULL"},
-      ${serializedSteps},
+      ${serializeLegacySteps()},
       ${serializedMetadata},
       ${sqlQuote(createdAt)},
       ${sqlQuote(updatedAt)},
       ${sqlNumber(trajectory.steps.length)}
     )`;
-  const legacySchemaSql = options.createOnly
-    ? `${legacySchemaInsertSql} ON CONFLICT (id) DO NOTHING RETURNING id`
-    : `${legacySchemaInsertSql}
+  const legacySchemaSql = () =>
+    options.createOnly
+      ? `${legacySchemaInsertSql()} ON CONFLICT (id) DO NOTHING RETURNING id`
+      : `${legacySchemaInsertSql()}
     ON CONFLICT (id) DO UPDATE SET
       source = EXCLUDED.source,
       status = EXCLUDED.status,
@@ -4067,7 +4077,7 @@ export async function saveTrajectory(
 
 async function persistTrajectoryAndSteps(
   runtime: IAgentRuntime,
-  parentUpsertSql: string,
+  parentUpsertSql: () => string,
   parentUpdateSql: string,
   trajectoryId: string,
   steps: PersistedStep[],
@@ -4078,10 +4088,15 @@ async function persistTrajectoryAndSteps(
     createOnly: boolean;
   },
 ): Promise<void> {
+  const requiresConditionalWrite =
+    precondition.requireActiveExisting ||
+    precondition.expectedUpdatedAt !== undefined;
+  // Materialize the chosen statement before yielding so caller mutations while
+  // awaiting the database cannot alter the validated parent snapshot.
+  const parentWriteSql = requiresConditionalWrite
+    ? parentUpdateSql
+    : parentUpsertSql();
   await executeRawSqlTransaction(runtime, async (execute) => {
-    const requiresConditionalWrite =
-      precondition.requireActiveExisting ||
-      precondition.expectedUpdatedAt !== undefined;
     if (!requiresConditionalWrite) {
       await assertTrajectoryAgentOwnership(
         execute,
@@ -4089,7 +4104,7 @@ async function persistTrajectoryAndSteps(
         runtime.agentId,
         true,
       );
-      const result = await execute(parentUpsertSql);
+      const result = await execute(parentWriteSql);
       if (
         precondition.createOnly &&
         extractRequiredRows(result, {
@@ -4116,7 +4131,7 @@ async function persistTrajectoryAndSteps(
           : []),
       ];
       const parentWriteResult = await execute(
-        `${parentUpdateSql}
+        `${parentWriteSql}
          WHERE ${conflictPredicates.join(" AND ")}
          RETURNING id`,
       );

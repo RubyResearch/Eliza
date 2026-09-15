@@ -24,9 +24,7 @@ const ROOM_ID = "00000000-0000-4000-8000-0000000000cc" as UUID;
 const MESSAGE_ID = "00000000-0000-4000-8000-0000000000dd" as UUID;
 
 const FALLBACK_TEXT =
-  "No preferred user name is stored yet. The current fallback label is admin. " +
-  "If it comes up naturally in conversation, you can ask what " +
-  "they'd like to be called and use the SETTINGS action with op=set_owner_name to remember it.";
+  "App display name unset (fallback: admin). SETTINGS op=set_owner_name stores an explicitly requested display name.";
 
 function makeRuntime(): IAgentRuntime {
   return { agentId: AGENT_ID } as IAgentRuntime;
@@ -136,7 +134,7 @@ describe("createUserNameProvider app chat", () => {
       EMPTY_STATE,
     );
     expect(result).toEqual({
-      text: "The user's name is Ada Lovelace.",
+      text: "Configured app display name: Ada Lovelace. Entity aliases may include earlier names; follow explicit conversational corrections.",
       values: { userName: "Ada Lovelace" },
     });
     expect(result.values).not.toHaveProperty("userNameFallback");
@@ -153,7 +151,9 @@ describe("createUserNameProvider app chat", () => {
       }),
       EMPTY_STATE,
     );
-    expect(result.text).toBe("The user's name is O'Brien, Jr..");
+    expect(result.text).toBe(
+      "Configured app display name: O'Brien, Jr.. Entity aliases may include earlier names; follow explicit conversational corrections.",
+    );
     expect(result.values).toEqual({ userName: "O'Brien, Jr." });
   });
 

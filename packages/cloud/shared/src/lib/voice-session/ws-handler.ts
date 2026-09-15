@@ -20,6 +20,7 @@
  * `WebSocket` to this shape.
  */
 
+import type { VoiceUiContext } from "@elizaos/shared";
 import { type VoiceSessionTokenClaims, verifyVoiceSessionToken } from "./jwt";
 import type { ServerControlFrame } from "./protocol";
 import {
@@ -48,6 +49,7 @@ export interface VoiceSessionDownlink {
  * while the orchestrator lives next to the merged provider adapters in api.
  */
 export interface VoiceSessionLike {
+  setUiContext?(context: VoiceUiContext): void;
   start(): void;
   pushUplinkAudio(bytes: Uint8Array): void;
   bargeIn(): void;
@@ -241,6 +243,9 @@ export function attachVoiceWsHandler(socket: ServerWebSocketLike, deps: VoiceWsH
     // Active session control frames.
     if (!session) return;
     switch (frame.t) {
+      case "ui_context":
+        session.setUiContext?.(frame.context);
+        return;
       case "hello":
         // A second hello is a protocol violation; ignore rather than re-auth.
         safeSend(

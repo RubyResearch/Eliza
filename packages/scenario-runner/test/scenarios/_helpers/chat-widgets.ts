@@ -21,7 +21,10 @@
  * under live-model test.
  */
 
-import { uiWidgetsProvider } from "@elizaos/agent/providers/ui-catalog";
+import {
+  uiWidgetCapabilitiesProvider,
+  uiWidgetsProvider,
+} from "@elizaos/agent/providers/ui-catalog";
 import type { Plugin } from "@elizaos/core";
 import type {
   ScenarioContext,
@@ -64,7 +67,7 @@ export function uiWidgetsGuideSeed(): ScenarioSeedStep {
           "Scenario fixture: registers the production uiWidgets marker guide " +
           "(normally carried by the @elizaos/agent eliza plugin) so live " +
           "widget round-trip scenarios see the real model-facing guide.",
-        providers: [uiWidgetsProvider],
+        providers: [uiWidgetCapabilitiesProvider, uiWidgetsProvider],
       });
       return undefined;
     },

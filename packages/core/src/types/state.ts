@@ -57,6 +57,7 @@ export interface ActionPlan {
  */
 export interface ProviderCacheEntry {
 	text?: string;
+	discoveryText?: string;
 	overflowText?: string;
 	values?: Record<string, StateValue>;
 	data?: Record<string, StateValue>;

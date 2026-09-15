@@ -87,3 +87,17 @@ The plugin contributes a **View Manager** GUI view at `/views` — a browser for
 ## For agent developers
 
 See [CLAUDE.md](CLAUDE.md) for file layout, how to add new sub-modes, service wiring, and plugin-specific gotchas.
+
+Navigation keeps the full view receipt in runtime data. Model-facing navigation receipts carry destination, every capability identity/description and scoped actions, with interaction parameters explicitly deferred to a fresh `VIEWS action=list` read. That catalog read still supplies full parameter schemas before interaction.
+
+Single-view navigation can reuse the typed decision from the existing response-handler call. When that decision covers the entire request, the regular executor performs `VIEWS_SHOW`; a successful matching receipt can release the held model-authored destination confirmation without another inference. Missing or unsuitable prose keeps the reply-only round. Compound or uncertain requests keep the planner. All role, destination, transport and recovery checks still apply.
+
+Structured destination IDs resolve against the fresh authorized catalog without case sensitivity when the match is unique. This includes plugin views outside the shared navigation alias table. Exact IDs retain precedence; ambiguous IDs, unavailable views and missing or stale decisions keep the classifier. This lookup never infers navigation from the user’s words.
+
+The response-handler instructions and native tool schema both describe navigation as pending execution: retain a navigation intent and action candidate even when drafting its confirmation. An empty intent list means a text-only answer, not permission to skip navigation. The runtime chooses direct execution or planning; the model must not omit work to select the faster path.
+
+After selecting direct navigation, the evaluator adds the general app context through the role-filtered patch runner. This prevents a model's unrelated context tag (for example, `system` for Home) from rejecting its otherwise valid navigation. Existing contexts remain; unavailable contexts, private actions and role restrictions are still enforced by the standard gates.
+
+When navigation needs the planner, its context includes the fresh role-filtered destination identity index even if Stage 1 proposed a destination. The planner resolves each requested target and condition from the full current request; a proposal does not authorize unrequested navigation. Full interaction schemas remain discoverable, and direct navigation keeps its single-destination context.
+
+A resolved VIEWS read capability stays a read across prerequisites, later steps and negative write clauses. Words elsewhere in the request must not upgrade it into creation, updates, deletion or selection; a different operation requires another planner decision. The existing explicit destructive-negation veto, catalog validation, parameter checks, role gates and effect receipts remain in force; ambiguous or failed work returns to the planner.

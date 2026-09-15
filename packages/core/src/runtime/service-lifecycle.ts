@@ -7,6 +7,7 @@ import type {
 	ServiceClass,
 	ServiceTypeName,
 } from "../types";
+import { EventType } from "../types/events";
 
 export type ServiceResolver = (service: Service) => void;
 
@@ -284,6 +285,20 @@ export class RuntimeServiceLifecycle {
 			this.runtime.services.set(key, orderedInstances);
 			if (serviceDef.registerSendHandlers) {
 				serviceDef.registerSendHandlers(this.runtime, serviceInstance);
+			}
+			// Hosts can attach transports to services loaded after API startup.
+			// Observers must use getService(), not await the startup promise.
+			try {
+				await this.runtime.emitEvent(EventType.SERVICE_STARTED, {
+					runtime: this.runtime,
+					source: "runtime",
+					serviceType,
+				});
+			} catch (error) {
+				// error-policy:J7 observer failure must not invalidate a running service
+				this.runtime.reportError("AgentRuntime.serviceStartedObserver", error, {
+					serviceType,
+				});
 			}
 			return serviceInstance;
 		} catch (error) {

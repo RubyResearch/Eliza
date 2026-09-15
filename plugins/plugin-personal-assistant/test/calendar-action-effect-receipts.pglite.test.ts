@@ -11,6 +11,7 @@ import {
   type Content,
   executePlannedToolCall,
   type Memory,
+  promoteSubactionsToActions,
   SECRETS_SERVICE_TYPE,
   type UUID,
 } from "@elizaos/core";
@@ -21,7 +22,10 @@ import {
 } from "@elizaos/plugin-calendar";
 import type { LifeOpsConnectorGrant } from "@elizaos/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { calendarAction } from "../src/actions/calendar.js";
+import {
+  calendarAction,
+  calendarActionPromotionOptions,
+} from "../src/actions/calendar.js";
 import { createApprovalQueue } from "../src/lifeops/approval-queue.js";
 import { resolveOwnerFactStore } from "../src/lifeops/owner/fact-store.js";
 import {
@@ -113,6 +117,7 @@ async function invoke(
   actor: Memory,
   params: Record<string, unknown>,
   directReply = true,
+  actionName = calendarAction.name,
 ): Promise<{ delivered: Content[]; result: ActionResult }> {
   const delivered: Content[] = [];
   const result = await executePlannedToolCall(
@@ -126,8 +131,13 @@ async function invoke(
         return [];
       },
     },
-    { name: calendarAction.name, params },
-    { actions: [calendarAction] },
+    { name: actionName, params },
+    {
+      actions: promoteSubactionsToActions(
+        calendarAction,
+        calendarActionPromotionOptions,
+      ).filter((action) => action.name === actionName),
+    },
   );
   if (directReply) {
     expect(delivered, JSON.stringify(result)).toHaveLength(1);
@@ -288,6 +298,41 @@ describe("registered CALENDAR strict settlement — real PGlite", () => {
       observedAt: SOURCE_SYNCED_AT,
     });
   });
+
+  it.each(["CALENDAR_FEED", "CALENDAR_SEARCH_EVENTS"])(
+    "executes %s with aliased read bounds through the promoted child",
+    async (actionName) => {
+      const { result } = await invoke(
+        message(
+          actionName === "CALENDAR_FEED"
+            ? "00000000-0000-0000-0000-000000009951"
+            : "00000000-0000-0000-0000-000000009952",
+          "Read the school planning meeting in the specified window. Do not change it.",
+        ),
+        {
+          ...(actionName === "CALENDAR_SEARCH_EVENTS"
+            ? { query: "School planning meeting" }
+            : {}),
+          details: {
+            time_min: WINDOW_START,
+            time_max: WINDOW_END,
+            time_zone: "UTC",
+            includeHiddenCalendars: true,
+            force_sync: false,
+          },
+        },
+        false,
+        actionName,
+      );
+      expect(result.success).toBe(true);
+      expect(result.effectReceipts?.[0]).toMatchObject({
+        outcome: "noop",
+        resource: { kind: "calendar.feed" },
+      });
+      expect(JSON.stringify(result.data)).toContain("School planning meeting");
+      expect(JSON.stringify(result.data)).toContain(EVENT_START);
+    },
+  );
 
   it("persists meeting preferences and binds the receipt to the read-back task", async () => {
     const { result } = await invoke(

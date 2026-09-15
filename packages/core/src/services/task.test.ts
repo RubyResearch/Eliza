@@ -4,6 +4,7 @@
  * in-memory task store, plus runtime mutations that mark the service dirty.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ElizaError } from "../errors";
 import { AgentRuntime } from "../runtime";
 import type { UUID } from "../types/primitives";
 import type { IAgentRuntime } from "../types/runtime";
@@ -1022,4 +1023,92 @@ describe("TaskService orphaned-task self-heal (missing worker)", () => {
 		await service.resumeTask("resumed-one-shot" as UUID, true);
 		expect(execute).toHaveBeenCalledTimes(1);
 	});
+});
+
+describe("explicit retry deadlines", () => {
+	it.each([60_000, 600_000])(
+		"persists %dms deadline past restart, including early tolerance, then restores normal cadence",
+		async (delay) => {
+			const { runtime, workers } = makeTaskRuntime();
+			let now = T0;
+			let attempts = 0;
+			const deadline = now + delay;
+			workers.set("retry", {
+				name: "retry",
+				execute: async () => {
+					if (++attempts === 1)
+						throw new ElizaError("Provider busy", {
+							code: "PROVIDER_BUSY",
+							retryAt: deadline,
+						});
+					return undefined;
+				},
+			});
+			const id = await runtime.createTask({
+				name: "retry",
+				agentId: AGENT_ID,
+				tags: ["queue", "repeat"],
+				metadata: {
+					updatedAt: T0 - 1000,
+					updateInterval: 1000,
+					notBefore: 500,
+				},
+			});
+			const createScheduler = () =>
+				new TaskService(runtime, {
+					now: () => now,
+					setInterval: () => {
+						throw Error("Manual ticks only");
+					},
+					clearInterval: () => undefined,
+				});
+			await expect(createScheduler().runDueTasks()).rejects.toThrow();
+			expect((await runtime.getTask(id))?.metadata).toMatchObject({
+				failureCount: 1,
+				baseInterval: 1000,
+				updateInterval: delay + 500,
+			});
+			const restarted = createScheduler();
+			now = deadline - 1;
+			await restarted.runDueTasks();
+			expect(attempts).toBe(1);
+			now = deadline;
+			await restarted.runDueTasks();
+			expect(attempts).toBe(2);
+			expect((await runtime.getTask(id))?.metadata).toMatchObject({
+				failureCount: 0,
+				updateInterval: 1000,
+			});
+		},
+	);
+	it.each([undefined, NaN, Infinity, -1, T0 - 1])(
+		"retains exponential backoff for invalid or expired hint %s",
+		async (retryAt) => {
+			const { runtime, workers } = makeTaskRuntime();
+			workers.set("retry", {
+				name: "retry",
+				execute: async () => {
+					throw new ElizaError("Error", { code: "FAILURE", retryAt });
+				},
+			});
+			const id = await runtime.createTask({
+				name: "retry",
+				agentId: AGENT_ID,
+				tags: ["queue", "repeat"],
+				metadata: { updatedAt: T0 - 1000, updateInterval: 1000 },
+			});
+			const scheduler = new TaskService(runtime, {
+				now: () => T0,
+				setInterval: () => {
+					throw Error("Manual ticks only");
+				},
+				clearInterval: () => undefined,
+			});
+			await expect(scheduler.runDueTasks()).rejects.toThrow();
+			expect((await runtime.getTask(id))?.metadata).toMatchObject({
+				failureCount: 1,
+				updateInterval: 2000,
+			});
+		},
+	);
 });

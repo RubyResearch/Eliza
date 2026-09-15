@@ -4,7 +4,9 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { DOCUMENT_LIST_MAX_LIMIT } from "../../database/document-list-query";
+import { projectDeferredProviders } from "../../runtime/provider-context";
 import { type Memory, MemoryType, type UUID } from "../../types";
+import type { ContextObject } from "../../types/context-object";
 import { documentsProvider, renderPinnedDocuments } from "./provider";
 import { DocumentService } from "./service";
 
@@ -129,6 +131,68 @@ describe("pinned DOCUMENTS provider knowledge", () => {
 		);
 		expect(result.text).toContain("retrieved fragment");
 		expect(result.text).not.toContain("whole text stays unpinned");
+	});
+
+	it("defers retrieved bodies while keeping pins and every index entry, then restores the exact body", async () => {
+		const pin = document(
+			"Standing rule",
+			"Never send without APPROVE. ".repeat(2000),
+			true,
+		);
+		const docs = Array.from({ length: 40 }, (_, index) =>
+			document(`Reference ${index}`, `body ${index}`),
+		);
+		const fragment = document("Help", "Complete help fragment\n".repeat(500));
+		const runtime = {
+			getService: () => ({
+				composeProviderDocuments: async () => ({
+					relevantFragments: [fragment],
+					documents: [...docs, pin],
+					pinnedDocuments: [pin],
+				}),
+			}),
+		};
+		const result = await documentsProvider.get(
+			runtime as never,
+			document("query", "open Notes"),
+		);
+		const context: ContextObject = {
+			id: "documents-discovery",
+			metadata: { providerDiscoveryEnabled: true },
+			staticPrefix: {},
+			events: [
+				{
+					id: "provider-documents",
+					type: "provider",
+					source: "test",
+					createdAt: 0,
+					name: "DOCUMENTS",
+					text: result.text ?? "",
+					discoveryText: result.discoveryText,
+				},
+			],
+		};
+		const original = structuredClone(context);
+		const projected = projectDeferredProviders(context);
+		expect(projected.available).toEqual(["DOCUMENTS"]);
+		const text = JSON.stringify(projected.context.events);
+		expect(result.discoveryText).toContain(pin.content.text);
+		for (const doc of docs) expect(text).toContain(doc.id);
+		expect(projected.context.events[0]).toMatchObject({
+			text: result.discoveryText,
+		});
+		expect(result.discoveryText).not.toContain(fragment.content.text);
+		expect(result.text).toContain(fragment.content.text);
+		expect(context).toEqual(original);
+		const restored = projectDeferredProviders({
+			...context,
+			metadata: { ...context.metadata, loadedContextProviders: ["DOCUMENTS"] },
+		});
+		expect(restored.available).toEqual([]);
+		expect(restored.context.events).toEqual(original.events);
+		expect(
+			projectDeferredProviders({ ...context, metadata: {} }).context.events,
+		).toEqual(original.events);
 	});
 
 	it("orders pinned documents deterministically", () => {

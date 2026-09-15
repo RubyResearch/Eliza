@@ -79,6 +79,7 @@ const mocks = vi.hoisted(() => ({
     createConversation: vi.fn(),
     sendConversationMessage: vi.fn(),
     sendConversationMessageStream: vi.fn(),
+    retryConversationReply: vi.fn(),
     sendWsMessage: vi.fn(),
     stopCodingAgent: vi.fn(),
     renameConversation: vi.fn(() => Promise.resolve()),
@@ -2852,6 +2853,109 @@ describe("useChatSend retry re-runs the turn in place (no duplicate)", () => {
     deps.conversationMessagesRef.current = seeded;
   }
 
+  it("regenerates a durable failed reply once without replaying or removing any turn", async () => {
+    const pending = deferred<{ text: string; messageId: string }>();
+    mocks.client.retryConversationReply.mockReturnValue(pending.promise);
+    const deps = makeDeps({ activeConversationId: "conv-1" });
+    seedFailedTurn(deps);
+    deps.conversationMessagesRef.current[1].replyRecoveryAvailable = true;
+    deps.conversationMessagesRef.current.push({
+      id: "u2",
+      role: "user",
+      text: "Keep everything else.",
+      timestamp: 3,
+    });
+    const original = [...deps.conversationMessagesRef.current];
+    const { result } = renderHook(() => useChatSend(deps));
+    let first!: Promise<void>;
+    await act(async () => {
+      first = result.current.handleChatRetry("a1");
+      await result.current.handleChatRetry("a1");
+    });
+    expect(deps.conversationMessagesRef.current).toEqual(original);
+    expect(mocks.client.retryConversationReply).toHaveBeenCalledTimes(1);
+    expect(mocks.client.retryConversationReply).toHaveBeenCalledWith(
+      "conv-1",
+      "a1",
+    );
+    await act(async () => {
+      pending.resolve({ text: "The note was created.", messageId: "a1" });
+      await first;
+    });
+    expect(deps.conversationMessagesRef.current).toEqual([
+      original[0],
+      {
+        id: "a1",
+        role: "assistant",
+        text: "The note was created.",
+        timestamp: 2,
+      },
+      original[2],
+    ]);
+    await act(async () => {
+      await result.current.handleChatRetry("a1");
+    });
+    expect(mocks.client.retryConversationReply).toHaveBeenCalledTimes(1);
+    expect(mocks.client.truncateConversationMessages).not.toHaveBeenCalled();
+    expect(mocks.client.sendConversationMessageStream).not.toHaveBeenCalled();
+    expect(mocks.client.sendConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it("retains durable failure and history after recovery fails, and can retry after remount", async () => {
+    mocks.client.retryConversationReply.mockRejectedValue(
+      new Error("provider unavailable"),
+    );
+    const deps = makeDeps({ activeConversationId: "conv-1" });
+    seedFailedTurn(deps);
+    deps.conversationMessagesRef.current[1].replyRecoveryAvailable = true;
+    const original = [...deps.conversationMessagesRef.current];
+    const first = renderHook(() => useChatSend(deps));
+    await act(async () => {
+      await first.result.current.handleChatRetry("a1");
+    });
+    expect(deps.conversationMessagesRef.current).toEqual(original);
+    expect(deps.setActionNotice).toHaveBeenCalledWith(
+      expect.stringContaining("provider unavailable"),
+      "error",
+      4200,
+    );
+    first.unmount();
+    mocks.client.retryConversationReply.mockResolvedValue({
+      text: "The note was created.",
+      messageId: "a1",
+    });
+    const next = renderHook(() => useChatSend(deps));
+    await act(async () => {
+      await next.result.current.handleChatRetry("a1");
+    });
+    expect(deps.conversationMessagesRef.current[1].text).toBe(
+      "The note was created.",
+    );
+    expect(mocks.client.truncateConversationMessages).not.toHaveBeenCalled();
+    expect(mocks.client.sendConversationMessageStream).not.toHaveBeenCalled();
+  });
+
+  it("refuses direct retry of a non-replayable failure without durable recovery", async () => {
+    const deps = makeDeps({ activeConversationId: "conv-1" });
+    seedFailedTurn(deps);
+    deps.conversationMessagesRef.current[1].terminalFailure = {
+      kind: "provider_issue",
+      code: "ACTION_REPLY_GENERATION_FAILED",
+      message: "Reply unavailable; the saved action outcome is preserved.",
+      transient: false,
+    };
+    const original = [...deps.conversationMessagesRef.current];
+    const { result } = renderHook(() => useChatSend(deps));
+    await act(async () => {
+      await result.current.handleChatRetry("a1");
+    });
+    expect(deps.conversationMessagesRef.current).toEqual(original);
+    expect(mocks.client.retryConversationReply).not.toHaveBeenCalled();
+    expect(mocks.client.truncateConversationMessages).not.toHaveBeenCalled();
+    expect(mocks.client.sendConversationMessageStream).not.toHaveBeenCalled();
+    expect(mocks.client.sendConversationMessage).not.toHaveBeenCalled();
+  });
+
   it("truncates from the user message (inclusive) and resends, leaving exactly one user turn", async () => {
     // Regression: the old retry only dropped the failed assistant bubble in
     // memory and resent, producing [Q, fail, Q-dup, new]. The fix mirrors
@@ -3806,6 +3910,69 @@ describe("useChatSend — user turn sent during agent warm-up is never evicted (
     ).toBe(false);
     expect(undeliveredTurns(deps)).toHaveLength(0);
   });
+
+  it.each([false, true])(
+    "retains a completed context overflow reply and its request link across history refresh (already streamed: %s)",
+    async (streamed) => {
+      const failureText =
+        "The model rejected this request at its context limit.";
+      mocks.client.sendConversationMessageStream.mockImplementation(
+        async (_conversationId, _text, onToken) => {
+          if (streamed) onToken(failureText, failureText);
+          return {
+            text: failureText,
+            completed: true,
+            assistantEphemeral: true,
+            failureKind: "context_overflow",
+            historyRefreshRequired: true,
+            userMessageId: "server-user-overflow",
+          };
+        },
+      );
+      const deps = makeDeps({
+        activeConversationId: "conv-1",
+        conversations: [conversation("conv-1", "room-1")],
+      });
+      // Synthetic failure prose is deliberately absent from durable history.
+      // A successful history refresh must not erase the visible failure.
+      vi.mocked(deps.loadConversationMessages).mockImplementation(async () => {
+        deps.setConversationMessages([
+          {
+            id: "server-user-overflow",
+            role: "user",
+            text: "Preview a reminder without saving it.",
+            timestamp: Date.now(),
+          },
+        ]);
+        return { ok: true };
+      });
+      const { result } = renderHook(() => useChatSend(deps));
+
+      await act(async () => {
+        await result.current.sendChatText(
+          "Preview a reminder without saving it.",
+          {
+            conversationId: "conv-1",
+          },
+        );
+      });
+
+      expect(deps.loadConversationMessages).toHaveBeenCalledWith("conv-1");
+      const assistants = deps.conversationMessagesRef.current.filter(
+        (message) => message.role === "assistant",
+      );
+      expect(assistants).toHaveLength(1);
+      expect(assistants[0]).toMatchObject({
+        text: failureText,
+        failureKind: "context_overflow",
+        assistantEphemeral: true,
+        replyToMessageId: "server-user-overflow",
+      });
+      expect(mocks.client.sendConversationMessageStream).toHaveBeenCalledTimes(
+        1,
+      );
+    },
+  );
 
   it("retires a server-ephemeral failed reply when the next user turn begins", async () => {
     const failureText =

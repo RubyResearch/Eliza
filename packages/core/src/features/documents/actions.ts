@@ -702,6 +702,9 @@ function result(
 		data: {
 			actionName: "DOCUMENT",
 			subaction,
+			...(success && ["read", "list", "search"].includes(subaction)
+				? { readOnlyOperation: true }
+				: {}),
 			...(extra.data ?? {}),
 		},
 	};
@@ -1041,8 +1044,11 @@ async function handleRead(
 	const documentId = getDocumentId(params, message);
 	if (!documentId) {
 		const text =
-			"No valid document id found in the request; ask the user which document to read.";
-		return result(false, text, "read", { values: { error: "invalid_id" } });
+			"No valid documentId was supplied. Retry with the exact ID from the available document index, or list documents to resolve it. Ask the user only if the intended document is ambiguous.";
+		return result(false, text, "read", {
+			values: { error: "invalid_id" },
+			data: { readOnlyOperation: true },
+		});
 	}
 
 	const unit: DocumentReadUnit =
@@ -1807,6 +1813,10 @@ export const documentAction: Action = {
 		},
 	],
 	similes: [
+		"DOCUMENTS_READ",
+		"DOCUMENTS_SEARCH",
+		"DOCS_READ",
+		"DOCS_SEARCH",
 		"search documents",
 		"read document",
 		"save document",

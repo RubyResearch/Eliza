@@ -1,5 +1,6 @@
 /** Determines whether a completed response warrants post-turn semantic work or represents a stop decision. */
 
+import type { MessageHandlerExtract } from "../../types/components";
 import type { Memory } from "../../types/memory";
 import type { Content } from "../../types/primitives";
 import type { State } from "../../types/state";
@@ -23,7 +24,11 @@ export function hasPostTurnSemanticSignal(
 	message: Pick<Memory, "content">,
 	state: Pick<State, "data"> | undefined,
 	responseContent: Pick<Content, "actions"> | null | undefined,
+	extract?: Pick<MessageHandlerExtract, "facts" | "relationships">,
 ): boolean {
+	// Stage 1 already detected semantic evidence. A lexical shortcut must not
+	// suppress its durable review; the background worker still validates sources.
+	if (extract?.facts?.length || extract?.relationships?.length) return true;
 	if (!isSimpleReplyResponse(responseContent)) return true;
 	const actionResults = state?.data?.actionResults;
 	if (Array.isArray(actionResults) && actionResults.length > 0) return true;

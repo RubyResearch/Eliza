@@ -37,6 +37,7 @@
   },
   "files": [
     "dist",
+    "codex-inference-exec.mjs",
     "auto-enable.ts"
   ],
   "elizaos": {

@@ -21,9 +21,14 @@ import {
   type PlannerToolCall,
   runPlannerLoop,
 } from "../../../packages/core/src/runtime/planner-loop.js";
+import { collectBudgetedStageOneCandidateActions } from "../../../packages/core/src/services/message/planned-tool.js";
 import { notesAction } from "./action.js";
 import { notesPlugin } from "./plugin.js";
-import { NOTES_SERVICE_TYPE, NotesService } from "./service.js";
+import {
+  getNotesService,
+  NOTES_SERVICE_TYPE,
+  NotesService,
+} from "./service.js";
 import { NotesStore } from "./store.js";
 import { parseNoteContent } from "./validation.js";
 
@@ -109,6 +114,111 @@ function execute(
 }
 
 describe("promoted Notes execution", () => {
+  it("reads exact IDs without substituting matching text or exposing other notes", async () => {
+    const runtime = await executorHarness();
+    const created = await run(runtime, {
+      action: "create",
+      content: "Exact read fixture\nComplete original body",
+    });
+    const id = created.data?.noteId;
+    expect(typeof id).toBe("string");
+    await run(runtime, {
+      action: "create",
+      content: `Decoy\n${id}\nnote_missing_qa`,
+    });
+    const before = getNotesService(runtime).listNotes();
+    const selected = collectBudgetedStageOneCandidateActions({
+      actions: runtime.actions,
+      candidateActions: ["NOTES_GET", "NOTES_GET_NOTE"],
+      contexts: ["notes"],
+      deferUnselectedContexts: true,
+      deferParentHints: true,
+    });
+    expect(selected.map((action) => action.name)).toEqual(["NOTES_GET"]);
+    const found = await execute(runtime, {
+      name: selected[0].name,
+      params: { noteId: id },
+    });
+    expect(found).toMatchObject({
+      success: true,
+      data: {
+        lookupMode: "exact_id",
+        requestedNoteId: id,
+        count: 1,
+        notes: [created.data?.note],
+      },
+    });
+    const missingId = await execute(runtime, {
+      name: "NOTES_GET",
+      params: {},
+    });
+    expect(missingId.success).toBe(false);
+    expect(missingId.data).not.toHaveProperty("notes");
+    const absent = await execute(runtime, {
+      name: "NOTES_LIST",
+      params: { noteId: "note_missing_qa" },
+    });
+    expect(absent).toMatchObject({
+      success: true,
+      data: { lookupMode: "exact_id", count: 0, notes: [] },
+    });
+    const text = await execute(runtime, {
+      name: "NOTES_LIST",
+      params: { content: "note_missing_qa" },
+    });
+    expect(text).toMatchObject({
+      success: true,
+      data: { lookupMode: "text", count: 1 },
+    });
+    const conflict = await execute(runtime, {
+      name: "NOTES_LIST",
+      params: { noteId: id, content: "Decoy" },
+    });
+    expect(conflict).toMatchObject({ success: false });
+    const denied = await execute(
+      runtime,
+      { name: "NOTES_GET", params: { noteId: id } },
+      ["NONE"],
+    );
+    expect(denied.success).toBe(false);
+    expect(denied.data).not.toHaveProperty("notes");
+    expect(getNotesService(runtime).listNotes()).toEqual(before);
+  });
+
+  it("exposes complete replacement content separately from the create-only body", async () => {
+    const update = notesPlugin.actions?.find(
+      (action) => action.name === "NOTES_UPDATE",
+    );
+    expect(
+      update?.parameters?.map((parameter) => parameter.name),
+    ).not.toContain("body");
+    expect(
+      update?.parameters?.find(
+        (parameter) => parameter.name === "replacementContent",
+      ),
+    ).toMatchObject({
+      required: false,
+      aliases: ["body", "newText"],
+    });
+    const runtime = await executorHarness();
+    await execute(runtime, {
+      name: "NOTES_CREATE",
+      params: { content: "Packing list\nCharger" },
+    });
+    const result = await execute(runtime, {
+      name: "NOTES_UPDATE",
+      params: {
+        content: "Packing list",
+        replacementContent: "Packing list\nCharger and water",
+      },
+    });
+    expect(result.success).toBe(true);
+    expect(result.data?.note).toMatchObject({
+      title: "Packing list",
+      body: "Charger and water",
+    });
+  });
+
   it("creates, lists, updates, and deletes through the registered children", async () => {
     const runtime = await executorHarness();
     const created = await execute(runtime, {
@@ -257,8 +367,12 @@ describe("promoted Notes execution", () => {
     ["NOTES_CREATE", { content: "" }, "content"],
     ["NOTES_UPDATE", { body: "Replacement" }, "content"],
     ["NOTES_UPDATE", { content: "" }, "content"],
-    ["NOTES_UPDATE", { content: "Existing note" }, "body"],
-    ["NOTES_UPDATE", { content: "Existing note", body: "" }, "body"],
+    ["NOTES_UPDATE", { content: "Existing note" }, "replacementContent"],
+    [
+      "NOTES_UPDATE",
+      { content: "Existing note", body: "" },
+      "replacementContent",
+    ],
     ["NOTES_DELETE", {}, "content"],
     ["NOTES_DELETE", { content: "" }, "content"],
   ])(
@@ -808,5 +922,141 @@ describe("identical-duplicate notes", () => {
     });
     expect(deleted.success).toBe(true);
     expect(service.listNotes().map((note) => note.color)).toEqual(["yellow"]);
+  });
+});
+
+describe("literal Notes edits", () => {
+  it("updates through the promoted tool without a read and persists only the requested substring", async () => {
+    const runtime = await executorHarness();
+    const service = getNotesService(runtime);
+    const original = await service.createNote({
+      title: "Literal edit",
+      body: "Bring a green folder and a charger.",
+      color: "rose",
+    });
+    const other = await service.createNote({
+      title: "Other note",
+      body: "green",
+      color: "slate",
+    });
+    const result = await execute(runtime, {
+      name: "NOTES_UPDATE",
+      params: {
+        content: "Literal edit",
+        textEdit: { field: "body", oldText: "green", newText: "orange" },
+      },
+    });
+    expect(result.success).toBe(true);
+    expect(result.effectReceipts).toEqual([
+      expect.objectContaining({ outcome: "applied" }),
+    ]);
+    const updated = service.getNote(original.id);
+    expect(updated).toEqual({
+      ...original,
+      body: "Bring a orange folder and a charger.",
+      updatedAt: updated.updatedAt,
+    });
+    expect(service.getNote(other.id)).toEqual(other);
+    const filePath = service.store.filePath;
+    await service.stop();
+    const reopened = new NotesService(undefined, {
+      store: new NotesStore({ filePath }),
+    });
+    await reopened.initialize();
+    expect(reopened.getNote(original.id)).toEqual(updated);
+    await reopened.stop();
+  });
+
+  it.each([
+    ["body", "green", "$& \n$1 🟠", "Use $& \n$1 🟠 here.", "Exact title"],
+    ["body", "green ", "", "Use here.", "Exact title"],
+    ["title", "Exact", "Precise", "Use green here.", "Precise title"],
+  ] as const)(
+    "preserves literal strings when editing %s",
+    async (field, oldText, newText, body, title) => {
+      const runtime = await executorHarness();
+      await execute(runtime, {
+        name: "NOTES_CREATE",
+        params: { content: "Exact title\nUse green here." },
+      });
+      const result = await execute(runtime, {
+        name: "NOTES_UPDATE",
+        params: {
+          content: "Exact title",
+          textEdit: { field, oldText, newText },
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(result.data?.note).toMatchObject({ title, body });
+    },
+  );
+
+  it.each([
+    ["missing", "orange", "green", "NOTES_EDIT_TEXT_NOT_FOUND"],
+    ["green", "orange", "green green", "NOTES_EDIT_TEXT_AMBIGUOUS"],
+    ["aa", "b", "aaa", "NOTES_EDIT_TEXT_AMBIGUOUS"],
+    ["green", " orange ", "green", "NOTES_EDIT_NORMALIZATION_REQUIRED"],
+  ])(
+    "rejects %s -> %s without any revision or record change",
+    async (oldText, newText, body, code) => {
+      const runtime = await executorHarness();
+      const service = getNotesService(runtime);
+      await service.createNote({ title: "Exact title", body });
+      const before = service.snapshot();
+      const result = await execute(runtime, {
+        name: "NOTES_UPDATE",
+        params: {
+          content: "Exact title",
+          textEdit: { field: "body", oldText, newText },
+        },
+      });
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result)).toContain(code);
+      expect(service.snapshot()).toEqual(before);
+    },
+  );
+
+  it("checks the old text inside the write barrier when two edits race", async () => {
+    const runtime = await harness();
+    const service = getNotesService(runtime);
+    const note = await service.createNote({
+      title: "Exact title",
+      body: "green",
+    });
+    const before = service.snapshot();
+    const results = await Promise.allSettled(
+      ["orange", "violet"].map((newText) =>
+        service.updateNoteByLookupWithCommit("title", note.title, {
+          textEdit: { field: "body", oldText: "green", newText },
+        }),
+      ),
+    );
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    expect(service.getNote(note.id).body).toBe("orange");
+    expect(service.snapshot().revision).toBe(before.revision + 1);
+  });
+
+  it("keeps owner admission and conflicting update forms from mutating records", async () => {
+    const runtime = await executorHarness();
+    const service = getNotesService(runtime);
+    await service.createNote({ title: "Exact title", body: "green" });
+    const before = service.snapshot();
+    const params = {
+      content: "Exact title",
+      textEdit: { field: "body", oldText: "green", newText: "orange" },
+    };
+    expect(
+      (await execute(runtime, { name: "NOTES_UPDATE", params }, ["MEMBER"]))
+        .success,
+    ).toBe(false);
+    expect(
+      (
+        await execute(runtime, {
+          name: "NOTES_UPDATE",
+          params: { ...params, replacementContent: "Wrong title\nred" },
+        })
+      ).success,
+    ).toBe(false);
+    expect(service.snapshot()).toEqual(before);
   });
 });

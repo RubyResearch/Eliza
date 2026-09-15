@@ -15,6 +15,7 @@ export {
   findKeywordTermMatch,
   getValidationKeywordLocaleTerms,
   getValidationKeywordTerms,
+  hasPreparedKeywordTermMatch,
   normalizeKeywordMatchText,
   type PreparedKeywordTerm,
   prepareKeywordTerms,

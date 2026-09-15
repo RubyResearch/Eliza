@@ -202,8 +202,45 @@ export function parseCreateNoteInput(value: unknown): CreateNoteInput {
 
 export function parseUpdateNoteInput(value: unknown): UpdateNoteInput {
   const record = requireRecord(value, "note patch");
-  assertOnlyKeys(record, ["title", "body", "color"], "note patch");
+  assertOnlyKeys(record, ["title", "body", "color", "textEdit"], "note patch");
   const patch: UpdateNoteInput = {};
+  if (hasOwn(record, "textEdit")) {
+    if (Object.keys(record).length !== 1) {
+      throw validationError(
+        "Pass either textEdit or replacement fields, not both.",
+        "note patch",
+      );
+    }
+    const edit = requireRecord(record.textEdit, "textEdit");
+    assertOnlyKeys(edit, ["field", "oldText", "newText"], "textEdit");
+    if (edit.field !== "title" && edit.field !== "body") {
+      throw validationError(
+        "textEdit.field must be title or body.",
+        "textEdit.field",
+      );
+    }
+    if (typeof edit.oldText !== "string" || edit.oldText.length === 0) {
+      throw validationError(
+        "textEdit.oldText must be a nonempty literal string.",
+        "textEdit.oldText",
+      );
+    }
+    if (typeof edit.newText !== "string") {
+      throw validationError(
+        "textEdit.newText must be a literal string, including empty for deletion.",
+        "textEdit.newText",
+      );
+    }
+    // Whitespace is part of the literal match and replacement, never an
+    // omission sentinel. Validate the resulting field inside the transaction.
+    return {
+      textEdit: {
+        field: edit.field,
+        oldText: edit.oldText,
+        newText: edit.newText,
+      },
+    };
+  }
   if (hasOwn(record, "title")) {
     patch.title = parseRequiredTitle(record.title, "note.title");
   }

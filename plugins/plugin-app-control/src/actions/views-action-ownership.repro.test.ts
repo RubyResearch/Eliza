@@ -17,7 +17,7 @@ import {
 import { BUILTIN_RESPONSE_HANDLER_FIELD_EVALUATORS } from "@elizaos/core/runtime/builtin-field-evaluators.js";
 import { ResponseHandlerFieldRegistry } from "@elizaos/core/runtime/response-handler-field-registry.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createViewsAction } from "./views.js";
+import { createShowViewAction, createViewsAction } from "./views.js";
 import type { ViewSummary } from "./views-client.js";
 
 const NOTES_VIEW: ViewSummary = {
@@ -225,6 +225,26 @@ describe("VIEWS action ownership after planner selection", () => {
 				expect(listViews).not.toHaveBeenCalled();
 				expect(runtime.deleteTask).not.toHaveBeenCalled();
 			}
+		},
+	);
+
+	it.each(["new", "edit-1", "cancel"])(
+		"does not consume a pending create choice %s when the planner explicitly selects navigation",
+		async (text) => {
+			const action = createShowViewAction({
+				hasOwnerAccess: async () => false,
+			});
+			const runtime = makeRuntime(action);
+			installPendingViewTask(runtime, "create");
+			const result = await action.handler(runtime, message(text), undefined, {
+				view: "notes",
+				navigationStepId: "navigate-only",
+			});
+			// No live view-creation task may redirect this single-operation tool.
+			// The dummy catalog need not complete navigation to establish isolation.
+			expect(result).not.toMatchObject({ values: { mode: "create" } });
+			expect(runtime.getTasks).not.toHaveBeenCalled();
+			expect(runtime.deleteTask).not.toHaveBeenCalled();
 		},
 	);
 

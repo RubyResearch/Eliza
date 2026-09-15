@@ -1,6 +1,6 @@
 # Molecular component duplicate inventory
 
-Scanned 925 maintained React files. 109 exported compositions have a recognized molecular role and at least two atomic dependencies.
+Scanned 928 maintained React files. 109 exported compositions have a recognized molecular role and at least two atomic dependencies.
 
 Clusters share both a role and an atomic dependency signature. Detection creates a review queue; this committed report contains only final dispositions based on product behavior, state ownership, and responsive layout.
 
@@ -48,9 +48,9 @@ These owners are fail-closed contracts. The audit fails if an owner disappears, 
 
 - `EditSkillModal` in `packages/ui/src/components/pages/skill-detail-panel.tsx:35`
 - `ConfirmDialog` in `packages/ui/src/components/ui/confirm-dialog.tsx:35`
-- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:469`
-- Fingerprint: `sha256:7d8e1352a677365c5ff593aa06cecc62fb6ad5b2b4b7f2d6aa195a563c33c0db`
-- Decision: **distinct-domain-compositions**. The three dialogs own unrelated editing, confirmation, and calendar workflows.
+- `EventEditorDrawer` in `plugins/plugin-calendar/src/components/EventEditorDrawer.tsx:519`
+- Fingerprint: `sha256:20da2a24641576e0c73aca23d9042d1a865c4885e106f53a792be2624a8fe4d7`
+- Decision: **distinct-domain-compositions**. The skill editor owns source loading and saving; the confirmation dialog emits a caller-owned decision; the calendar editor owns provider mutations and timed or all-day date validation. Its timing fieldset does not introduce a shared dialog lifecycle.
 
 ### dialog: button + dialog + input
 

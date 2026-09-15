@@ -1264,8 +1264,10 @@ export async function handleViewsRoutes(
       commitCurrentViewState(committedViewPath);
     }
 
-    // Realtime voice returns navigation through its own control channel. App
-    // chat normally has the completed action as a reliable fallback, but when
+    // A voice turn may need to interact with this view before its terminal
+    // control-channel handoff. When its renderer is known, deliver through the
+    // existing targeted channel now. Never broadcast caller-owned navigation.
+    // App chat normally has the completed action as a reliable fallback, but when
     // its originating renderer still has a live WebSocket, deliver there now:
     // the navigate frame is emitted before the action callback can claim
     // "Opened …". Supporting renderers deduplicate this frame against the
@@ -1279,7 +1281,10 @@ export async function handleViewsRoutes(
     let originatingClientDelivered = false;
     if (
       reportedSource !== "user" &&
-      (!callerOwnedDelivery || shouldTargetCompletedAction)
+      (!callerOwnedDelivery ||
+        shouldTargetCompletedAction ||
+        (body?.delivery === "originating-client" &&
+          Boolean(originatingClientId)))
     ) {
       const navigatePayload: ShellNavigateViewPayload = {
         viewId: id,

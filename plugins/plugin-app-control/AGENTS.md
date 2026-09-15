@@ -5,9 +5,8 @@ models, active agent profiles, and built-in settings.
 
 ## Purpose / role
 
-This opt-in plugin registers its app and view actions, one model-assisted
-pre-planner navigation evaluator, no natural-language shortcuts or deterministic
-response-handler evaluators, three providers,
+This opt-in plugin registers its app and view actions, one pre-planner navigation evaluator and a Stage-1 visual-continuation field,
+no natural-language shortcuts, three providers,
 and four services. Dashboard operations use authenticated
 loopback HTTP (`/api/apps/*`, `/api/views/*`) discovered through the existing
 port resolver.
@@ -20,6 +19,7 @@ port resolver.
 |---|---|---|
 | `APP` | `src/actions/app.ts` | Unified app control. Sub-modes: `launch`, `relaunch`, `stop`, `load_from_directory`, `list`, `create`. `stop` uses the canonical name-based `/api/apps/stop` route without uninstalling or relaunching. `create` runs a multi-turn scaffold+coding-agent flow. Owner-gated. |
 | `VIEWS` | `src/actions/views.ts` | Manage UI views contributed by plugins. Sub-modes: `list`, `current`, `show`/`open`, `search`, `manager`, `broadcast`, `interact`, `pin`, `window`, `create`, `edit`, `icon`, `rollback`, `delete`/`remove`. `show`/`open` return an internal navigation receipt and explicitly require post-tool evaluation so the model writes the visible reply after the shell handoff. Create/edit/icon/rollback/delete are owner-gated; read modes are open. `rollback` resets a created/edited view-or-plugin workdir to the pre-edit git snapshot taken before the coding agent ran (#8915) and re-registers it via `load-from-directory`. |
+| `VIEWS_SHOW` | `src/actions/views.ts` | Narrow single-destination navigation with required `view` and `navigationStepId`. Delegates to the same VIEWS handler, authorization, cancellation and originating-client receipt path. Full VIEWS remains discoverable for layouts and other operations. |
 | `BACKGROUND` | `src/actions/background.ts` | Change the unified app background from chat. Ops: `set` (color name/hex, a named **programmable GLSL shader** preset — `aurora`/`lava`/`plasma`/`waves`/`nebula` — plus relative uniform tweaks like *slower*/*brighter*/*bigger* (#10694), an uploaded image attachment, or a generated image from a prompt), `undo`, `redo`, `reset`. The action names a preset id + uniform patch only; the GLSL source lives in `@elizaos/ui` (`backgrounds/shader-presets.ts`) where `useBackgroundApplyChannel` resolves id→source, validates it, and `ProgrammableShaderBackground` renders it via three.js with a compile-validate + frame-watchdog + context-loss-recovery + reduced-motion + color-field fallback. Broadcasts a `background:apply` view event via `POST /api/views/events/broadcast`; the renderer applies it to the shared `BackgroundConfig` store. Drives the SAME background as the `/background` view — there is no separate homescreen-scene surface. |
 | `SETTINGS` | `src/actions/settings.ts` | Describe, list, and change built-in settings; mutations use the same semantic routes as the UI. Successful list/set results own canonical reply text and declare a single-operation turn complete once the plan queue is drained, avoiding a redundant evaluator model call on native function-calling backends without suppressing multi-tool evaluation. Owner-gated. |
 | `MODEL_SWITCH` | `src/actions/model-switch.ts` | Select a configured model target through the canonical settings/runtime boundary. |
@@ -215,7 +215,9 @@ artifacts and failure behavior; do not substitute mocked success for the system
 under test.
 
 Contextual navigation preserves the entire original request and keeps domain
-operations in the planner. Planner-owned VIEWS steps pass
+operations in the planner. Both destination selection and its planner handoff
+use the complete authorized view/capability reference with interaction parameter
+schemas deferred; VIEWS list restores those schemas through a fresh authorized read. Planner-owned VIEWS steps pass
 `navigationIntent=planner-step` and a `navigationStepId`; each target is resolved
 against the current catalog, preserving registration, availability, and role
 gates. Navigation receipts remain separate from event, note, or task effects.
@@ -232,3 +234,42 @@ observe cancellation. Show/open outcomes and alternate-mode denials use
 `delivered` requires the matching completed-action handoff receipt, while missing,
 negative, or malformed delivery remains explicit. Stable handoff IDs scope replay
 to the same message, actor, client, step, and destination.
+
+The visual-continuation field reuses the existing Stage-1 model judgment. Its
+result is bound in memory to the exact runtime, message, actor, room, request
+text and sender role; caller metadata cannot supply it. Non-navigation decisions
+set the existing deny constraint. Requested/optional destinations still require
+the fresh authorized catalog, with canonical action execution and transport gates.
+A fresh requested client-chat DM decision with navigationOnly=false and a
+VIEWS_SHOW candidate may leave its destination blank: the existing planner
+resolves it from the complete original request and a fresh role-filtered
+id/label/path index. Full descriptions and schemas remain available through
+VIEWS list. This cannot dispatch direct navigation or satisfy a prerequisite.
+Other missing, malformed, uncertain, stale or unavailable selections retain the
+separate live-catalog model classifier. No field handler executes navigation.
+
+Known structured Stage-1 aliases such as `Home` reuse the same canonical target
+vocabulary as VIEWS. An alias is accepted only when its canonical destination
+is present in the fresh authorized catalog; it never supplies navigation intent
+from user text or bypasses role, availability, developer-view or transport gates.
+Exact registered IDs retain precedence in Stage-1 selection. Unresolved aliases
+keep the classifier rather than selecting a fuzzy destination.
+
+Explicit VIEWS list/current/search operations remain reads even when the request mentions keeping a split or window visible; layout inference must not turn a read into a mutation or an avoidable planner repair round.
+
+Navigation handoffs retain the selected destination and every capability identity/description, while marking interaction parameter schemas as deferred. VIEWS action=list returns the complete fresh authorized catalog before interaction; navigation itself needs no interaction schema. The classifier, domain action schemas, catalog storage and execution gates remain complete.
+
+The same destination projection is used in pre-planner navigation context and `VIEWS show` promptData, explicitly opting into `promptDataMode: "replace-data"`. Keep raw result.data complete, retain navigation status and scoped actions, and expose the fresh VIEWS list read for deferred interaction parameters. Background review must use this declared model projection as well.
+
+Stage-1 visual continuation records whether all UI work is a single known-view show. Only that explicit same-turn model judgment may replace the VIEWS umbrella hint with VIEWS_SHOW; legacy/missing judgments and compound UI operations retain the parent. Domain candidates, full requests, permissions, discovery and delivery receipts remain authoritative. Explicit navigation does not consume a pending view-creation choice.
+
+A fresh same-turn Stage-1 navigationOnly judgment can select the existing deterministic VIEWS_SHOW executor for a client_chat DM only when the entire request is one requested view switch, the sole intent and all candidates agree, and the destination passes the live authorized catalog. singleViewOnly alone is insufficient: compound questions, domain work, multiple views, optional navigation and missing/stale classifications keep normal planning. The canonical executor retains all admission, receipt, cancellation and reply-recovery gates; post-tool synthesis grounds the visible confirmation. No utterance parser or caller metadata grants this fast path.
+A none decision remains a navigation denial even if the model also names the current screen; discard the irrelevant destination without a classifier call. This never grants navigation.
+
+The navigation-only reply draft describes the conditional successful destination, not progress or a domain effect. Core may reuse it after the successful matching navigation receipt and egress checks, including when Stage 1 marked the draft pending. Failed/unconfirmed navigation and compound requests retain their normal evaluation/recovery paths.
+
+An explicitly conditional navigation request remains requested pending work. Preserve its prerequisite read, destination and condition for the planner; it is not navigationOnly and cannot use direct navigation. The planner must observe a satisfying read result before navigating and keep the current view when the condition fails. None/forbidden decisions remain denied at dispatch.
+
+When navigation needs the planner, its context includes the fresh role-filtered destination identity index even if Stage 1 proposed a destination. The planner resolves each requested target and condition from the full current request; a proposal does not authorize unrequested navigation. Full interaction schemas remain discoverable, and direct navigation keeps its single-destination context.
+
+A resolved VIEWS read capability stays a read across prerequisites, later steps and negative write clauses. Words elsewhere in the request must not upgrade it into creation, updates, deletion or selection; a different operation requires another planner decision. The existing explicit destructive-negation veto, catalog validation, parameter checks, role gates and effect receipts remain in force; ambiguous or failed work returns to the planner.

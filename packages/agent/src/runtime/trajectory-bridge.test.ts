@@ -307,7 +307,7 @@ describe("installDatabaseTrajectoryLogger (capture bridge)", () => {
   });
 
   it("honors live enablement across patched lifecycle and legacy helpers", async () => {
-    const { runtime, logger, execute } = makeRuntime({
+    const { runtime, logger, execute, setPersistedTrajectory } = makeRuntime({
       statefulEnablement: true,
     });
     await installDatabaseTrajectoryLogger(runtime);
@@ -357,6 +357,7 @@ describe("installDatabaseTrajectoryLogger (capture bridge)", () => {
 
     logger.setEnabled(true);
     const persistedAt = Date.now();
+    setPersistedTrajectory("enabled-parent", true);
     execute.mockImplementation(async (query: unknown) => {
       const sql = sqlText(query);
       if (
@@ -857,8 +858,10 @@ describe("installDatabaseTrajectoryLogger (capture bridge)", () => {
   });
 
   it("keeps standalone late child capture closed and shutdown permanently inert", async () => {
-    const { runtime, execute, reportError } = makeRuntime();
+    const { runtime, execute, reportError, setPersistedTrajectory } =
+      makeRuntime();
     const persistedAt = Date.now();
+    setPersistedTrajectory("standalone-parent", true);
     const parentRow = {
       id: "standalone-parent",
       agent_id: runtime.agentId,
@@ -1349,8 +1352,9 @@ describe("installDatabaseTrajectoryLogger (capture bridge)", () => {
   it("preserves large bridge-owned captures while normalizing cycles", {
     timeout: 300_000,
   }, async () => {
-    const { runtime, logger, execute } = makeRuntime();
+    const { runtime, logger, execute, setPersistedTrajectory } = makeRuntime();
     const persistedAt = Date.now();
+    setPersistedTrajectory("bounded-parent", true);
     const parentRow = {
       id: "bounded-parent",
       agent_id: runtime.agentId,

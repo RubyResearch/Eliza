@@ -46,6 +46,48 @@ beforeAll(async () => {
 afterAll(async () => {
   await database.closeDatabaseConnectionsForTests();
 });
+test("legacy policy returns a database observation without a separate clock round trip", async () => {
+  const pg = database.getPgliteClientForTests();
+  const before = await pg.query<{ now: Date }>("SELECT clock_timestamp() AS now");
+  const result = await database.dbWrite.transaction(async (tx) => {
+    const selects = spyOn(tx, "select");
+    try {
+      const value = await policy.readOrganizationQuotaPolicyInTransaction(tx, LEGACY);
+      expect(selects).toHaveBeenCalledTimes(1);
+      return value;
+    } finally {
+      selects.mockRestore();
+    }
+  });
+  const after = await pg.query<{ now: Date }>("SELECT clock_timestamp() AS now");
+  expect(result.authority?.source).toBe("legacy");
+  expect(policy.requireOrganizationPolicyBalance(result).balanceUsd).toBe(100);
+  expect(new Date(result.observedAt).getTime()).toBeGreaterThanOrEqual(
+    new Date(before.rows[0].now).getTime(),
+  );
+  expect(new Date(result.observedAt).getTime()).toBeLessThanOrEqual(
+    new Date(after.rows[0].now).getTime(),
+  );
+  const requestedObservation = new Date("2025-01-01T00:00:00.000Z");
+  const overridden = await database.dbWrite.transaction((tx) =>
+    policy.readOrganizationQuotaPolicyInTransaction(tx, LEGACY, requestedObservation),
+  );
+  expect(overridden.observedAt).toBe(requestedObservation.toISOString());
+});
+test("subscription admission still rejects an observation at its expiry boundary", async () => {
+  const current = await policy.readOrganizationQuotaPolicy(ORG);
+  expect(current.authority.source).toBe("subscription");
+  expect(current.authority.effectiveUntil).not.toBeNull();
+  const expiry = new Date(current.authority.effectiveUntil!);
+  await expect(
+    database.dbWrite.transaction((tx) =>
+      policy.readOrganizationQuotaPolicyInTransaction(tx, ORG, expiry),
+    ),
+  ).rejects.toMatchObject({
+    code: "ORGANIZATION_POLICY_UNAVAILABLE",
+    context: { organizationId: ORG, reason: "entitlement_not_effective" },
+  });
+});
 test("optional policy rows stay tenant-scoped and missing authority fails closed", async () => {
   const pg = database.getPgliteClientForTests();
   const target = "61000000-0000-4000-8000-000000000003";

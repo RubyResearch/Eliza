@@ -10,6 +10,7 @@ import type {
 } from "../../types/components";
 import type { Memory } from "../../types/memory";
 import type {
+	MessageReplyRecoveryContext,
 	MessageTerminalFailure,
 	ShouldRespondModelType,
 } from "../../types/message-service";
@@ -54,6 +55,7 @@ export interface StrategyResult {
 	responseContent: Content | null;
 	responseMessages: Memory[];
 	actionResults?: ActionResult[];
+	replyRecovery?: MessageReplyRecoveryContext;
 	terminalFailure?: MessageTerminalFailure;
 	state: State;
 	mode: StrategyMode;

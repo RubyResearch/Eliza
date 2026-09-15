@@ -155,7 +155,9 @@ describe("message handler retrieval hint output", () => {
 		expect(Object.keys(HANDLE_RESPONSE_SCHEMA.properties ?? {})).toEqual([
 			"shouldRespond",
 			"contexts",
+			"contextRequests",
 			"intents",
+			"completionContext",
 			"replyText",
 			"replyEffectStatus",
 			"candidateActionNames",
@@ -168,7 +170,9 @@ describe("message handler retrieval hint output", () => {
 		expect(HANDLE_RESPONSE_SCHEMA.required).toEqual([
 			"shouldRespond",
 			"contexts",
+			"contextRequests",
 			"intents",
+			"completionContext",
 			"replyText",
 			"replyEffectStatus",
 			"candidateActionNames",
@@ -191,7 +195,9 @@ describe("message handler retrieval hint output", () => {
 		expect(Object.keys(composedSchema.properties ?? {})).toEqual([
 			"shouldRespond",
 			"contexts",
+			"contextRequests",
 			"intents",
+			"completionContext",
 			"replyText",
 			"replyEffectStatus",
 			"candidateActionNames",
@@ -204,6 +210,7 @@ describe("message handler retrieval hint output", () => {
 		expect(composedSchema.properties).toMatchObject({
 			shouldRespond: { type: "string", enum: ["RESPOND", "IGNORE", "STOP"] },
 			contexts: { type: "array" },
+			contextRequests: { type: "array", items: { type: "string" } },
 			intents: { type: "array" },
 			replyText: { type: "string" },
 			replyEffectStatus: {

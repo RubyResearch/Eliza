@@ -4,7 +4,8 @@
  * learnings plus a small related graph, with a copy-to-clipboard follow-up action
  * for chaining. Validates on a structured `query`/`q` param, on experience/search
  * intent in free text, or on an in-scope action context, and derives a query from
- * the message when none is supplied.
+ * the message when none is supplied. Complete results remain planner evidence;
+ * the completion path owns the user-facing answer.
  */
 import { logger } from "../../../../logger.ts";
 import { unwrapUserMessageText } from "../../../../security/incoming-message-security.ts";
@@ -12,7 +13,6 @@ import type {
 	Action,
 	ActionExample,
 	ActionResult,
-	HandlerCallback,
 	HandlerOptions,
 } from "../../../../types/components.ts";
 import type { Memory } from "../../../../types/memory.ts";
@@ -149,7 +149,6 @@ export const searchExperiencesAction: Action = {
 		message: Memory,
 		_state?: State,
 		_options?: HandlerOptions,
-		callback?: HandlerCallback,
 	): Promise<ActionResult> {
 		const experienceService = runtime.getService(
 			"EXPERIENCE",
@@ -195,17 +194,7 @@ export const searchExperiencesAction: Action = {
 						.join("\n\n")
 				: `No experiences found for ${describeQuery(query)}.`;
 
-		const text = `[EXPERIENCE SEARCH]\nQuery: ${queryLogView(query)}\nMatches: ${experiences.length}\nGraph: ${graph.nodes.length} nodes, ${graph.links.length} links\n\n${resultText}`;
-		if (callback) {
-			await callback(
-				{
-					text,
-					actions: [SEARCH_EXPERIENCES],
-					source: message.content.source,
-				},
-				SEARCH_EXPERIENCES,
-			);
-		}
+		const text = `[EXPERIENCE SEARCH]\nQuery: ${JSON.stringify(query)}\nMatches: ${experiences.length}\nGraph: ${graph.nodes.length} nodes, ${graph.links.length} links\n\n${resultText}`;
 
 		logger.info(
 			`[SearchExperiencesAction] Returned ${experiences.length} experiences for query "${queryLogView(query)}"`,
@@ -215,9 +204,10 @@ export const searchExperiencesAction: Action = {
 		// count, decides whether the user's remaining work is complete.
 		return {
 			success: true,
+			transcriptVisibility: "internal",
 			text,
 			data: {
-				query: queryLogView(query),
+				query,
 				experiences,
 				graph,
 				postActions: [
@@ -234,7 +224,7 @@ export const searchExperiencesAction: Action = {
 				],
 			},
 			values: {
-				experienceSearchQuery: queryLogView(query),
+				experienceSearchQuery: query,
 				experienceSearchCount: String(experiences.length),
 			},
 		};

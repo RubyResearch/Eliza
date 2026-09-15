@@ -75,6 +75,37 @@ describe("projectSettledActionDiagnostics", () => {
 });
 
 describe("projectLlmCallDiagnostics", () => {
+  it("retains complete nested tool schemas while redacting actual secrets", () => {
+    const parameters = {
+      type: "object",
+      properties: {
+        completionContext: {
+          type: "object",
+          properties: {
+            mode: { type: "string", enum: ["full", "selected"] },
+            sources: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Exact source ID" },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const tools = {
+      HANDLE_RESPONSE: { description: "Choose response fields", parameters },
+    };
+    const projected = projectLlmCallDiagnostics(runtime, {
+      tools,
+      response: RUNTIME_SECRET,
+    });
+    expect(projected.tools).toEqual(tools);
+    expect(projected.response).not.toContain(RUNTIME_SECRET);
+  });
   it("scrubs model messages/tool calls and invalidates changed message spans", () => {
     const raw = {
       callId: "call-identity-1",

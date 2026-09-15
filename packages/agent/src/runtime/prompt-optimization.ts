@@ -57,6 +57,7 @@ import {
 import {
   applyActiveViewAwareness,
   getActiveViewContext,
+  renderActiveViewContextBlock,
 } from "./view-action-affinity.ts";
 
 // ---------------------------------------------------------------------------
@@ -1001,11 +1002,10 @@ export function serializeCompactorMessagesForModel(
 }
 
 /**
- * Inject the Active View awareness block into the *current* (last) user
- * message. Using findIndex (first user) broke multi-turn planners: turn 2+
- * either rewrote history or hit the idempotent early-return on a prior turn's
- * already-annotated message, so the live user turn never received the block
- * and deterministic fixtures looking at latestUserText failed closed (#17918).
+ * Append the fresh view snapshot to the last user message. Keeping the original
+ * content first preserves the reusable planner prefix as feedback grows. Each
+ * dispatch starts from the caller's unchanged messages; never strip headings
+ * from them, since a quoted Active View block can be original source evidence.
  */
 function applyActiveViewAwarenessToMessages(
   messages: CompactorMessage[],
@@ -1021,8 +1021,10 @@ function applyActiveViewAwarenessToMessages(
   if (userMessageIndex === -1) return messages;
 
   const message = messages[userMessageIndex];
-  const awareContent = applyActiveViewAwareness(message.content, view);
-  if (awareContent === message.content) return messages;
+  if (!view) return messages;
+  const block = renderActiveViewContextBlock(view);
+  const awareContent =
+    message.content.length > 0 ? `${message.content}\n\n${block}` : block;
 
   const rewritten = [...messages];
   rewritten[userMessageIndex] = { ...message, content: awareContent };
@@ -1587,12 +1589,9 @@ export function installPromptOptimizations(
       capturedUsage?.completionTokens ?? estimateTokenCount(responseText);
     const fallbackCall = {
       stepId: normalizedTrajectoryStepId ?? undefined,
-      model: resolveTrajectoryModelLabel(
-        runtime,
-        modelType,
-        payloadRecord,
-        args[2],
-      ),
+      model:
+        capturedUsage?.model ??
+        resolveTrajectoryModelLabel(runtime, modelType, payloadRecord, args[2]),
       systemPrompt,
       userPrompt: userPromptForTrajectory,
       response: responseText,
@@ -1648,10 +1647,13 @@ export function installPromptOptimizations(
       typeof trajectoryLogger.updateLatestLlmCall === "function"
     ) {
       try {
-        await trajectoryLogger.updateLatestLlmCall(
-          normalizedTrajectoryStepId,
-          fallbackCall,
-        );
+        await trajectoryLogger.updateLatestLlmCall(normalizedTrajectoryStepId, {
+          ...fallbackCall,
+          // The provider has already recorded its actual model. A runtime
+          // configuration or plugin label is only a fallback for missing
+          // captures, never evidence that can overwrite that identity.
+          model: capturedUsage?.model,
+        });
       } catch {
         // Ignore enrichment failures; the model call itself already succeeded.
       }

@@ -165,6 +165,47 @@ describe("POST /api/views/:id/navigate broadcast contract", () => {
     );
   });
 
+  it("delivers voice navigation to its known renderer before dependent view actions", async () => {
+    const { ctx, json, broadcastWs, broadcastWsToClientId } = makeNavigateCtx(
+      "notes",
+      {
+        delivery: "originating-client",
+        clientId: "speaking-seeker",
+      },
+    );
+    await expect(handleViewsRoutes(ctx)).resolves.toBe(true);
+    expect(broadcastWs).not.toHaveBeenCalled();
+    expect(broadcastWsToClientId).toHaveBeenCalledWith(
+      "speaking-seeker",
+      expect.objectContaining({
+        type: SHELL_NAVIGATE_VIEW_WS_EVENT,
+        viewId: "notes",
+      }),
+    );
+    expect(broadcastWsToClientId.mock.invocationCallOrder[0]).toBeLessThan(
+      json.mock.invocationCallOrder[0],
+    );
+    expect(getCurrentViewState()).toMatchObject({ viewId: "notes" });
+  });
+
+  it("rejects voice navigation to a disconnected renderer without global fallback", async () => {
+    const { ctx, json, error, broadcastWs, broadcastWsToClientId } =
+      makeNavigateCtx("notes", {
+        delivery: "originating-client",
+        clientId: "disconnected-seeker",
+      });
+    broadcastWsToClientId.mockReturnValue(0);
+    await expect(handleViewsRoutes(ctx)).resolves.toBe(true);
+    expect(broadcastWs).not.toHaveBeenCalled();
+    expect(json).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      ctx.res,
+      expect.stringContaining("No connected view client"),
+      409,
+    );
+    expect(getCurrentViewState()).toBeNull();
+  });
+
   it("best-effort delivers completed-action navigation before its acknowledgement", async () => {
     const { ctx, json, broadcastWs, broadcastWsToClientId } = makeNavigateCtx(
       "calendar",

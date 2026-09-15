@@ -701,6 +701,7 @@ function makeRuntime(respond: (prompt: string) => string): IAgentRuntime {
   return {
     agentId: "00000000-0000-0000-0000-000000000003" as UUID,
     getRoom: vi.fn(async () => null),
+    reportError: vi.fn(),
     useModel: vi.fn(async (_modelType: unknown, args: { prompt: string }) =>
       respond(args.prompt),
     ),
@@ -1073,6 +1074,49 @@ describe("runLifeOperationHandler clarification contract", () => {
       }),
     ]);
   });
+
+  it.each([
+    'Preview one reminder named "Boundary QA" for September 26, 2026 at noon America/New_York.',
+    'Create a reminder named "Boundary QA" for September 26, 2026 at noon America/New_York. Do not save it or change any records.',
+    'Create a reminder named "Boundary QA" for September 26, 2026 at noon America/New_York. Do not save it.',
+    'Create a reminder named "Boundary QA" for September 26, 2026 at noon America/New_York. Don’t save anything.',
+  ])(
+    "keeps the dated reminder as a preview when the owner says %p",
+    async (ownerText) => {
+      const runtime = makeRuntime((prompt) =>
+        prompt.includes("create_definition request")
+          ? taskPlanJson({
+              requestKind: "reminder",
+              title: "Boundary QA",
+              cadenceKind: "once",
+              dueDate: "2026-09-26",
+              timeOfDay: "12:00",
+              timeZone: "America/New_York",
+            })
+          : "",
+      );
+      const result = await runLifeOperationHandler(
+        runtime,
+        makeMessage(ownerText),
+        undefined,
+        {
+          parameters: {
+            action: "create",
+            confirmed: true,
+            title: "Boundary QA",
+            intent: ownerText,
+            ownerSurface: "OWNER_REMINDERS",
+          },
+        } as HandlerOptions,
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        data: { deferred: true, saved: false, requiresConfirmation: true },
+      });
+      expect(serviceState.createCalls).toHaveLength(0);
+    },
+  );
 
   it("does not treat a future confirmation clause as current consent", async () => {
     const ownerText =
@@ -2111,83 +2155,90 @@ describe("runLifeOperationHandler snooze durations", () => {
     });
   });
 
-  it("reuses a previewed goal draft when the confirmation turn is misrouted to routines", async () => {
-    const runtime = makeRuntime(() => {
-      throw new Error(
-        "explicit draft confirmations should not need LLM reuse classification",
+  it.each([
+    "ok save that one",
+    "ok save that one\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]",
+  ])(
+    "reuses a previewed goal draft when confirmation is misrouted to routines: %s",
+    async (confirmation) => {
+      const runtime = makeRuntime(() => {
+        throw new Error(
+          "explicit draft confirmations should not need LLM reuse classification",
+        );
+      });
+      const deferredGoalDraft = {
+        intent:
+          "Count it if I walk around the block after lunch three times a week for the next six weeks.",
+        operation: "create_goal",
+        createdAt: Date.now(),
+        request: {
+          title: "Walk around the block",
+          description:
+            "Walk around the block after lunch three times a week for six weeks.",
+          successCriteria: {
+            metric: "weekly post-lunch walks",
+            summary:
+              "Complete three post-lunch walks around the block per week.",
+          },
+          supportStrategy: {
+            firstStep: "Pick the next lunch where a short walk is possible.",
+            summary: "Keep the walk small and low-pressure.",
+          },
+          metadata: {
+            goalGrounding: { groundingState: "grounded" },
+            source: "chat",
+          },
+        },
+      };
+      const state = {
+        data: {
+          actionResults: [
+            {
+              success: false,
+              data: { lifeDraft: deferredGoalDraft },
+            },
+          ],
+        },
+      } as unknown as State;
+
+      const result = await runLifeOperationHandler(
+        runtime,
+        makeMessage(externalSourceMessageText(confirmation)),
+        state,
+        {
+          parameters: {
+            action: "create",
+            kind: "definition",
+            intent:
+              "Walk around the block after lunch three times a week for the next six weeks",
+            title: "Walk around the block after lunch",
+            confirmed: false,
+            details: {
+              frequency: "3 times per week",
+              durationWeeks: 6,
+              timeOfDay: "after lunch",
+            },
+            ownerSurface: "OWNER_ROUTINES",
+          },
+        } as HandlerOptions,
       );
-    });
-    const deferredGoalDraft = {
-      intent:
-        "Count it if I walk around the block after lunch three times a week for the next six weeks.",
-      operation: "create_goal",
-      createdAt: Date.now(),
-      request: {
+
+      expect(result.success).toBe(true);
+      expect(serviceState.createCalls).toHaveLength(0);
+      expect(serviceState.goalCreateCalls).toHaveLength(1);
+      expect(serviceState.goalCreateCalls[0]).toMatchObject({
         title: "Walk around the block",
         description:
           "Walk around the block after lunch three times a week for six weeks.",
         successCriteria: {
           metric: "weekly post-lunch walks",
-          summary: "Complete three post-lunch walks around the block per week.",
         },
         supportStrategy: {
           firstStep: "Pick the next lunch where a short walk is possible.",
-          summary: "Keep the walk small and low-pressure.",
         },
-        metadata: {
-          goalGrounding: { groundingState: "grounded" },
-          source: "chat",
-        },
-      },
-    };
-    const state = {
-      data: {
-        actionResults: [
-          {
-            success: false,
-            data: { lifeDraft: deferredGoalDraft },
-          },
-        ],
-      },
-    } as unknown as State;
-
-    const result = await runLifeOperationHandler(
-      runtime,
-      makeMessage(externalSourceMessageText("ok save that one")),
-      state,
-      {
-        parameters: {
-          action: "create",
-          kind: "definition",
-          intent:
-            "Walk around the block after lunch three times a week for the next six weeks",
-          title: "Walk around the block after lunch",
-          confirmed: false,
-          details: {
-            frequency: "3 times per week",
-            durationWeeks: 6,
-            timeOfDay: "after lunch",
-          },
-          ownerSurface: "OWNER_ROUTINES",
-        },
-      } as HandlerOptions,
-    );
-
-    expect(result.success).toBe(true);
-    expect(serviceState.createCalls).toHaveLength(0);
-    expect(serviceState.goalCreateCalls).toHaveLength(1);
-    expect(serviceState.goalCreateCalls[0]).toMatchObject({
-      title: "Walk around the block",
-      description:
-        "Walk around the block after lunch three times a week for six weeks.",
-      successCriteria: {
-        metric: "weekly post-lunch walks",
-      },
-      supportStrategy: {
-        firstStep: "Pick the next lunch where a short walk is possible.",
-      },
-    });
-  });
+      });
+    },
+  );
 
   it("keeps goal-tracking follow-up details on the goal path even when planner selects routines", async () => {
     const runtime = makeRuntime((prompt) => {
@@ -2553,50 +2604,499 @@ describe("runLifeOperationHandler one-off reminder scheduling", () => {
     serviceState.ownerEntityIds.length = 0;
   });
 
-  it('schedules "remind me friday at 5pm" on Friday 17:00, not now', async () => {
+  it("marks an expired bare confirmation as awaiting the owner without classifying the app footer", async () => {
+    const prompts: string[] = [];
+    const runtime = makeRuntime((prompt) => {
+      prompts.push(prompt);
+      return "";
+    });
+    const state = {
+      data: {
+        actionResults: [
+          {
+            success: false,
+            data: {
+              lifeDraft: {
+                operation: "create_definition",
+                intent: "Preview a reminder tomorrow at noon",
+                createdAt: Date.now() - 6 * 60_000,
+                sourceMessageId: "prior-preview",
+                request: {
+                  title: "Expired preview",
+                  kind: "task",
+                  cadence: { kind: "once", dueAt: "2026-09-26T16:00:00.000Z" },
+                },
+              },
+            },
+          },
+        ],
+      },
+    } as unknown as State;
+    const message = makeMessage(
+      "Yes, save it.\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]",
+    );
+    const result = await runLifeOperationHandler(runtime, message, state, {
+      parameters: { action: "create_reminder", confirmed: true },
+    } as HandlerOptions);
+    expect(
+      prompts.filter((prompt) =>
+        prompt.includes("interpret the user's follow-up"),
+      ),
+    ).toHaveLength(0);
+    expect(serviceState.createCalls).toHaveLength(0);
+    expect(result).toMatchObject({
+      success: false,
+      data: {
+        reason: "draft_expired",
+        lifeDraftInvalidated: true,
+        awaitingUserInput: true,
+      },
+    });
+    expect(message.content.text).toContain("Language instruction");
+  });
+
+  it("keeps a three-character time correction out of the bare-confirmation shortcut", async () => {
+    const prompts: string[] = [];
+    const runtime = makeRuntime((prompt) => {
+      prompts.push(prompt);
+      if (prompt.includes("interpret the user's follow-up"))
+        return JSON.stringify({ mode: "edit" });
+      if (prompt.includes("create_definition request"))
+        return taskPlanJson({
+          title: "Call Mom",
+          requestKind: "reminder",
+          cadenceKind: "once",
+          dueDate: "2026-09-26",
+          timeOfDay: "21:00",
+          timeZone: "America/New_York",
+        });
+      return "";
+    });
+    const state = {
+      data: {
+        actionResults: [
+          {
+            success: false,
+            data: {
+              lifeDraft: {
+                operation: "create_definition",
+                intent: "Remind me to call Mom on September 26 at noon",
+                createdAt: Date.now(),
+                sourceMessageId: "prior-preview",
+                request: {
+                  title: "Call Mom",
+                  kind: "task",
+                  timezone: "America/New_York",
+                  cadence: { kind: "once", dueAt: "2026-09-26T16:00:00.000Z" },
+                },
+              },
+            },
+          },
+        ],
+      },
+    } as unknown as State;
+    const result = await runLifeOperationHandler(
+      runtime,
+      makeMessage("Yes, 9pm"),
+      state,
+      {
+        parameters: { action: "create_reminder", confirmed: true },
+      } as HandlerOptions,
+    );
+    expect(
+      prompts.filter((prompt) =>
+        prompt.includes("interpret the user's follow-up"),
+      ),
+    ).toHaveLength(1);
+    const request =
+      serviceState.createCalls[0] ??
+      (result.data?.lifeDraft as { request?: unknown } | undefined)?.request;
+    expect(request).toMatchObject({
+      cadence: { kind: "once", dueAt: "2026-09-27T01:00:00.000Z" },
+    });
+  });
+
+  it.each([
+    {
+      name: "preview stays unsaved",
+      text: "Preview a reminder to call Mom tomorrow at noon. Do not save it.",
+      plan: {
+        requestKind: "reminder",
+        cadenceKind: "once",
+        dueInDays: 1,
+        timeOfDay: "12:00",
+      },
+      writes: 0,
+    },
+    {
+      name: "alarm classification",
+      text: "Set an alarm for tomorrow at 7am.",
+      plan: {
+        requestKind: "alarm",
+        cadenceKind: "once",
+        dueInDays: 1,
+        timeOfDay: "07:00",
+      },
+      writes: 1,
+    },
+    {
+      name: "multi-step confirmation",
+      text: "Remind me to outline, draft, and proofread by the 28th.",
+      plan: {
+        requestKind: "reminder",
+        cadenceKind: "once",
+        dueDate: "2026-09-28",
+        multiStep: true,
+      },
+      writes: 0,
+    },
+    {
+      name: "flexible quota and check-ins",
+      text: "Track 25 pushups, three sets a day, whenever, and check in after lunch. Show it first.",
+      plan: {
+        cadenceKind: "count_per_day",
+        quotaTargetCount: 3,
+        quotaUnit: "set",
+        perOccurrenceWork: "25 pushups",
+        checkInRequested: true,
+        checkInWindows: ["afternoon"],
+        description: "Daily exercise",
+        priority: 2,
+      },
+      writes: 0,
+    },
+    {
+      name: "unknown schedule overrides model guess",
+      text: "Remind me to call Mom. I have not said when. Don't guess a schedule.",
+      plan: {
+        requestKind: "reminder",
+        cadenceKind: "once",
+        dueInDays: 1,
+        timeOfDay: "12:00",
+      },
+      writes: 0,
+    },
+    {
+      name: "clockless once asks when",
+      text: "Remind me to call Mom.",
+      plan: { requestKind: "reminder", cadenceKind: "once" },
+      writes: 0,
+    },
+    {
+      name: "explicit undated todo",
+      text: "Add a todo to call Mom, no due date.",
+      plan: { cadenceKind: "unscheduled" },
+      surface: "OWNER_TODOS",
+      writes: 1,
+    },
+    {
+      name: "clarification without create",
+      text: "Can you remind me?",
+      plan: { mode: "respond", response: "What should I remind you about?" },
+      writes: 0,
+    },
+  ])(
+    "preserves extraction semantics: $name",
+    async ({ text, plan, surface, writes }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-11T18:00:00.000Z"));
+      try {
+        const completePlan = {
+          requestKind: "unspecified",
+          mode: "create",
+          multiStep: false,
+          title: "Call Mom",
+          timeZone: "America/New_York",
+          ...plan,
+        };
+        const run = async (native: boolean) => {
+          serviceState.createCalls.length = 0;
+          const extractionPrompts: string[] = [];
+          const runtime = makeRuntime((prompt) => {
+            if (prompt.includes("create_definition request")) {
+              extractionPrompts.push(prompt);
+              return taskPlanJson(completePlan);
+            }
+            return "";
+          });
+          const result = await runLifeOperationHandler(
+            runtime,
+            makeMessage(text),
+            undefined,
+            {
+              parameters: {
+                action: "create",
+                kind: "definition",
+                ownerSurface: surface ?? "OWNER_REMINDERS",
+                confirmed: true,
+                ...(native ? { createPlan: completePlan } : {}),
+              },
+            } as HandlerOptions,
+          );
+          return {
+            result,
+            saved: [...serviceState.createCalls],
+            extractionPrompts,
+          };
+        };
+        const extracted = await run(false);
+        const native = await run(true);
+        expect(extracted.extractionPrompts).toHaveLength(1);
+        expect(native.extractionPrompts).toHaveLength(0);
+        expect(native.saved).toHaveLength(writes);
+        expect(native.saved).toEqual(extracted.saved);
+        expect(native.result.success).toEqual(extracted.result.success);
+        expect(native.result.data?.lifeDraft).toEqual(
+          extracted.result.data?.lifeDraft,
+        );
+        expect(native.result.data?.awaitingUserInput).toEqual(
+          extracted.result.data?.awaitingUserInput,
+        );
+        expect(native.result.data?.requiresConfirmation).toEqual(
+          extracted.result.data?.requiresConfirmation,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { mode: "create", title: "Call Mom", cadenceKind: "once", dueInDays: 1 },
+    {
+      mode: "create",
+      multiStep: false,
+      title: "Call Mom",
+      cadenceKind: "once",
+      timeOfDay: "29:99",
+    },
+    {
+      mode: "create",
+      multiStep: false,
+      title: "Call Mom",
+      cadenceKind: "once",
+      timeZone: "Not/AZone",
+    },
+    {
+      mode: "create",
+      multiStep: false,
+      title: "Call Mom",
+      cadenceKind: "once",
+      dueInDays: 1,
+      dueWeekday: 2,
+    },
+    {
+      mode: "create",
+      multiStep: false,
+      title: "Call Mom",
+      cadenceKind: "once",
+      confirmed: true,
+    },
+  ])(
+    "keeps extraction for an incomplete or invalid direct plan: %j",
+    async (createPlan) => {
+      const prompts: string[] = [];
+      const runtime = makeRuntime((prompt) => {
+        prompts.push(prompt);
+        return taskPlanJson({
+          mode: "respond",
+          response: "When should I remind you?",
+        });
+      });
+      await runLifeOperationHandler(
+        runtime,
+        makeMessage("Remind me to call Mom."),
+        undefined,
+        {
+          parameters: {
+            action: "create_reminder",
+            createPlan: { requestKind: "reminder", ...createPlan },
+          },
+        } as HandlerOptions,
+      );
+      expect(
+        prompts.filter((prompt) =>
+          prompt.includes("create_definition request"),
+        ),
+      ).toHaveLength(1);
+      expect(serviceState.createCalls).toHaveLength(0);
+    },
+  );
+
+  it("uses the ordinary planner's complete create plan without a second extraction", async () => {
     const runtime = makeRuntime((prompt) => {
       if (prompt.includes("create_definition request")) {
+        throw new Error("A complete planner plan must not reread room history");
+      }
+      return "";
+    });
+    const result = await runLifeOperationHandler(
+      runtime,
+      makeMessage(
+        "Remind me to call Mom on September 26, 2026 at noon in New York.",
+      ),
+      undefined,
+      {
+        parameters: {
+          action: "create_reminder",
+          createPlan: {
+            mode: "create",
+            multiStep: false,
+            requestKind: "reminder",
+            title: "Call Mom",
+            cadenceKind: "once",
+            dueDate: "2026-09-26",
+            timeOfDay: "12:00",
+            timeZone: "America/New_York",
+          },
+        },
+      } as HandlerOptions,
+    );
+    expect(result.success).toBe(true);
+    expect(serviceState.createCalls).toHaveLength(1);
+    expect(serviceState.createCalls[0]).toMatchObject({
+      title: "Call Mom",
+      timezone: "America/New_York",
+      cadence: { kind: "once", dueAt: "2026-09-26T16:00:00.000Z" },
+    });
+  });
+
+  it.each([400, 503])(
+    "stops when pending-draft classification fails with provider status %s, without another extraction or save",
+    async (statusCode) => {
+      const failure = Object.assign(
+        new Error(
+          statusCode === 400
+            ? "Bad Request: Please reduce the length of the messages or completion. Current length is 139000 while limit is 131072"
+            : "Provider unavailable",
+        ),
+        { name: "AI_APICallError", statusCode },
+      );
+      let calls = 0;
+      const runtime = makeRuntime(() => {
+        if (calls++ === 0) throw failure;
         return taskPlanJson({
           requestKind: "reminder",
-          title: "Call mom",
+          title: "New preview",
           cadenceKind: "once",
           dueWeekday: 5,
           timeOfDay: "17:00",
         });
-      }
-      return "";
-    });
-    const before = Date.now();
-    const message = makeMessage("remind me friday at 5pm to call mom");
-    const result = await runLifeOperationHandler(runtime, message, undefined, {
-      parameters: {
-        action: "create_reminder",
-        intent: "remind me friday at 5pm to call mom",
-      },
-    } as HandlerOptions);
-    expect(result.success).toBe(true);
-    // A completed persist is canonical: the planner must echo the action's
-    // own confirmation instead of paraphrasing the save state (#16941).
-    expect(result.verifiedUserFacing).toBe(true);
-    expect(result.userFacingText ?? "").not.toBe("");
-    expect(serviceState.createCalls).toHaveLength(1);
-    expect(serviceState.ownerEntityIds).toContain(message.entityId);
-    const cadence = serviceState.createCalls[0]?.cadence as {
-      kind: string;
-      dueAt: string;
-    };
-    expect(cadence.kind).toBe("once");
-    const dueAtMs = Date.parse(cadence.dueAt);
-    expect(dueAtMs).toBeGreaterThan(before);
-    const timeZone = resolveDefaultTimeZone();
-    const parts = getZonedDateParts(new Date(cadence.dueAt), timeZone);
-    const weekday = new Date(
-      Date.UTC(parts.year, parts.month - 1, parts.day, 12),
-    ).getUTCDay();
-    expect(weekday).toBe(5);
-    expect(parts.hour).toBe(17);
-    expect(parts.minute).toBe(0);
-  });
+      });
+      const draft = {
+        operation: "create_definition",
+        createdAt: Date.now(),
+        sourceMessageId: "prior-preview",
+        intent: "Preview an earlier reminder",
+        request: {
+          title: "Earlier preview",
+          kind: "task",
+          cadence: { kind: "once", dueAt: "2026-09-26T16:00:00.000Z" },
+        },
+      };
+      const state = {
+        values: {},
+        text: "",
+        data: {
+          actionResults: [
+            {
+              success: false,
+              data: { lifeDraft: draft, saved: false, deferred: true },
+            },
+          ],
+        },
+      } as unknown as State;
+      await expect(
+        runLifeOperationHandler(
+          runtime,
+          makeMessage(
+            'Preview a reminder called "New preview" for Friday at 5pm. Do not save it.',
+          ),
+          state,
+          {
+            parameters: {
+              action: "create_reminder",
+              title: "New preview",
+              createPlan: {
+                mode: "create",
+                multiStep: false,
+                title: "New preview",
+                cadenceKind: "once",
+                dueWeekday: 5,
+                timeOfDay: "17:00",
+                requestKind: "reminder",
+              },
+            },
+          } as HandlerOptions,
+        ),
+      ).rejects.toBe(failure);
+      expect(runtime.useModel).toHaveBeenCalledTimes(1);
+      expect(serviceState.createCalls).toEqual([]);
+      expect(serviceState.goalCreateCalls).toEqual([]);
+      expect(state.data.actionResults).toEqual([
+        {
+          success: false,
+          data: { lifeDraft: draft, saved: false, deferred: true },
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    "remind me friday at 5pm to call mom",
+    "remind me friday at 5pm to call mom. Do not create other reminders.",
+  ])(
+    "schedules the authorized single reminder on Friday 17:00: %p",
+    async (ownerText) => {
+      const runtime = makeRuntime((prompt) => {
+        if (prompt.includes("create_definition request")) {
+          return taskPlanJson({
+            requestKind: "reminder",
+            title: "Call mom",
+            cadenceKind: "once",
+            dueWeekday: 5,
+            timeOfDay: "17:00",
+          });
+        }
+        return "";
+      });
+      const before = Date.now();
+      const message = makeMessage(ownerText);
+      const result = await runLifeOperationHandler(
+        runtime,
+        message,
+        undefined,
+        {
+          parameters: {
+            action: "create_reminder",
+            intent: ownerText,
+          },
+        } as HandlerOptions,
+      );
+      expect(result.success).toBe(true);
+      // A completed persist is canonical: the planner must echo the action's
+      // own confirmation instead of paraphrasing the save state (#16941).
+      expect(result.verifiedUserFacing).toBe(true);
+      expect(result.userFacingText ?? "").not.toBe("");
+      expect(serviceState.createCalls).toHaveLength(1);
+      expect(serviceState.ownerEntityIds).toContain(message.entityId);
+      const cadence = serviceState.createCalls[0]?.cadence as {
+        kind: string;
+        dueAt: string;
+      };
+      expect(cadence.kind).toBe("once");
+      const dueAtMs = Date.parse(cadence.dueAt);
+      expect(dueAtMs).toBeGreaterThan(before);
+      const timeZone = resolveDefaultTimeZone();
+      const parts = getZonedDateParts(new Date(cadence.dueAt), timeZone);
+      const weekday = new Date(
+        Date.UTC(parts.year, parts.month - 1, parts.day, 12),
+      ).getUTCDay();
+      expect(weekday).toBe(5);
+      expect(parts.hour).toBe(17);
+      expect(parts.minute).toBe(0);
+    },
+  );
 
   it("previews (never writes) a multi-milestone dated ask until the owner confirms (#16941)", async () => {
     // Live finding: "history report due Monday 9am — set reminders for

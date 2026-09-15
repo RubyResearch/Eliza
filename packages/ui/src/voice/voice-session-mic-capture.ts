@@ -223,6 +223,8 @@ export interface VoiceMicCapture {
   readonly active: boolean;
   /** Stop capture and release the mic + audio graph. Idempotent. */
   stop(): Promise<void>;
+  /** Disable microphone tracks without destroying the session's audio graph. */
+  setMuted(muted: boolean): void;
   /** Which backend is driving capture, for diagnostics/evidence. */
   readonly backend: "audioworklet" | "scriptprocessor";
   /** Processing actually enabled on the selected audio track. */
@@ -419,16 +421,19 @@ export async function startVoiceMicCapture(
   }
   const ctx = acquiredContext;
   const source = acquiredSource;
-  const resampler = new StreamingResampler(ctx.sampleRate);
+  let resampler = new StreamingResampler(ctx.sampleRate);
 
   let stopped = false;
   let suspended = false;
+  let muted = false;
   // Frame accumulator: collect resampled 16k samples, cut fixed-size frames.
   let pending = new Float32Array(0);
 
   const emitResampled = (mono: Float32Array): void => {
     if (stopped || suspended) return;
-    const resampled = resampler.push(mono);
+    const resampled = resampler.push(
+      muted ? new Float32Array(mono.length) : mono,
+    );
     if (resampled.length === 0) return;
     const merged = new Float32Array(pending.length + resampled.length);
     merged.set(pending);
@@ -584,6 +589,14 @@ export async function startVoiceMicCapture(
       return backend;
     },
     audioProcessing,
+    setMuted(next) {
+      if (stopped || muted === next) return;
+      muted = next;
+      for (const track of stream.getTracks()) track.enabled = !muted;
+      // Never carry samples from a previous capture state across the boundary.
+      pending = new Float32Array(0);
+      resampler = new StreamingResampler(ctx.sampleRate);
+    },
     stop,
   };
 }

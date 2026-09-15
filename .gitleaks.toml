@@ -11,6 +11,20 @@ title = "elizaOS gitleaks config"
 # Pull in upstream default ruleset.
 useDefault = true
 
+# Provider trajectory tests intentionally repeat this invented credential to
+# verify that full recorded text still redacts configured secrets. Match only
+# this fixture in its owning test; all other values remain scanned.
+[[allowlists]]
+description = "Provider trajectory recording synthetic redaction canary"
+condition = "AND"
+paths = [
+  '''(^|/)packages/core/src/__tests__/compose-state-trajectory-recording\.test\.ts$''',
+]
+regexTarget = "secret"
+regexes = [
+  '''^sk-trajectory-recording-secret-canary-1234567890$''',
+]
+
 # Android routing audits pin the SHA-256 of the complete public analytics script
 # shipped by @coinbase/wallet-sdk 4.3.6. This is an integrity digest, not an access
 # token. Match only this digest in its owning file; other values remain scanned.

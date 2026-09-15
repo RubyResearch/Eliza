@@ -95,6 +95,8 @@ export type PersonalityGatedTrait = PersonalityTrait | "reply_gate";
  * `userId` is `GLOBAL_PERSONALITY_SCOPE`.
  */
 export interface PersonalitySlot {
+	/** Persisted extractor operation receipts; stored beside the profile change. */
+	extraction_evidence_ids?: string[];
 	userId: UUID | typeof GLOBAL_PERSONALITY_SCOPE;
 	agentId: UUID;
 	verbosity: VerbosityLevel | null;

@@ -41,13 +41,15 @@
     "build:types": "tsc6 --noCheck -p tsconfig.build.json"
   },
   "dependencies": {
-    "@elizaos/shared": "workspace:*",
     "@elizaos/core": "workspace:*",
+    "@elizaos/shared": "workspace:*",
     "@elizaos/vault": "workspace:*",
-    "drizzle-orm": "0.45.2"
+    "drizzle-orm": "0.45.2",
+    "linkify-it": "5.0.2"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
+    "@types/linkify-it": "5.0.0",
     "bun-types": "^1.3.12",
     "jsdom": "^29.0.0",
     "puppeteer-core": "^24.37.5",

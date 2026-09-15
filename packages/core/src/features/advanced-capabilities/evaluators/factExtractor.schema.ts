@@ -74,6 +74,7 @@ const KeywordsSchema = z.array(z.string().min(1)).optional();
 
 const AddDurableOpSchema = z.object({
 	op: z.literal("add_durable"),
+	sourceMessageIds: z.array(z.string().min(1)).optional(),
 	claim: z.string().min(1),
 	category: DurableCategoryEnum,
 	// `.default({})`, NOT required: the advertised wire schema
@@ -91,6 +92,7 @@ const AddDurableOpSchema = z.object({
 
 const AddCurrentOpSchema = z.object({
 	op: z.literal("add_current"),
+	sourceMessageIds: z.array(z.string().min(1)).optional(),
 	claim: z.string().min(1),
 	category: CurrentCategoryEnum,
 	// See AddDurableOpSchema: wire-optional → default, not required.
@@ -106,18 +108,21 @@ const AddCurrentOpSchema = z.object({
 
 const StrengthenOpSchema = z.object({
 	op: z.literal("strengthen"),
+	sourceMessageIds: z.array(z.string().min(1)).optional(),
 	factId: z.string().min(1),
 	reason: z.string().optional(),
 });
 
 const DecayOpSchema = z.object({
 	op: z.literal("decay"),
+	sourceMessageIds: z.array(z.string().min(1)).optional(),
 	factId: z.string().min(1),
 	reason: z.string().optional(),
 });
 
 const ContradictOpSchema = z.object({
 	op: z.literal("contradict"),
+	sourceMessageIds: z.array(z.string().min(1)).optional(),
 	factId: z.string().min(1),
 	/**
 	 * Complete model-authored correction supported by the user, including

@@ -43,6 +43,84 @@ const pendingByRuntimeRoom = new WeakMap<
 const quarantineByRuntime = new WeakMap<object, PostDeliveryTaskQuarantine>();
 const POST_DELIVERY_QUARANTINE_REASON = "post-delivery drain was cancelled";
 
+type RoomDeliverySettlement = {
+	lease: RoomHandlerLease;
+	delivered: Promise<boolean>;
+	settle: (delivered: boolean) => void;
+};
+
+const deliveryByRuntimeRoom = new WeakMap<
+	object,
+	Map<string, RoomDeliverySettlement>
+>();
+
+/** Capture the current connector's delivery boundary while registering work.
+ * Core-only hosts without a connector boundary keep their existing scheduling. */
+export function roomDeliverySettlement(
+	runtime: TrackableRuntime,
+	roomId: string,
+	lease?: RoomHandlerLease,
+): Promise<boolean> {
+	const boundary = deliveryByRuntimeRoom.get(runtime)?.get(roomId);
+	if (!boundary) return Promise.resolve(true);
+	const owner = lease ?? runtime.roomHandlerQueue?.currentLease(roomId);
+	if (
+		boundary.lease !== owner ||
+		!runtime.roomHandlerQueue?.ownsLease(roomId, owner)
+	)
+		throw new ElizaError("Delivery settlement requires the live room owner", {
+			code: "POST_DELIVERY_SETTLEMENT_LEASE_MISMATCH",
+		});
+	return boundary.delivered;
+}
+
+/** Finalize connector persistence before evidence-bearing post-turn work starts,
+ * then drain the existing task tracker before allowing the owner to release its
+ * lease. Failure unblocks queued work as cancelled, never as delivered. */
+export async function withRoomDeliverySettlement<T>(
+	runtime: TrackableRuntime,
+	roomId: string,
+	lease: RoomHandlerLease,
+	deliver: () => Promise<T>,
+): Promise<T> {
+	if (!runtime.roomHandlerQueue?.ownsLease(roomId, lease))
+		throw new ElizaError("Delivery settlement requires the live room owner", {
+			code: "POST_DELIVERY_SETTLEMENT_LEASE_MISMATCH",
+		});
+	let rooms = deliveryByRuntimeRoom.get(runtime);
+	if (!rooms) {
+		rooms = new Map();
+		deliveryByRuntimeRoom.set(runtime, rooms);
+	}
+	if (rooms.has(roomId))
+		throw new ElizaError("A delivery boundary already owns this room", {
+			code: "POST_DELIVERY_SETTLEMENT_ALREADY_ACTIVE",
+		});
+	let settle!: (delivered: boolean) => void;
+	const boundary: RoomDeliverySettlement = {
+		lease,
+		delivered: new Promise<boolean>((resolve) => {
+			settle = resolve;
+		}),
+		settle: (delivered) => settle(delivered),
+	};
+	rooms.set(roomId, boundary);
+	let delivered = false;
+	try {
+		const result = await deliver();
+		delivered = true;
+		return result;
+	} finally {
+		boundary.settle(delivered);
+		try {
+			await drainRoomPostDeliveryTasks(runtime, roomId);
+		} finally {
+			rooms.delete(roomId);
+			if (rooms.size === 0) deliveryByRuntimeRoom.delete(runtime);
+		}
+	}
+}
+
 function pendingSet(runtime: TrackableRuntime): Set<TrackedPostDeliveryTask> {
 	const identity = runtime as object;
 	let pending = pendingByRuntime.get(identity);

@@ -39,6 +39,30 @@ it through the Capacitor `Plugins` registry under the jsName `ElizaSurfaceManage
 (create → setBounds/navigate → foreground/background → destroy) on the
 `native-mobile-webview` render path.
 
+The mobile Back control calls `goBack` on that same native tab, never a server
+workspace tab with an unrelated ID. Native page completion emits a
+`navigationChanged` invalidation carrying the surface owner/session/epoch. The
+driver reads the current native URL, discards stale observations, and updates
+the React address bar without reloading the page. Listener cleanup and ownership
+checks apply across remounts. A Back command is not automatically retried after
+a lost acknowledgement, because repeating it could navigate back twice.
+
+This URL/history channel does not expose native page DOM to the remote agent.
+Server-side browser snapshots are not proof of what a native page displays.
+
+`readPage` is the separate read-only native primitive. It runs the bundled
+`resources/read-page.js` operation against the owned, foregrounded page; callers
+may supply a CSS selector, not JavaScript. It returns URL, title, visible text,
+and `truncated: false`. Hidden text, scripts and form values are excluded; every
+visible text node is read without a character or node-count cap. Loading/failed pages,
+ownership changes, navigation during the read, and a five-second timeout reject
+the read instead of returning stale text. The web implementation rejects it as
+native-only. Page content is untrusted data.
+
+This primitive alone does not route runtime BROWSER actions to the phone. The
+host must use the requesting client's authenticated interaction channel and
+must not substitute a server-side page when the native read is unavailable.
+
 `setBounds` carries both the page rectangle and its outer rounded clip in one
 update. The renderer reads that clip from the actual computed overflow-clipping
 host instead of copying a CSS radius token. Android and iOS update their paint
@@ -49,7 +73,7 @@ the page nor interfere with the independent React-overlay occlusion holes.
 
 - Desktop `WebContentsView` embedding (shipped in #14181).
 - Wallet / EIP-1193 injection and the desktop `BROWSER_TAB_PRELOAD_SCRIPT` — mobile
-  native surfaces ship isolation only.
+  native surfaces do not expose arbitrary script execution to the agent.
 
 ## Testing
 

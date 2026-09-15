@@ -410,6 +410,8 @@ export interface ConversationMessage {
   failureKind?: ChatFailureKind;
   /** Authoritative terminal failure details retained for retry and diagnostics. */
   terminalFailure?: ChatTerminalFailure;
+  /** Server confirms durable evidence supports regenerating only this reply. */
+  replyRecoveryAvailable?: boolean;
   /** Structured local-inference status returned with local model command/error replies. */
   localInference?: LocalInferenceChatMetadata;
   /** Structured sensitive/private information request metadata. */

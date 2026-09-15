@@ -82,6 +82,7 @@ export {
 export {
 	testSchemaPattern,
 	type ValidateToolArgsResult,
+	validateSchema,
 	validateToolArgs,
 } from "./actions/validate-tool-args";
 

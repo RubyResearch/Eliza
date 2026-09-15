@@ -644,9 +644,27 @@ function localeReplyClaimsCompletedSideEffect(text: string): boolean {
 }
 
 export function replyClaimsCompletedSideEffect(reply: string): boolean {
-	const text = reply.trim();
+	const original = reply.trim();
+	// An explicitly introduced example or original quotation reports wording,
+	// not a new effect. Keep the original reply intact; inspect only assertions
+	// outside those spans. Unframed quotes and quoted tool results still count.
+	const { spans } = claimQuoteContext(original, true);
+	let text = original;
+	for (let i = spans.length - 1; i >= 0; i--) {
+		const span = spans[i];
+		if (span.example) {
+			text =
+				text.slice(0, span.start) +
+				// Keep a clause boundary so a following "Added todo" or "Done"
+				// assertion cannot inherit the quotation's framing.
+				" ".repeat(span.end - span.start - 1) +
+				"." +
+				text.slice(span.end);
+		}
+	}
 	if (!text) return false;
-	if (!SIDE_EFFECT_SUBJECT_NOUN_PATTERN.test(text)) {
+	// Quoted wording can still name the object of an outside assertion.
+	if (!SIDE_EFFECT_SUBJECT_NOUN_PATTERN.test(original)) {
 		return localeReplyClaimsCompletedSideEffect(text);
 	}
 	if (stateSideEffectClaimHasLocalSubject(text)) return true;
@@ -711,7 +729,10 @@ const CONDITIONAL_EMPTY_CLAIM_LEAD_PATTERN =
 // Classify quotes once, retaining asserted reported results. Only explicit
 // examples/wording are exempt; the projection prevents a quoted conditional
 // from changing the grammar of a later unquoted assertion.
-function emptyClaimQuoteContext(text: string): {
+function claimQuoteContext(
+	text: string,
+	includeOriginalWording = false,
+): {
 	projection: string;
 	spans: { start: number; end: number; example: boolean }[];
 } {
@@ -719,10 +740,15 @@ function emptyClaimQuoteContext(text: string): {
 	const projection = text.replace(
 		/"(?:\\[^\r\n]|[^"\\\r\n])*"|“(?:\\[^\r\n]|[^”\\\r\n])*”|‘(?:\\[^\r\n]|[^’\\\r\n])*’|`(?:\\[^\r\n]|[^`\\\r\n])*`|(?<![\p{L}\p{N}])'(?:\\[^\r\n]|[^'\\\r\n])*'(?![\p{L}\p{N}])/gu,
 		(quote: string, offset: number) => {
+			const prefix = text.slice(0, offset);
 			const example =
 				/(?:\bfor\s+example[, :] *|\b(?:the\s+)?(?:example|phrase|wording)(?:\s+(?:says|asks|reads))?\s*:?\s*)$/i.test(
-					text.slice(0, offset),
-				);
+					prefix,
+				) ||
+				(includeOriginalWording &&
+					/\b(?:original|earlier|previous)\s+(?:(?:assistant|user)(?:['’]s)?\s+)?(?:line|sentence|message|reply|statement|wording)(?:,\s*quoted\s+exactly,)?\s+(?:was|read|said)(?:\s+exactly)?\s*:?\s*$/i.test(
+						prefix,
+					));
 			spans.push({ start: offset, end: offset + quote.length, example });
 			return quote.replace(/[^\r\n]/g, " ");
 		},
@@ -736,6 +762,11 @@ function emptyClaimQuoteContext(text: string): {
 const UNCERTAIN_EMPTY_CLAIM_LEAD_PATTERN =
 	/\bi\s+(?:cannot|can\s+not|can['’]t|do\s+not|don['’]t|am\s+not\s+able\s+to)\s+(?:say|conclude|confirm|verify|establish|assert|tell)(?:\s+(?:for\s+(?:certain|sure)|with\s+confidence))?\s+(?:that\s+)?$/i;
 
+// A negated mutation of existing records does not assert an empty collection.
+// Keep the exception within its own clause so a later absence claim still runs.
+const NO_RECORD_CHANGE_CLAUSE =
+	/\b(?:no|zero)\s+(?:(?:existing|saved|new)\s+)?(?:notes?|tasks?|todos?|records?|settings|reminders?|events?)(?:\s*(?:,|and|or)\s*(?:(?:existing|saved|new)\s+)?(?:notes?|tasks?|todos?|records?|settings|reminders?|events?))*\s+(?:were|was|are|is|have\s+been|has\s+been)\s+(?:changed|modified|edited|deleted|removed|updated|overwritten)\b/gi;
+
 /**
  * True when a reply ASSERTS that the user's tracked work (tasks, todos,
  * reminders, habits, goals, notes, day log) is empty or unavailable. On a path
@@ -747,8 +778,10 @@ const UNCERTAIN_EMPTY_CLAIM_LEAD_PATTERN =
  * is empty is not a claim about looked-up state.
  */
 export function replyClaimsEmptyTrackedWorkState(reply: string): boolean {
-	const text = reply.trim();
-	const { projection, spans } = emptyClaimQuoteContext(text);
+	const text = reply
+		.trim()
+		.replace(NO_RECORD_CHANGE_CLAUSE, (clause) => " ".repeat(clause.length));
+	const { projection, spans } = claimQuoteContext(text);
 	if (!text.trim()) return false;
 	for (const pattern of EMPTY_TRACKED_STATE_CLAIM_PATTERNS) {
 		let quoteIndex = 0;
@@ -785,7 +818,7 @@ export function replyClaimsEmptyTrackedWorkState(reply: string): boolean {
 // what is it?") never fire; questions are exempt like every detector here.
 const PROGRESS_PROMISE_REPLY_PATTERN = new RegExp(
 	String.raw`^[\s"'…–—-]*(?:` +
-		String.raw`on it|got it|will do|sure thing|you got it|no problem|right away|` +
+		String.raw`on it|will do|sure thing|you got it|no problem|right away|` +
 		String.raw`one (?:sec|second|moment|min(?:ute)?)|just a (?:sec|second|moment|min(?:ute)?)|hold on|hang (?:on|tight)|gimme a (?:sec|second|minute)|` +
 		String.raw`(?:i(?:['’]m|\s+am)\s+)?(?:checking|looking into|pulling up|grabbing|fetching|getting|working) (?:it|that|this|on it|[\w\s]{0,24}?)(?:\s+now)?|` +
 		String.raw`i(?:['’]ll|\s+will) (?:check|look into|pull(?: that| it)? up|grab|fetch|get|handle|take care of)(?:\s[\w\s]{0,24})?|` +

@@ -60,6 +60,7 @@ import { createDynamicSkillProvider } from "../providers/skill-provider.ts";
 import { createOngoingTasksProvider } from "../providers/tasks.ts";
 import {
   uiGenerativeProvider,
+  uiWidgetCapabilitiesProvider,
   uiWidgetsProvider,
 } from "../providers/ui-catalog.ts";
 import { createUserNameProvider } from "../providers/user-name.ts";
@@ -187,6 +188,7 @@ export function createElizaPlugin(config?: ElizaPluginConfig): Plugin {
       relevantConversationsProvider,
       rolodexProvider,
 
+      uiWidgetCapabilitiesProvider,
       uiWidgetsProvider,
       uiGenerativeProvider,
       roleBackfillProvider,
@@ -238,9 +240,11 @@ export function createElizaPlugin(config?: ElizaPluginConfig): Plugin {
           MEMORY_SEARCH: [
             "action",
             "type",
+            "author",
             "entityId",
             "roomId",
             "query",
+            "queryMode",
             "limit",
             "offset",
             "snapshot",

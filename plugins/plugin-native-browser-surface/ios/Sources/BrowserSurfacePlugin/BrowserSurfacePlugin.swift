@@ -15,7 +15,7 @@ import WebKit
 import UIKit
 
 @objc(ElizaSurfaceManagerPlugin)
-public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
+public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin, WKNavigationDelegate {
     public let identifier = "ElizaSurfaceManagerPlugin"
     public let jsName = "ElizaSurfaceManager"
     public let pluginMethods: [CAPPluginMethod] = [
@@ -24,6 +24,8 @@ public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setOcclusionRects", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "navigate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "reloadSurface", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "goBack", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "readPage", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "presentSurface", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "destroySurface", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getSurfaceState", returnType: CAPPluginReturnPromise),
@@ -44,6 +46,8 @@ public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
         let owner: String
         let session: String
         let epoch: Int
+        var pageRevision = 0
+        var pageError: String? = nil
     }
 
     private var surfaces: [String: Surface] = [:]
@@ -51,6 +55,15 @@ public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
     // One plugin-owned pool for every `shared`-process surface — deliberate, so a
     // shared surface still never lands in the host's implicit default pool.
     private let sharedProcessPool = WKProcessPool()
+    private lazy var pageReader: String? = {
+        for host in [Bundle(for: ElizaSurfaceManagerPlugin.self), Bundle.main] {
+            if let bundleUrl = host.url(forResource: "ElizaBrowserSurface", withExtension: "bundle"),
+               let bundle = Bundle(url: bundleUrl),
+               let url = bundle.url(forResource: "read-page", withExtension: "js"),
+               let script = try? String(contentsOf: url, encoding: .utf8) { return script }
+        }
+        return nil
+    }()
 
     private func identity(
         _ call: CAPPluginCall,
@@ -188,6 +201,7 @@ public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
             webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             container.installContentView(webView)
             hostView.addSubview(container)
+            webView.navigationDelegate = self
 
             if let urlString = urlString, let url = URL(string: urlString) {
                 webView.load(URLRequest(url: url))
@@ -364,6 +378,99 @@ public class ElizaSurfaceManagerPlugin: CAPPlugin, CAPBridgedPlugin {
             surface.webView.reload()
             call.resolve()
         }
+    }
+
+    @objc func goBack(_ call: CAPPluginCall) {
+        guard let id = call.getString("id") else {
+            call.reject("goBack requires an id")
+            return
+        }
+        guard let identity = identity(call, operation: "goBack") else { return }
+        DispatchQueue.main.async {
+            guard self.requireActiveIdentity(call, identity: identity, operation: "goBack"),
+                  let surface = self.ownedSurface(call, id: id, identity: identity, operation: "goBack") else { return }
+            if surface.webView.canGoBack { surface.webView.goBack() }
+            call.resolve()
+        }
+    }
+
+    @objc func readPage(_ call: CAPPluginCall) {
+        guard let id = call.getString("id") else {
+            call.reject("readPage requires an id")
+            return
+        }
+        guard let identity = identity(call, operation: "readPage") else { return }
+        let selector = call.getString("selector") ?? "body"
+        guard !selector.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              selector.utf16.count <= 2048 else {
+            call.reject("readPage requires a nonempty selector of at most 2048 characters")
+            return
+        }
+        DispatchQueue.main.async {
+            guard self.requireActiveIdentity(call, identity: identity, operation: "readPage"),
+                  let surface = self.ownedSurface(call, id: id, identity: identity, operation: "readPage") else { return }
+            guard !surface.container.isHidden, !surface.webView.isLoading, surface.pageError == nil else {
+                call.reject(surface.pageError ?? "The native page is hidden or still loading")
+                return
+            }
+            guard let script = self.pageReader,
+                  let encoded = try? JSONSerialization.data(withJSONObject: [selector]),
+                  let argument = String(data: encoded, encoding: .utf8) else {
+                call.reject("The bundled native page reader is unavailable")
+                return
+            }
+            let revision = surface.pageRevision
+            let url = surface.webView.url
+            var settled = false
+            let timeout = DispatchWorkItem {
+                if !settled { settled = true; call.reject("Native page read timed out") }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
+            surface.webView.evaluateJavaScript("(\(script))(...\(argument))") { value, error in
+                if settled { return }
+                settled = true
+                timeout.cancel()
+                guard let active = self.activeOwners[identity.owner],
+                      active.session == identity.session, active.epoch == identity.epoch,
+                      let current = self.surfaces[id], current.webView === surface.webView,
+                      !current.container.isHidden, current.pageRevision == revision, current.webView.url == url else {
+                    call.reject("Native page changed while reading; discard this result")
+                    return
+                }
+                if let error { call.reject("Native page read failed", nil, error); return }
+                guard let result = value as? [String: Any] else {
+                    call.reject("Native page returned an invalid read result")
+                    return
+                }
+                if let error = result["error"] as? String { call.reject(error) }
+                else { call.resolve(result) }
+            }
+        }
+    }
+
+    public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard let id = surfaces.first(where: { $0.value.webView === webView })?.key else { return }
+        surfaces[id]?.pageRevision += 1
+        surfaces[id]?.pageError = nil
+    }
+
+    public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard let id = surfaces.first(where: { $0.value.webView === webView })?.key else { return }
+        surfaces[id]?.pageError = error.localizedDescription
+    }
+
+    public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard let id = surfaces.first(where: { $0.value.webView === webView })?.key else { return }
+        surfaces[id]?.pageError = error.localizedDescription
+    }
+
+    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let (id, surface) = surfaces.first(where: { $0.value.webView === webView }),
+              let active = activeOwners[surface.owner],
+              active.session == surface.session, active.epoch == surface.epoch else { return }
+        notifyListeners("navigationChanged", data: [
+            "id": id, "owner": surface.owner, "session": surface.session, "epoch": surface.epoch,
+        ])
     }
 
     @objc func presentSurface(_ call: CAPPluginCall) {

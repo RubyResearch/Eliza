@@ -12,10 +12,27 @@ import {
   classifyChatFailure,
   getChatFailureReply,
   isChatGenerationTimeoutError,
+  markSyntheticChatFailureContent,
   runWithGenerationTimeout,
 } from "../chat-routes";
 
 describe("chat failure classification", () => {
+  it("reports failed reply grounding without blaming the provider or inviting action replay", () => {
+    const err = Object.assign(new Error("Reply did not pass grounding"), {
+      code: "REPLY_GROUNDING_FAILED",
+    });
+    const text = getChatFailureReply(err, []);
+    expect(classifyChatFailure(err, [])).toBe("handler_error");
+    expect(text).toContain("couldn't verify my reply");
+    expect(text).not.toMatch(/provider|retry|try again/i);
+    expect(markSyntheticChatFailureContent({ text })).toMatchObject({
+      metadata: {
+        elizaSyntheticFailure: true,
+        chatFailureKind: "handler_error",
+      },
+    });
+  });
+
   it("detects chat generation timeout errors", () => {
     expect(
       isChatGenerationTimeoutError(

@@ -25,6 +25,7 @@ import {
   buildAccessContext,
   embedRecallQuery,
   filterByAccessContext,
+  getUserMessageText,
   markOwnerExclusiveDisclosureUsed,
   OWNER_PRIVATE_DESTINATION_DISCLOSURE_BASIS,
   recordOwnerExclusiveSuppression,
@@ -50,6 +51,16 @@ const MATCH_THRESHOLD = 0.7;
 // down-weights common stop words ("you"/"are"), so weak/stop-word-only matches
 // score far below a real hit and fall under this floor.
 const MIN_HASH_MEMORY_SCORE = 0.5;
+
+// Only a complete standalone greeting skips optional cross-room similarity
+// search. This does not route the turn or remove current-room history. Short
+// substantive queries (names, IDs) and greetings followed by requests still
+// use recall; unknown languages/forms conservatively keep the retrieval path.
+function isStandaloneGreeting(text: string): boolean {
+  return /^(?:(?:hi|hey|hello)(?: there)?|good morning|good afternoon|good evening|hola|bonjour|salut|hallo|こんにちは|你好)[\s.!！?？]*$/iu.test(
+    text.trim(),
+  );
+}
 
 function memoryText(memory: Memory): string {
   return typeof memory.content.text === "string" ? memory.content.text : "";
@@ -121,8 +132,8 @@ export const relevantConversationsProvider: Provider = {
     message: Memory,
     _state: State,
   ): Promise<ProviderResult> {
-    const text = message.content.text;
-    if (!text || text.trim().length < 5) {
+    const text = getUserMessageText(message);
+    if (!text.trim() || isStandaloneGreeting(text)) {
       return { text: "", values: {}, data: {} };
     }
 

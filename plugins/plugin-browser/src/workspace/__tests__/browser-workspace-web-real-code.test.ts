@@ -59,6 +59,48 @@ describe("browser workspace web-mode real-code command flow", () => {
     await __resetBrowserWorkspaceStateForTests();
   });
 
+  it("reads page prose without script or style payloads and leaves HTML intact", async () => {
+    const tab = await openBrowserWorkspaceTab(
+      { show: true, url: "about:blank" },
+      webEnv,
+    );
+    await executeBrowserWorkspaceCommand(
+      {
+        id: tab.id,
+        subaction: "network",
+        networkAction: "route",
+        url: "https://example.test/text",
+        responseBody:
+          '<html><body><h1>Rehearsal</h1><p>Keep all prose.</p><script>window.privateImplementation="script-noise";</script><style>.style-noise{color:red}</style><input name="query" value="visible-search"><input type="hidden" name="csrf" value="hidden-token"><input type="password" name="password" value="password-secret"></body></html>',
+      },
+      webEnv,
+    );
+    await executeBrowserWorkspaceCommand(
+      { id: tab.id, subaction: "navigate", url: "https://example.test/text" },
+      webEnv,
+    );
+    const text = await executeBrowserWorkspaceCommand(
+      { id: tab.id, subaction: "get", selector: "body" },
+      webEnv,
+    );
+    expect(text.value).toBe("RehearsalKeep all prose.");
+    const snapshot = await executeBrowserWorkspaceCommand(
+      { id: tab.id, subaction: "snapshot" },
+      webEnv,
+    );
+    expect(JSON.stringify(snapshot)).not.toContain("script-noise");
+    expect(JSON.stringify(snapshot)).not.toContain("style-noise");
+    expect(JSON.stringify(snapshot)).toContain("visible-search");
+    expect(JSON.stringify(snapshot)).not.toContain("hidden-token");
+    expect(JSON.stringify(snapshot)).not.toContain("password-secret");
+    const html = await executeBrowserWorkspaceCommand(
+      { id: tab.id, subaction: "get", selector: "body", getMode: "html" },
+      webEnv,
+    );
+    expect(html.value).toContain("script-noise");
+    expect(html.value).toContain("style-noise");
+  });
+
   it("navigates, clicks, types, screenshots, and extracts DOM through the command router", async () => {
     const tab = await openBrowserWorkspaceTab(
       { show: true, url: "about:blank" },

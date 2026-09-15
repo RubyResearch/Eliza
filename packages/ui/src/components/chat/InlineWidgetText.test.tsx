@@ -200,6 +200,38 @@ describe("InlineWidgetText", () => {
     expect(container.textContent ?? "").not.toContain("<think>");
   });
 
+  it("renders a complete model table with a surplus closing brace without another model call", () => {
+    const patch = {
+      op: "add",
+      path: "/elements/comparison",
+      value: {
+        type: "Table",
+        props: {
+          columns: ["Project", "Tasks"],
+          rows: [
+            ["Amber", "3"],
+            ["Birch", "7"],
+            ["Cedar", "2"],
+          ],
+        },
+        children: [],
+      },
+    };
+    const { container } = withApp(
+      <InlineWidgetText
+        content={
+          '{"op":"add","path":"/root","value":"comparison"}\n' +
+          JSON.stringify(patch) +
+          "}"
+        }
+      />,
+    );
+    expect(screen.getByRole("table")).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Cedar" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "7" })).toBeTruthy();
+    expect(container.textContent).not.toContain('"op"');
+  });
+
   it("renders a fenced UiSpec JSON block as an interactive UI block", () => {
     // Valid UiSpec shape (root: string + elements: object) so parseSegments
     // classifies it as a ui-spec region, not code.

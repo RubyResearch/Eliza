@@ -2310,6 +2310,98 @@ function chooseSuggestedCreateEventMinute(args: {
  * the planner used `start`); every create read accepts both spellings so a
  * valid planner time is executed instead of re-extracted from prose.
  */
+const OFFSET_OR_UTC_SUFFIX_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/** Wall-clock `YYYY-MM-DDTHH:mm:ss` of `date` in `timeZone`. */
+function formatLocalDateTimeInZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(date);
+  const read = (type: string): string =>
+    parts.find((part) => part.type === type)?.value ?? "00";
+  return `${read("year")}-${read("month")}-${read("day")}T${read("hour")}:${read("minute")}:${read("second")}`;
+}
+
+/**
+ * Absolute instant of a planner datetime. Strings carrying `Z` or an offset
+ * are absolute already; a bare local datetime is read in `timeZone` (one
+ * correction pass handles the zone's offset at that wall-clock time).
+ */
+function parseDateTimeInZone(value: string, timeZone: string): Date | null {
+  const trimmed = value.trim();
+  if (OFFSET_OR_UTC_SUFFIX_PATTERN.test(trimmed)) {
+    const absolute = new Date(trimmed);
+    return Number.isFinite(absolute.getTime()) ? absolute : null;
+  }
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(
+      trimmed,
+    );
+  if (!match) return null;
+  const [, y, mo, d, h = "0", mi = "0", sec = "0"] = match;
+  const asUtc = Date.UTC(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    Number(h),
+    Number(mi),
+    Number(sec),
+  );
+  let guess = new Date(asUtc);
+  for (let pass = 0; pass < 2; pass += 1) {
+    const local = formatLocalDateTimeInZone(guess, timeZone);
+    const localAsUtc = Date.parse(`${local}Z`);
+    if (!Number.isFinite(localAsUtc)) return null;
+    const drift = localAsUtc - asUtc;
+    if (drift === 0) break;
+    guess = new Date(guess.getTime() - drift);
+  }
+  return Number.isFinite(guess.getTime()) ? guess : null;
+}
+
+/**
+ * Time range for an update. A new start without a new end keeps the event's
+ * current duration (live 2026-09-10: "move my dentist appointment to friday at
+ * 4pm" arrived as `start` only, the stored 3–4 pm event kept its 4 pm end, and
+ * the service rejected the zero-length range). The derived end is spelled like
+ * the start it follows: absolute for `Z`/offset starts, wall-clock in
+ * `timeZone` otherwise. Every other combination passes through unchanged and
+ * the service keeps validating end-after-start.
+ */
+export function resolveUpdateTimeRange(args: {
+  explicitStart?: string;
+  explicitEnd?: string;
+  extractedStart?: string;
+  extractedEnd?: string;
+  target: { startAt: string; endAt: string };
+  timeZone?: string;
+}): { startAt?: string; endAt?: string } {
+  const startAt = args.explicitStart ?? args.extractedStart;
+  const endAt = args.explicitEnd ?? args.extractedEnd;
+  if (!startAt || endAt) return { startAt, endAt };
+  const durationMs =
+    Date.parse(args.target.endAt) - Date.parse(args.target.startAt);
+  if (!Number.isFinite(durationMs) || durationMs <= 0)
+    return { startAt, endAt };
+  const timeZone = args.timeZone?.trim() || "UTC";
+  const start = parseDateTimeInZone(startAt, timeZone);
+  if (!start) return { startAt, endAt };
+  const end = new Date(start.getTime() + durationMs);
+  return {
+    startAt,
+    endAt: OFFSET_OR_UTC_SUFFIX_PATTERN.test(startAt.trim())
+      ? end.toISOString()
+      : formatLocalDateTimeInZone(end, timeZone),
+  };
+}
+
 function createStartDetail(
   details: Record<string, unknown> | undefined,
 ): string | undefined {
@@ -5151,8 +5243,11 @@ const calendarAction: CalendarHandlerAction = {
           resolvedCalendarId = targetEvent.calendarId;
         }
         const newTitle = detailString(details, "newTitle") ?? explicitTitle;
-        const explicitStartAtForUpdate = detailString(details, "startAt");
-        const explicitEndAtForUpdate = detailString(details, "endAt");
+        // The schema advertises `start`/`end` beside `startAt`/`endAt`; the
+        // create path accepts both, and an update must too (live 2026-09-10
+        // the planner's `start` was ignored and the time was re-extracted).
+        const explicitStartAtForUpdate = createStartDetail(details);
+        const explicitEndAtForUpdate = createEndDetail(details);
         const extractedForUpdate = targetEvent
           ? await inferUpdateEventDetails(
               runtime,
@@ -5234,6 +5329,11 @@ const calendarAction: CalendarHandlerAction = {
             "CALENDAR_MUTATION_TARGET_BINDING_REQUIRED",
           );
         }
+        const updateTimeZone =
+          detailString(details, "timeZone") ??
+          extractedTimeZoneForUpdate ??
+          targetEvent?.timezone ??
+          undefined;
         const updateRequest = {
           side: targetEvent.side,
           grantId,
@@ -5250,13 +5350,15 @@ const calendarAction: CalendarHandlerAction = {
             extractedForUpdate,
             "location",
           ),
-          startAt: explicitStartAtForUpdate ?? extractedStartAt,
-          endAt: explicitEndAtForUpdate ?? extractedEndAt,
-          timeZone:
-            detailString(details, "timeZone") ??
-            extractedTimeZoneForUpdate ??
-            targetEvent?.timezone ??
-            undefined,
+          ...resolveUpdateTimeRange({
+            explicitStart: explicitStartAtForUpdate,
+            explicitEnd: explicitEndAtForUpdate,
+            extractedStart: extractedStartAt,
+            extractedEnd: extractedEndAt,
+            target: targetEvent,
+            timeZone: updateTimeZone,
+          }),
+          timeZone: updateTimeZone,
           recurrence: recurrenceUpdate,
           // Honor a scope only when the target recurs or the update itself
           // introduces a recurrence rule — the planner emits junk scopes.
@@ -5677,7 +5779,9 @@ const calendarAction: CalendarHandlerAction = {
       const label = baseResolved.label;
       const hasExplicitWindow = baseResolved.explicitWindow;
       const feed = await service.getCalendarFeed(INTERNAL_URL, {
-        includeHiddenCalendars: true,
+        includeHiddenCalendars:
+          detailBoolean(details, "includeHiddenCalendars") ??
+          subaction === "search_events",
         mode: connectorModeDetail(details),
         side: connectorSideDetail(details),
         grantId: connectorGrantIdDetail(details),
@@ -6066,7 +6170,7 @@ const calendarAction: CalendarHandlerAction = {
       name: "calendarId",
       aliases: ["calendar_id", "calendarid"],
       description:
-        "Optional; leave unset. Reads cover all connected calendars automatically and event creation targets the built-in calendar.",
+        "Optional; leave unset. Agenda reads use the selected Calendar feed; searches cover connected calendars. Use details.includeHiddenCalendars to explicitly change that scope. Event creation targets the built-in calendar.",
       required: false,
       schema: { type: "string" as const },
     },

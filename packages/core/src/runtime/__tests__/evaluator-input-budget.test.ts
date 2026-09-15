@@ -520,7 +520,7 @@ describe("runEvaluator — complete input or explicit rejection", () => {
 		}
 	});
 
-	it("leaves a small turn byte-identical (zero-overhead passthrough)", async () => {
+	it("preserves the complete small turn through lossless tool JSON compaction", async () => {
 		const steps = [makeStep(1, "a".repeat(1_000))];
 		const { runtime, captured } = makeRuntime();
 
@@ -536,13 +536,22 @@ describe("runEvaluator — complete input or explicit rejection", () => {
 		for (const message of request.messages) {
 			expect(JSON.stringify(message.content)).not.toContain("chars truncated]");
 		}
-		// The step messages sent are exactly the default-cap render — no
-		// re-render, no marker, no mutation.
+		// Tool JSON may lose indentation; original text and call identities may not.
 		const control = trajectoryStepsToMessages(steps as never);
 		const sentPairs = request.messages.filter(
 			(message) => message.role === "assistant" || message.role === "tool",
 		);
-		expect(sentPairs).toEqual(JSON.parse(JSON.stringify(control)));
+		expect(sentPairs).toHaveLength(control.length);
+		expect(sentPairs.filter((message) => message.role === "assistant")).toEqual(
+			JSON.parse(
+				JSON.stringify(
+					control.filter((message) => message.role === "assistant"),
+				),
+			),
+		);
+		expect(
+			toolMessageValues(request).map((value) => JSON.parse(value)),
+		).toEqual([{ success: true, text: "a".repeat(1_000) }]);
 	});
 });
 
@@ -826,9 +835,9 @@ describe("runEvaluator — trajectory stage records the per-attempt prepared req
 		// handler received, with no per-attempt prompt rewriting.
 		expect(stage.model.messages).toEqual(backupRequest.messages);
 		expect(stage.model.providerOptions).toEqual(backupRequest.providerOptions);
-		expect(JSON.stringify(stage.model.messages)).not.toMatch(
-			/truncated|omitted/i,
-		);
+		expect(
+			toolMessageValues(backupRequest).map((value) => JSON.parse(value)),
+		).toEqual([{ success: true, text: "x".repeat(1_000) }]);
 		expect(stage.model.provider).toBe("backup");
 		// Cache metadata must describe the prepared attempt's segments too.
 		const expectedHashes = computePrefixHashes(

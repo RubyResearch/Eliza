@@ -39,6 +39,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WAIT_INTERVAL_MS,
   normalizeBrowserWorkspaceText,
+  readBrowserWorkspaceElementText,
   resolveBrowserWorkspaceCommandElementRefs,
   resolveBrowserWorkspaceFilePath,
   sleep,
@@ -251,9 +252,7 @@ export async function executeWebBrowserWorkspaceUtilityCommand(
           setBrowserWorkspaceClipboardText(
             target && "value" in (target as HTMLInputElement)
               ? String((target as HTMLInputElement).value ?? "")
-              : normalizeBrowserWorkspaceText(
-                  target?.textContent ?? document.body?.textContent,
-                ),
+              : readBrowserWorkspaceElementText(target ?? document.body),
           );
           return {
             mode: "web",
@@ -893,7 +892,7 @@ export async function executeWebBrowserWorkspaceUtilityCommand(
         }
         const pdf = createBrowserWorkspacePdfBuffer(
           tab.title,
-          normalizeBrowserWorkspaceText(document.body?.textContent),
+          readBrowserWorkspaceElementText(document.body),
         );
         const resolved = await writeBrowserWorkspaceFile(filePath, pdf);
         return {
@@ -1060,7 +1059,7 @@ export async function executeWebBrowserWorkspaceDomCommand(
             value = isBrowserWorkspaceElementVisible(element);
             break;
           default:
-            value = normalizeBrowserWorkspaceText(element.textContent);
+            value = readBrowserWorkspaceElementText(element);
             break;
         }
 

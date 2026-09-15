@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
 	composeToolDiagnosticRedactor,
 	projectCompleteModelCallValue,
+	projectCompleteToolValueForModel,
 	projectModelCallDiagnosticValue,
 	projectProtectedModelCallValue,
 	projectToolDiagnosticArgs,
@@ -59,6 +60,31 @@ describe("composeToolDiagnosticRedactor", () => {
 });
 
 describe("projectToolDiagnosticValue", () => {
+	it.each([projectToolDiagnosticValue, projectCompleteToolValueForModel])(
+		"withholds private recovery snapshots from raw memory tool results",
+		(project) => {
+			const marker = {
+				scope: "private-turn",
+				replyRecoveryJson: '{"context":"OWNER-PRIVATE-RECOVERY-CANARY"}',
+			};
+			const original = {
+				content: { text: "Visible original request", chatIdempotency: marker },
+				replyRecoveryJson: marker.replyRecoveryJson,
+			};
+			expect(project(original, redactor)).toEqual({
+				content: {
+					text: "Visible original request",
+					chatIdempotency: TOOL_DIAGNOSTIC_MASK,
+				},
+				replyRecoveryJson: TOOL_DIAGNOSTIC_MASK,
+			});
+			expect(original.content.chatIdempotency).toBe(marker);
+			expect(marker.replyRecoveryJson).toContain(
+				"OWNER-PRIVATE-RECOVERY-CANARY",
+			);
+		},
+	);
+
 	it("preserves numbers, booleans, and null exactly", () => {
 		const args = {
 			retries: 3,

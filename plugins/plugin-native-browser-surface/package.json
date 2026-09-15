@@ -23,6 +23,7 @@
   },
   "unpkg": "dist/plugin.js",
   "files": [
+    "resources/",
     "android/src/main/",
     "android/build.gradle",
     "dist/",

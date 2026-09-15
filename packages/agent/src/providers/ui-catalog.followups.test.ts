@@ -1,9 +1,8 @@
 /**
- * Coverage for uiWidgetsProvider's followups/form marker instructions: the
- * [FOLLOWUPS]/[FORM] grammar and its three followup kinds (reply / navigate /
- * prompt) are taught on the dashboard (API) channel, the example block matches
- * the exact regex the UI parser accepts (so the docs can't drift from the
- * parser), and no markers leak onto connector-style group channels.
+ * Covers uiWidgetsProvider's marker instructions on the dashboard API channel.
+ * Choice examples use the real UI parser to preserve distinguishing labels and
+ * returned record identities; followups/forms retain their marker grammar and
+ * no markers leak onto connector-style group channels.
  * Deterministic: the admin gate is forced open by mocking security/access; no
  * live model.
  */
@@ -14,6 +13,7 @@ import {
   type State,
 } from "@elizaos/core";
 import { describe, expect, it, vi } from "vitest";
+import { findChoiceRegions } from "../../../ui/src/components/chat/message-choice-parser.ts";
 
 // The followups/form instructions live behind the provider's admin gate; force
 // it open so these tests focus on instruction delivery + channel gating.
@@ -31,7 +31,31 @@ function makeMessage(channelType?: ChannelType): Memory {
   return { content: { channelType } } as unknown as Memory;
 }
 
-describe("uiWidgetsProvider — followups/form marker instructions", () => {
+describe("uiWidgetsProvider — inline marker instructions", () => {
+  it("teaches same-title record choices with distinct labels and stable returned identities", async () => {
+    const result = await uiWidgetsProvider.get(
+      makeRuntime(),
+      makeMessage(ChannelType.API),
+      {} as State,
+    );
+    const choices = findChoiceRegions(result.text ?? "");
+    expect(choices).toHaveLength(1);
+    expect(choices[0]).toMatchObject({
+      id: "note-choice-123",
+      scope: "note-selection",
+      options: [
+        {
+          value: "Select note note_123",
+          label: "Travel checklist (note_123)",
+        },
+        {
+          value: "Select note note_456",
+          label: "Travel checklist (note_456)",
+        },
+      ],
+    });
+  });
+
   it("teaches [FOLLOWUPS] and [FORM] on the dashboard (API) channel", async () => {
     const result = await uiWidgetsProvider.get(
       makeRuntime(),

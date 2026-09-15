@@ -167,6 +167,23 @@ describe("Notes boundary validation", () => {
       expect(patch).toEqual({ title: "Updated Title" });
     });
 
+    it("retains exact edit whitespace and rejects malformed or combined edits", () => {
+      const textEdit = { field: "body", oldText: " green ", newText: "" };
+      expect(parseUpdateNoteInput({ textEdit })).toEqual({ textEdit });
+      for (const invalid of [
+        null,
+        {},
+        { ...textEdit, field: "color" },
+        { ...textEdit, oldText: "" },
+        { ...textEdit, newText: null },
+        { ...textEdit, extra: true },
+      ])
+        expect(() => parseUpdateNoteInput({ textEdit: invalid })).toThrow();
+      expect(() =>
+        parseUpdateNoteInput({ textEdit, body: "rewrite" }),
+      ).toThrow();
+    });
+
     it("rejects empty patch", () => {
       expect(() => parseUpdateNoteInput({})).toThrow();
     });

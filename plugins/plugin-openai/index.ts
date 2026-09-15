@@ -196,6 +196,9 @@ export const openaiPlugin: Plugin = {
   config: {
     OPENAI_API_KEY: env.OPENAI_API_KEY ?? null,
     OPENAI_BASE_URL: env.OPENAI_BASE_URL ?? null,
+    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY ?? null,
+    OPENROUTER_FALLBACK_MODEL: env.OPENROUTER_FALLBACK_MODEL ?? null,
+    OPENROUTER_BASE_URL: env.OPENROUTER_BASE_URL ?? null,
     EVOLINK_API_KEY: env.EVOLINK_API_KEY ?? null,
     EVOLINK_BASE_URL: env.EVOLINK_BASE_URL ?? null,
     EVOLINK_MODEL: env.EVOLINK_MODEL ?? null,

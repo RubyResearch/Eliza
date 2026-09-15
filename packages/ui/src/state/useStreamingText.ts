@@ -78,6 +78,7 @@ export type StreamingTextModification =
       failureKind?: ChatFailureKind;
       /** Authoritative terminal failure details from the runtime. */
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
       /**
        * Optional structured "connect another account" request to stamp on the
        * completed turn so the renderer can swap in the AccountConnectBlock.
@@ -91,6 +92,8 @@ export type StreamingTextModification =
       assistantEphemeral?: boolean;
       /** Persisted server id replacing the optimistic temp-resp-* stream id. */
       persistedMessageId?: string;
+      /** Server-confirmed user turn that owns this reply, including ephemeral failures. */
+      replyToMessageId?: string;
     }
   | {
       messageId: string;
@@ -112,6 +115,7 @@ export type StreamingTextModification =
       failureKind: ChatFailureKind;
       /** Authoritative terminal failure details from the runtime. */
       terminalFailure?: ChatTerminalFailure;
+      replyRecoveryAvailable?: boolean;
     }
   | {
       messageId: string;
@@ -189,16 +193,21 @@ function computeNextMessage(
       const sameId =
         mod.persistedMessageId === undefined ||
         message.id === mod.persistedMessageId;
+      const sameReplyTo =
+        mod.replyToMessageId === undefined ||
+        message.replyToMessageId === mod.replyToMessageId;
       if (
         sameText &&
         sameInterruption &&
         sameFailure &&
         sameTerminalFailure &&
+        message.replyRecoveryAvailable === mod.replyRecoveryAvailable &&
         sameAccountConnect &&
         sameCapabilityHandoff &&
         sameReasoning &&
         sameAssistantEphemeral &&
         sameId &&
+        sameReplyTo &&
         message.provisional === undefined
       ) {
         return null;
@@ -207,6 +216,9 @@ function computeNextMessage(
         {
           ...message,
           ...(mod.persistedMessageId ? { id: mod.persistedMessageId } : {}),
+          ...(mod.replyToMessageId
+            ? { replyToMessageId: mod.replyToMessageId }
+            : {}),
           text: mod.fullText,
         },
         // Terminal text is no longer provisional; interruption remains a
@@ -227,6 +239,11 @@ function computeNextMessage(
         next.terminalFailure = mod.terminalFailure;
       } else if (message.terminalFailure !== undefined) {
         delete next.terminalFailure;
+      }
+      if (mod.replyRecoveryAvailable === true) {
+        next.replyRecoveryAvailable = true;
+      } else {
+        delete next.replyRecoveryAvailable;
       }
       if (mod.accountConnect) {
         next.accountConnect = mod.accountConnect;
@@ -263,12 +280,14 @@ function computeNextMessage(
     case "fail": {
       if (
         message.failureKind === mod.failureKind &&
-        message.terminalFailure === mod.terminalFailure
+        message.terminalFailure === mod.terminalFailure &&
+        message.replyRecoveryAvailable === mod.replyRecoveryAvailable
       )
         return null;
       return {
         ...message,
         failureKind: mod.failureKind,
+        replyRecoveryAvailable: mod.replyRecoveryAvailable,
         ...(mod.terminalFailure
           ? { terminalFailure: mod.terminalFailure }
           : {}),

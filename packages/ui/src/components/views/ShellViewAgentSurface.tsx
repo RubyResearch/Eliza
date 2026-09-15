@@ -35,6 +35,8 @@ export interface ShellViewAgentSurfaceProps {
   viewType?: AgentViewType;
   /** Registry family that generated this bridge owner, when applicable. */
   surfaceKind?: RegisteredAgentSurfaceKind | "builtin";
+  /** Reads an isolated child page rather than the shell's own DOM text. */
+  readPage?: (selector?: string) => Promise<unknown>;
   children: ReactNode;
 }
 
@@ -42,9 +44,12 @@ export function ShellViewAgentSurface({
   viewId,
   viewType = "gui",
   surfaceKind = "builtin",
+  readPage,
   children,
 }: ShellViewAgentSurfaceProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const pageReader = useRef(readPage);
+  pageReader.current = readPage;
 
   useEffect(() => {
     return registerViewInteractHandler(
@@ -62,6 +67,20 @@ export function ShellViewAgentSurface({
         }
         switch (capability) {
           case "get-text":
+            if (pageReader.current) {
+              if (
+                params?.selector !== undefined &&
+                typeof params.selector !== "string"
+              ) {
+                throw new Error("Page text selector must be a string.");
+              }
+              return pageReader.current(params?.selector as string | undefined);
+            }
+            if (params?.nativeOnly === true) {
+              throw new Error(
+                "The requesting view has no mounted native page reader.",
+              );
+            }
             return containerRef.current?.innerText ?? "";
           case "get-state":
             return registry && registry.size() > 0 ? registry.snapshot() : {};

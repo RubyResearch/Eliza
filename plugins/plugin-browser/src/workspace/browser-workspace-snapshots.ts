@@ -2,7 +2,11 @@
  * Snapshot, diff, screenshot, and PDF helpers for browser workspace documents.
  */
 
-import { normalizeBrowserWorkspaceText } from "./browser-workspace-helpers.js";
+import {
+  isBrowserWorkspacePrivateControl,
+  normalizeBrowserWorkspaceText,
+  readBrowserWorkspaceElementText,
+} from "./browser-workspace-helpers.js";
 import type { BrowserWorkspaceSnapshotRecord } from "./browser-workspace-types.js";
 
 export function escapeBrowserWorkspacePdfText(value: string): string {
@@ -95,7 +99,7 @@ export function createBrowserWorkspaceSnapshotRecord(
 export function buildBrowserWorkspaceDocumentSnapshotText(
   document: Document,
 ): string {
-  const bodyText = normalizeBrowserWorkspaceText(document.body?.textContent);
+  const bodyText = readBrowserWorkspaceElementText(document.body);
   const controlText = Array.from(
     document.querySelectorAll("input, textarea, select, option:checked"),
   )
@@ -104,6 +108,7 @@ export function buildBrowserWorkspaceDocumentSnapshotText(
         element.getAttribute("name") ||
         element.getAttribute("id") ||
         element.tagName.toLowerCase();
+      if (isBrowserWorkspacePrivateControl(element)) return name;
       const value =
         element.tagName === "SELECT"
           ? (element as HTMLSelectElement).value

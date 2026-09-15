@@ -37,6 +37,17 @@ function augmented(userRequest: string): string {
 }
 
 describe("current_view state provider", () => {
+	it("leaves per-message view context to UI_CONTEXT instead of reading another client's global view", async () => {
+		const message = msg("what view is open?");
+		message.content.metadata = { uiView: "notes", uiViewPath: "/notes" };
+		const result = await currentViewProvider.get(runtime, message, {
+			values: {},
+			data: {},
+			text: "",
+		});
+		expect(result.text).toBe("");
+		expect(h.getCurrentView).not.toHaveBeenCalled();
+	});
 	beforeEach(() => {
 		h.getCurrentView.mockReset();
 		reportError.mockReset();

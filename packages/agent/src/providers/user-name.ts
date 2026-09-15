@@ -47,16 +47,13 @@ export function createUserNameProvider(): Provider {
 
       if (name) {
         return {
-          text: `The user's name is ${name}.`,
+          text: `Configured app display name: ${name}. Entity aliases may include earlier names; follow explicit conversational corrections.`,
           values: { userName: name },
         };
       }
 
       return {
-        text:
-          "No preferred user name is stored yet. The current fallback label is admin. " +
-          "If it comes up naturally in conversation, you can ask what " +
-          "they'd like to be called and use the SETTINGS action with op=set_owner_name to remember it.",
+        text: "App display name unset (fallback: admin). SETTINGS op=set_owner_name stores an explicitly requested display name.",
         values: { userName: "admin", userNameFallback: true },
       };
     },

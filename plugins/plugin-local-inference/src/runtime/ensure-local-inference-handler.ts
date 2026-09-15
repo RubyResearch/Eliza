@@ -164,8 +164,12 @@ const AOSP_LLAMA_PROVIDER = "eliza-aosp-llama";
 const LOCAL_INFERENCE_HANDLER_INSTALLED = Symbol.for(
 	"elizaos.local-inference.handlers-installed",
 );
+const DEDICATED_EMBEDDING_HANDLER_INSTALLED = Symbol.for(
+	"elizaos.local-inference.dedicated-embedding-installed",
+);
 type RuntimeWithLocalInferenceFlag = RuntimeWithModelRegistration & {
 	[LOCAL_INFERENCE_HANDLER_INSTALLED]?: boolean;
+	[DEDICATED_EMBEDDING_HANDLER_INSTALLED]?: boolean;
 };
 /**
  * Same band as cloud / direct provider plugins. Tie-breaks between
@@ -833,23 +837,27 @@ async function getFusedEmbeddingHandle(cfg: DesktopEmbeddingConfig): Promise<{
  * zero-vector (Commandment 8).
  */
 function makeFusedEmbeddingHandler(): EmbeddingHandler {
+	let loadedConfig: DesktopEmbeddingConfig | undefined;
 	return async (_runtime, params) => {
 		const text = extractEmbeddingText(params);
-		// When the probe fails, resolveDesktopEmbeddingConfig(undefined) uses the
-		// `performance` preset (gpuLayers: auto — inert on a CPU-only fused lib).
-		// Log WHY so a broken probe on an accelerated box is visible, not silent
-		// (#10727) — the tier is then chosen without hardware evidence.
-		const hardware = await timeInferenceSpan("embedding:hardware-probe", () =>
-			probeHardware(),
-		).catch((error) => {
-			logger.warn(
-				`[ensureLocalInferenceHandler] hardware probe failed; embedding tier chosen without hardware evidence (performance preset, gpuLayers: auto): ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-			return undefined;
-		});
-		const cfg = resolveDesktopEmbeddingConfig(hardware);
+		let cfg = loadedConfig;
+		if (!cfg) {
+			// When the probe fails, resolveDesktopEmbeddingConfig(undefined) uses the
+			// `performance` preset (gpuLayers: auto — inert on a CPU-only fused lib).
+			// Log WHY so a broken probe on an accelerated box is visible, not silent
+			// (#10727) — the tier is then chosen without hardware evidence.
+			const hardware = await timeInferenceSpan("embedding:hardware-probe", () =>
+				probeHardware(),
+			).catch((error) => {
+				logger.warn(
+					`[ensureLocalInferenceHandler] hardware probe failed; embedding tier chosen without hardware evidence (performance preset, gpuLayers: auto): ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				return undefined;
+			});
+			cfg = resolveDesktopEmbeddingConfig(hardware);
+		}
 		const fused = await timeInferenceSpan("embedding:handle", () =>
 			getFusedEmbeddingHandle(cfg),
 		);
@@ -863,6 +871,9 @@ function makeFusedEmbeddingHandler(): EmbeddingHandler {
 					`to the next embedding provider.`,
 			);
 		}
+		// A loaded native handle keeps its model/configuration for the process lifetime.
+		// Failed initialization must keep probing so a later staging retry can recover.
+		loadedConfig = cfg;
 		const close = getInferenceTimer()?.openSpan("embedding:native");
 		try {
 			return Array.from(fused.embed(text));
@@ -1497,6 +1508,31 @@ export async function ensureLocalInferenceHandler(
 ): Promise<void> {
 	const runtimeMode = getRuntimeMode(runtime);
 	if (!shouldRegisterLocalInferenceHandlers(runtimeMode)) {
+		// A provisioned Dedicated runtime can keep text generation in the cloud
+		// while explicitly owning embeddings locally. The collector yields the
+		// cloud embedding slot for this same opt-in, so skipping both providers
+		// leaves durable memory without vectors. Register only the fused embedder:
+		// cloud clients must not activate local text, voice, or model loaders.
+		if (
+			runtimeMode === "cloud" &&
+			readAliasedEnv("ELIZA_CLOUD_PROVISIONED") === "1" &&
+			readAliasedEnv("ELIZA_LEAN_CHAT_LOCAL_EMBEDDINGS") === "1" &&
+			process.env.ELIZAOS_CLOUD_USE_EMBEDDINGS?.trim().toLowerCase() !==
+				"true" &&
+			!isLocalEmbeddingDisabledByEnv()
+		) {
+			const target = runtime as RuntimeWithLocalInferenceFlag;
+			if (!target[DEDICATED_EMBEDDING_HANDLER_INSTALLED]) {
+				target.registerModel(
+					ModelType.TEXT_EMBEDDING,
+					makeFusedEmbeddingHandler(),
+					LOCAL_INFERENCE_PROVIDER,
+					LOCAL_INFERENCE_PRIORITY,
+				);
+				target[DEDICATED_EMBEDDING_HANDLER_INSTALLED] = true;
+			}
+			return;
+		}
 		logger.info(
 			`[local-inference] Runtime mode is ${runtimeMode}; skipping local model handler registration`,
 		);

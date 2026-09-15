@@ -16,6 +16,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'org.jetbrains.kotlin.android'
 android {
     namespace = "ai.eliza.plugins.browsersurface"
+    sourceSets.main.assets.srcDirs += ['../resources']
     compileSdk project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 34
 
     defaultConfig {

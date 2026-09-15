@@ -38,6 +38,8 @@ export type TrajectoryStatus =
 	| "terminated";
 
 export interface TrajectoryListOptions {
+	/** Exact recorded room ownership, independent of free-text search. */
+	roomId?: string;
 	limit?: number;
 	offset?: number;
 	source?: string;

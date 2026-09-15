@@ -61,7 +61,8 @@ export function emitModelUsageEvent(
   prompt: string,
   usage: ModelUsage,
   modelName: string,
-  retry?: ModelRetryTelemetry
+  retry?: ModelRetryTelemetry,
+  provider = getUsageProvider(runtime)
 ): void {
   const normalized = normalizeProviderUsage(usage);
   const model = modelName.trim();
@@ -72,7 +73,7 @@ export function emitModelUsageEvent(
   const payload: OpenAIModelUsageEventPayload = {
     runtime,
     source: "openai",
-    provider: getUsageProvider(runtime),
+    provider,
     type,
     model,
     modelName: model,

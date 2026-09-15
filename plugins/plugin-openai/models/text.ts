@@ -23,6 +23,7 @@ import {
   ElizaError,
   getInferenceTimer,
   getTrajectoryContext,
+  isPermanentQuotaError,
   JSON_SCHEMA_ARRAY_KEYWORDS,
   JSON_SCHEMA_MAP_KEYWORDS,
   JSON_SCHEMA_MIXED_MAP_KEYWORDS,
@@ -33,6 +34,7 @@ import {
   MAX_WELL_FORMED_DEPTH,
   ModelType,
   normalizeSchemaForCerebras,
+  providerRetryAfterMs,
   recordLlmCall,
   resolveEffectiveSystemPrompt,
   sanitizeFunctionNameForCerebras,
@@ -68,6 +70,7 @@ import {
   getSetting,
   getSmallModel,
   getUsageProvider,
+  isBrowser,
   isCerebrasMode,
   isProxyMode,
 } from "../utils/config";
@@ -108,6 +111,7 @@ interface GenerateTextParamsWithOpenAIOptions
   providerOptions?: Record<string, object | JsonValue> & {
     agentName?: string;
     openai?: OpenAIPromptCacheOptions;
+    cerebras?: { promptCacheKey?: string; prompt_cache_key?: string };
   };
 }
 
@@ -1857,7 +1861,7 @@ function buildNativeTextResult(
     providerMetadata?: unknown;
   },
   modelName: string,
-  provider: "cerebras" | "evolink" | "openai",
+  provider: ReturnType<typeof getUsageProvider>,
   retry?: ModelRetryTelemetry
 ): NativeGenerateTextResult {
   const identity = mergeProviderIdentity(result.providerMetadata, modelName, provider) as Record<
@@ -1902,7 +1906,7 @@ function handledMappedPromise<T, U>(
 function mergeProviderIdentity(
   providerMetadata: unknown,
   modelName: string,
-  provider: "cerebras" | "evolink" | "openai"
+  provider: ReturnType<typeof getUsageProvider>
 ): unknown {
   if (
     providerMetadata &&
@@ -2146,12 +2150,13 @@ function isSpuriousToolPairingRejection(error: unknown): boolean {
  * resets; re-sending a 20-45K-token prompt to it — directly or through a
  * runtime fallback alias that resolves to the same model — only burns the
  * bucket further and delays failover. A runtime never inherits another
- * runtime's cooldown; changing its endpoint or credential resets the memo.
+ * runtime's cooldown. Endpoint, credential and model each retain independent
+ * buckets, so interleaved credentials never erase another account's hold.
  * Entries expire at the provider's Retry-After and never block another model.
  */
 const rateLimitCooldowns = new WeakMap<
   IAgentRuntime,
-  { endpoint: string; credential: string | undefined; models: Map<string, number> }
+  Map<string, Map<string | undefined, Map<string, number>>>
 >();
 
 class ProviderRateLimitCooldownError extends Error {
@@ -2166,18 +2171,30 @@ class ProviderRateLimitCooldownError extends Error {
   }
 }
 
-function runtimeRateLimitCooldowns(runtime: IAgentRuntime): Map<string, number> {
-  const endpoint = getBaseURL(runtime);
-  const credential = getApiKey(runtime);
-  let cooldown = rateLimitCooldowns.get(runtime);
-  if (!cooldown || cooldown.endpoint !== endpoint || cooldown.credential !== credential) {
-    cooldown = { endpoint, credential, models: new Map() };
-    rateLimitCooldowns.set(runtime, cooldown);
+function runtimeRateLimitCooldowns(
+  runtime: IAgentRuntime,
+  endpoint = getBaseURL(runtime),
+  credential = getApiKey(runtime)
+): Map<string, number> {
+  let endpoints = rateLimitCooldowns.get(runtime);
+  if (!endpoints) {
+    endpoints = new Map();
+    rateLimitCooldowns.set(runtime, endpoints);
   }
-  for (const [model, until] of cooldown.models) {
-    if (until <= Date.now()) cooldown.models.delete(model);
+  let credentials = endpoints.get(endpoint);
+  if (!credentials) {
+    credentials = new Map();
+    endpoints.set(endpoint, credentials);
   }
-  return cooldown.models;
+  let models = credentials.get(credential);
+  if (!models) {
+    models = new Map();
+    credentials.set(credential, models);
+  }
+  for (const [model, until] of models) {
+    if (until <= Date.now()) models.delete(model);
+  }
+  return models;
 }
 
 function assertModelNotCoolingDown(models: Map<string, number>, modelName: string): void {
@@ -2242,7 +2259,7 @@ function noteRateLimitCooldown(
   const status =
     (error as { statusCode?: number; status?: number } | undefined)?.statusCode ??
     (error as { status?: number } | undefined)?.status;
-  if (status !== 429) return;
+  if (status !== 429 || isPermanentQuotaError(error)) return;
   const retryAfterMs = providerRetryAfterMs(error);
   if (retryAfterMs === undefined || retryAfterMs <= TRANSIENT_LANE_MAX_BACKOFF_MS) return;
   // The cooldown is a timestamp, not an awaited retry. Preserve the provider's
@@ -2259,65 +2276,9 @@ function noteRateLimitCooldown(
 /** Longest wait the transient lanes will spend on one retry (see waitForTransientRetry). */
 const TRANSIENT_LANE_MAX_BACKOFF_MS = 3000;
 
-/**
- * Read the provider's retry delay once for both retry admission and cooldowns.
- * The millisecond header takes precedence over Retry-After seconds/date, matching
- * the SDK transport contract. Invalid values fall through to the other header;
- * missing or invalid hints leave the bounded exponential policy in control.
- */
-function providerRetryAfterMs(error: unknown): number | undefined {
-  const headers = (error as { responseHeaders?: unknown } | undefined)?.responseHeaders;
-  if (!headers || typeof headers !== "object") return undefined;
-  let milliseconds: string | undefined;
-  let secondsOrDate: string | undefined;
-  for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
-    const raw = Array.isArray(value) ? value[0] : value;
-    if (typeof raw !== "string" || raw.trim().length === 0) continue;
-    if (key.toLowerCase() === "retry-after-ms") milliseconds = raw.trim();
-    if (key.toLowerCase() === "retry-after") secondsOrDate = raw.trim();
-  }
-  const explicitMilliseconds = milliseconds === undefined ? Number.NaN : Number(milliseconds);
-  if (Number.isFinite(explicitMilliseconds) && explicitMilliseconds >= 0)
-    return explicitMilliseconds;
-  if (secondsOrDate === undefined) return undefined;
-  const seconds = Number(secondsOrDate);
-  if (Number.isFinite(seconds))
-    return seconds >= 0 && Number.isFinite(seconds * 1000) ? seconds * 1000 : undefined;
-  const at = Date.parse(secondsOrDate);
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
-}
-
 function providerRetryOutlastsTransientLane(error: unknown): boolean {
   const retryAfterMs = providerRetryAfterMs(error);
   return retryAfterMs !== undefined && retryAfterMs > TRANSIENT_LANE_MAX_BACKOFF_MS;
-}
-
-function isPermanentQuotaError(error: unknown): boolean {
-  const codes = new Set(["insufficient_quota", "credit_balance_exhausted"]);
-  const inspect = (value: unknown): boolean => {
-    if (typeof value !== "object" || value === null) return false;
-    const record = value as Record<string, unknown>;
-    return (
-      (typeof record.code === "string" && codes.has(record.code)) ||
-      (typeof record.type === "string" && codes.has(record.type)) ||
-      (typeof record.error === "object" &&
-        record.error !== null &&
-        ["code", "type"].some((key) => {
-          const field = (record.error as Record<string, unknown>)[key];
-          return typeof field === "string" && codes.has(field);
-        }))
-    );
-  };
-  if (typeof error !== "object" || error === null) return false;
-  const record = error as Record<string, unknown>;
-  if (inspect(record) || inspect(record.data)) return true;
-  if (typeof record.responseBody !== "string") return false;
-  try {
-    return inspect(JSON.parse(record.responseBody));
-  } catch {
-    // error-policy:J3 malformed provider bodies cannot establish permanent quota exhaustion.
-    return false;
-  }
 }
 
 function isTransientProviderError(error: unknown): boolean {
@@ -2507,6 +2468,7 @@ async function generateTextWithTransientRetry(
     retryState: ModelRetryTelemetry;
     maxRetries?: number;
     beforeAttempt?: () => void;
+    yieldRateLimit?: (error: unknown) => boolean;
   }
 ): Promise<Awaited<ReturnType<typeof generateText<ToolSet>>>> {
   const maxRetries = opts.maxRetries ?? 3;
@@ -2526,7 +2488,12 @@ async function generateTextWithTransientRetry(
       // request retry.
       const error = enrichProviderCallError(rawError);
       logToolPairingRejectionShape(error, generateParams);
-      if (attempt >= maxRetries || signal?.aborted || !isTransientProviderError(error)) {
+      if (
+        attempt >= maxRetries ||
+        signal?.aborted ||
+        opts.yieldRateLimit?.(error) ||
+        !isTransientProviderError(error)
+      ) {
         throw error;
       }
       attempt++;
@@ -2694,6 +2661,7 @@ async function consumeStreamWithTransientRetry(
     retryState: ModelRetryTelemetry;
     maxRetries?: number;
     beforeAttempt?: () => void;
+    yieldRateLimit?: (error: unknown) => boolean;
     streamTiming?: ReturnType<typeof createStreamTiming>;
   }
 ): Promise<BufferedStreamResult> {
@@ -2754,7 +2722,12 @@ async function consumeStreamWithTransientRetry(
       // request retry.
       const error = enrichProviderCallError(rawError);
       logToolPairingRejectionShape(error, generateParams);
-      if (attempt >= maxRetries || signal?.aborted || !isTransientProviderError(error)) {
+      if (
+        attempt >= maxRetries ||
+        signal?.aborted ||
+        opts.yieldRateLimit?.(error) ||
+        !isTransientProviderError(error)
+      ) {
         throw error;
       }
       attempt++;
@@ -2785,15 +2758,80 @@ async function generateTextByModelType(
   modelType: ModelTypeName,
   getModelFn: ModelNameGetter
 ): Promise<string | TextStreamResult> {
+  // Cross-provider recovery belongs to one model call, never to the action
+  // executor. Only an explicit alternative credential/model enables it.
+  const modelName = getSetting(runtime, "OPENROUTER_FALLBACK_MODEL")?.trim();
+  const apiKey = getSetting(runtime, "OPENROUTER_API_KEY")?.trim();
+  const canFallback = isCerebrasMode(runtime) && !isBrowser() && !!modelName && !!apiKey;
+  let delivered = false;
+  const observedParams =
+    canFallback && params.onStreamChunk
+      ? {
+          ...params,
+          onStreamChunk: (chunk: string) => {
+            if (chunk) delivered = true;
+            params.onStreamChunk?.(chunk);
+          },
+        }
+      : params;
+  try {
+    return await generateTextAtEndpoint(
+      runtime,
+      observedParams,
+      modelType,
+      getModelFn,
+      undefined,
+      (error) => {
+        if (!canFallback || delivered || params.signal?.aborted) return false;
+        const failure = RetryError.isInstance(error) ? error.lastError : error;
+        const status =
+          (failure as { statusCode?: number; status?: number } | undefined)?.statusCode ??
+          (failure as { status?: number } | undefined)?.status;
+        return status === 429;
+      }
+    );
+  } catch (error) {
+    // error-policy:J4 operator-approved alternate inference preserves the
+    // complete request after rate limiting, only before any output delivery.
+    if (!canFallback || !modelName || !apiKey || delivered || params.signal?.aborted) throw error;
+    const failure = RetryError.isInstance(error) ? error.lastError : error;
+    const status =
+      (failure as { statusCode?: number; status?: number } | undefined)?.statusCode ??
+      (failure as { status?: number } | undefined)?.status;
+    if (status !== 429) throw error;
+    logger.info(
+      { src: "plugin:openai", modelType, model: modelName, provider: "openrouter" },
+      "[OpenAI] Cerebras rate limited; retrying this model call through the configured OpenRouter fallback"
+    );
+    return generateTextAtEndpoint(runtime, params, modelType, getModelFn, {
+      baseURL: getSetting(runtime, "OPENROUTER_BASE_URL")?.trim() || "https://openrouter.ai/api/v1",
+      apiKey,
+      modelName,
+      provider: "openrouter",
+    });
+  }
+}
+
+async function generateTextAtEndpoint(
+  runtime: IAgentRuntime,
+  params: GenerateTextParams,
+  modelType: ModelTypeName,
+  getModelFn: ModelNameGetter,
+  endpoint?: { baseURL: string; apiKey: string; modelName: string; provider: "openrouter" },
+  yieldRateLimit?: (error: unknown) => boolean
+): Promise<string | TextStreamResult> {
   const paramsWithAttachments = params as GenerateTextParamsWithOpenAIOptions;
-  const openai = createOpenAIClient(runtime);
+  const openai = createOpenAIClient(runtime, endpoint);
   // Keep retries and their failures bound to this call's endpoint/credential,
   // even if runtime settings change while the HTTP request is in flight.
-  const modelCooldowns = runtimeRateLimitCooldowns(runtime);
-  const primaryModelName = resolveRequestedModelName(paramsWithAttachments, runtime, getModelFn);
-  const fallbackModelName = resolveFallbackModelName(runtime, primaryModelName);
+  const modelCooldowns = runtimeRateLimitCooldowns(runtime, endpoint?.baseURL, endpoint?.apiKey);
+  const primaryModelName =
+    endpoint?.modelName ?? resolveRequestedModelName(paramsWithAttachments, runtime, getModelFn);
+  const fallbackModelName = endpoint
+    ? undefined
+    : resolveFallbackModelName(runtime, primaryModelName);
   const modelName = selectRequestModelName(modelCooldowns, primaryModelName, fallbackModelName);
-  const usageProvider = getUsageProvider(runtime);
+  const usageProvider = endpoint?.provider ?? getUsageProvider(runtime);
 
   if (modelName !== primaryModelName) {
     logger.info(
@@ -2802,7 +2840,11 @@ async function generateTextByModelType(
     );
   }
   logger.debug(`[OpenAI] Using ${modelType} model: ${modelName}`);
-  const providerOptions = resolveProviderOptions(params, runtime, modelName);
+  const providerOptions = resolveProviderOptions(
+    params,
+    runtime,
+    endpoint ? resolveRequestedModelName(paramsWithAttachments, runtime, getModelFn) : modelName
+  );
   const hasAttachments = (paramsWithAttachments.attachments?.length ?? 0) > 0;
   const userContent = hasAttachments ? buildUserContent(paramsWithAttachments) : undefined;
   const shouldReturnNativeResult = usesNativeTextResult(paramsWithAttachments);
@@ -2823,6 +2865,8 @@ async function generateTextByModelType(
   // gpt-5 / gpt-5-mini reasoning models ignore temperature/penalty/stop params.
   //
   const model = openai.chat(modelName);
+  // The explicitly configured equivalent model accepts the same strict schema
+  // semantics. OpenRouter require_parameters prevents silent capability loss.
   const cerebrasMode = isCerebrasMode(runtime);
   const normalizedToolResult = normalizeNativeToolsForCall(paramsWithAttachments.tools, {
     cerebrasMode,
@@ -2990,6 +3034,7 @@ async function generateTextByModelType(
         generateParams
       );
       details.response = "";
+      details.provider = usageProvider;
       const hasResponseTransform = preparedOutput?.transform !== undefined;
       const buffered = await recordLlmCall(runtime, details, async () => {
         assertModelNotCoolingDown(modelCooldowns, modelName);
@@ -2999,6 +3044,7 @@ async function generateTextByModelType(
           {
             model: modelName,
             retryState,
+            yieldRateLimit,
             maxRetries: 5,
             beforeAttempt: () => attestLlmInputSubstring(details),
             streamTiming,
@@ -3030,7 +3076,8 @@ async function generateTextByModelType(
           params.prompt ?? "",
           buffered.usage,
           modelName,
-          retryState
+          retryState,
+          usageProvider
         );
       }
       return {
@@ -3060,6 +3107,7 @@ async function generateTextByModelType(
       generateParams
     );
     details.response = "";
+    details.provider = usageProvider;
     assertActiveTrajectoryForLlmCall({
       actionType: details.actionType,
       model: details.model,
@@ -3167,6 +3215,7 @@ async function generateTextByModelType(
         !failedBeforeFirstToken ||
         attempt >= 5 ||
         abortSignal?.aborted ||
+        yieldRateLimit?.(capturedStreamError) ||
         !isTransientProviderError(capturedStreamError)
       ) {
         break;
@@ -3190,6 +3239,30 @@ async function generateTextByModelType(
         yield next.value;
       }
     };
+    // Before any text/tool delta is exposed, a provider 429 is a failed
+    // dispatch, not a partial response. Surface it to the same-call fallback.
+    if (
+      capturedStreamError &&
+      (firstItem === undefined || firstItem.done) &&
+      !endpoint &&
+      getSetting(runtime, "OPENROUTER_FALLBACK_MODEL") &&
+      getSetting(runtime, "OPENROUTER_API_KEY")
+    ) {
+      const failure = RetryError.isInstance(capturedStreamError)
+        ? capturedStreamError.lastError
+        : capturedStreamError;
+      const status =
+        (failure as { statusCode?: number; status?: number }).statusCode ??
+        (failure as { status?: number }).status;
+      if (status === 429) {
+        logActiveTrajectoryLlmCall(runtime, {
+          ...details,
+          response: "",
+          latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        });
+        throw capturedStreamError;
+      }
+    }
     let structuredTextSettled = false;
     let resolveStructuredText: (text: string) => void = () => {};
     let rejectStructuredText: (error: unknown) => void = () => {};
@@ -3252,7 +3325,8 @@ async function generateTextByModelType(
           params.prompt ?? "",
           usageResult.value,
           modelName,
-          retryState
+          retryState,
+          usageProvider
         );
       } else if (usageResult.status === "rejected") {
         companionStreamError ??= usageResult.reason;
@@ -3370,11 +3444,13 @@ async function generateTextByModelType(
     providerOptions,
     generateParams
   );
+  details.provider = usageProvider;
   const result = await recordLlmCall(runtime, details, async () => {
     assertModelNotCoolingDown(modelCooldowns, modelName);
     const result = await generateTextWithTransientRetry(generateParams, {
       model: modelName,
       retryState,
+      yieldRateLimit,
       maxRetries: 3,
       beforeAttempt: () => attestLlmInputSubstring(details),
     }).catch((error: unknown) => {
@@ -3413,7 +3489,8 @@ async function generateTextByModelType(
       params.prompt ?? "",
       result.usage,
       modelName,
-      retryState
+      retryState,
+      usageProvider
     );
   }
 

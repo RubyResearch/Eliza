@@ -29,6 +29,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentButton, getViewRegistry } from "./agent-surface";
 import { registerAppShellPage } from "./app-shell-registry";
+import { ViewBackButton } from "./components/shared/ViewHeader";
 import { DEFAULT_BOOT_CONFIG, setBootConfig } from "./config/boot-config";
 import { DEFAULT_BRANDING } from "./config/branding-base";
 import { BrandingContext } from "./config/branding-react.hooks";
@@ -1262,6 +1263,7 @@ describe("App navigate-view event wiring", () => {
     );
     expect(loader.getAttribute("data-view-id")).toBe("remote-ledger");
     expect(loader.getAttribute("data-view-type")).toBe("gui");
+    expect(queryByTestId("view-header")).toBeNull();
     expect(
       container
         .querySelector('[data-shell-content-region="true"] [data-page-content]')
@@ -1276,13 +1278,35 @@ describe("App navigate-view event wiring", () => {
     expect(queryByTestId("app-background-shader")).toBeNull();
   });
 
+  it("keeps an in-process page's own header without adding a duplicate shell header", async () => {
+    registerAppShellPage({
+      id: "signed-normal",
+      pluginId: "@local/plugin-signed-normal",
+      label: "Signed Normal",
+      path: "/apps/signed-normal",
+      Component: () => (
+        <section data-testid="signed-normal-content">
+          <h1>Signed Normal</h1>
+        </section>
+      ),
+    });
+    appState.tab = "apps";
+    window.history.replaceState(null, "", "/apps/signed-normal");
+
+    const { getByTestId, getAllByRole, queryByTestId } = render(<App />);
+
+    await waitFor(() => getByTestId("signed-normal-content"));
+    expect(getAllByRole("heading", { name: "Signed Normal" })).toHaveLength(1);
+    expect(queryByTestId("view-header")).toBeNull();
+  });
+
   it.each([
     { strictMode: false, entry: "direct" },
     { strictMode: true, entry: "direct" },
     { strictMode: false, entry: "navigate-view" },
     { strictMode: true, entry: "navigate-view" },
   ])(
-    "returns from Notes to the launcher through guarded history navigation ($entry, StrictMode=$strictMode)",
+    "returns a registered fixture to the launcher using its own back control ($entry, StrictMode=$strictMode)",
     async ({ strictMode, entry }) => {
       electrobunRuntimeState.enabled = false;
       registerAppShellPage({
@@ -1292,7 +1316,13 @@ describe("App navigate-view event wiring", () => {
         path: "/notes",
         surface: { header: "normal", capabilities: [] },
         Component: () => (
-          <section aria-label="Notes fixture">A saved note</section>
+          // This fixture exercises a view-owned control's real guarded-history
+          // path; it does not assert that the production Notes page has one.
+          <section aria-label="Notes fixture">
+            <h1>Notes</h1>
+            <ViewBackButton />
+            <p>A saved note</p>
+          </section>
         ),
       });
       window.history.replaceState(
@@ -1315,6 +1345,8 @@ describe("App navigate-view event wiring", () => {
       }
 
       await screen.findByRole("region", { name: "Notes fixture" });
+      expect(screen.getAllByRole("heading", { name: "Notes" })).toHaveLength(1);
+      expect(screen.queryByTestId("view-header")).toBeNull();
       expect(getActiveSurfaceRealmScope()?.viewId).toBe("notes");
       // Prove the guard is armed, not just that a scope-shaped object exists.
       expect(() => window.history.pushState(null, "", "/views")).toThrow(

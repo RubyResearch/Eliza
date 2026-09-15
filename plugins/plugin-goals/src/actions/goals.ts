@@ -199,8 +199,19 @@ export const ownerGoalsAction: Action = {
     try {
       switch (subaction) {
         case "create": {
+          const title =
+            typeof params.title === "string" ? params.title.trim() : undefined;
+          if (!title) {
+            const text = "Goal title is required for create.";
+            await callback?.({ text });
+            return {
+              success: false,
+              text,
+              data: { action: "create", error: "missing_title" },
+            };
+          }
           const record = await service.createGoal({
-            title: params.title ?? "",
+            title,
             description: params.description,
           });
           const text = `Added goal "${describeGoal(record)}".`;
@@ -208,7 +219,28 @@ export const ownerGoalsAction: Action = {
           return { success: true, text, data: { action: "create", record } };
         }
         case "update": {
-          const record = await service.updateGoal(params.id ?? "", {
+          const id =
+            typeof params.id === "string" ? params.id.trim() : undefined;
+          if (!id) {
+            const text = "Goal id is required for update.";
+            await callback?.({ text });
+            return {
+              success: false,
+              text,
+              data: { action: "update", error: "missing_id" },
+            };
+          }
+          if (params.title === undefined && params.description === undefined) {
+            const text =
+              "At least one of title or description is required for update.";
+            await callback?.({ text });
+            return {
+              success: false,
+              text,
+              data: { action: "update", error: "missing_fields" },
+            };
+          }
+          const record = await service.updateGoal(id, {
             ...(params.title !== undefined ? { title: params.title } : {}),
             ...(params.description !== undefined
               ? { description: params.description }
@@ -219,18 +251,40 @@ export const ownerGoalsAction: Action = {
           return { success: true, text, data: { action: "update", record } };
         }
         case "delete": {
-          const record = await service.getGoal(params.id ?? "");
-          await service.deleteGoal(params.id ?? "");
+          const id =
+            typeof params.id === "string" ? params.id.trim() : undefined;
+          if (!id) {
+            const text = "Goal id is required for delete.";
+            await callback?.({ text });
+            return {
+              success: false,
+              text,
+              data: { action: "delete", error: "missing_id" },
+            };
+          }
+          const record = await service.getGoal(id);
+          await service.deleteGoal(id);
           const text = `${describeGoal(record)} is off your goals list.`;
           await callback?.({ text });
           return {
             success: true,
             text,
-            data: { action: "delete", id: params.id },
+            data: { action: "delete", id },
           };
         }
         case "review": {
-          const record = await service.getGoal(params.id ?? "");
+          const id =
+            typeof params.id === "string" ? params.id.trim() : undefined;
+          if (!id) {
+            const text = "Goal id is required for review.";
+            await callback?.({ text });
+            return {
+              success: false,
+              text,
+              data: { action: "review", error: "missing_id" },
+            };
+          }
+          const record = await service.getGoal(id);
           const text = `Goal "${describeGoal(record)}" is ${record.goal.reviewState.replace(/_/g, " ")} (status: ${record.goal.status}).`;
           await callback?.({ text });
           return { success: true, text, data: { action: "review", record } };

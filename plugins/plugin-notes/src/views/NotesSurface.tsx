@@ -355,11 +355,9 @@ function NotesRecoveryState({
 
 function NotesCollectionHeader({
   count,
-  loading,
   issue,
 }: {
   count: number;
-  loading: boolean;
   issue: NotesIssue | null;
 }) {
   return (
@@ -393,11 +391,7 @@ function NotesCollectionHeader({
           textAlign: "right",
         }}
       >
-        {loading
-          ? "Refreshing"
-          : issue
-            ? "Last available snapshot"
-            : "Ask Eliza to create or edit"}
+        {issue ? "Last available snapshot" : "Ask Eliza to create or edit"}
       </p>
     </div>
   );
@@ -424,7 +418,8 @@ function viewLabel({
       ? `Notes. Sync unavailable. Showing ${noteCount}.`
       : "Notes. Sync unavailable.";
   }
-  if (loading) return `Notes. Refreshing ${noteCount}.`;
+  // Cached content keeps its name during background refreshes. The frame's
+  // aria-busy state reports synchronization without relabelling the collection.
   return `Notes. ${noteCount}.`;
 }
 
@@ -483,11 +478,7 @@ export function NotesSurface({
             <section aria-label="Notes" style={COLLECTION_STYLE}>
               {issue && notes.length > 0 ? (
                 <>
-                  <NotesCollectionHeader
-                    count={notes.length}
-                    loading={loading}
-                    issue={issue}
-                  />
+                  <NotesCollectionHeader count={notes.length} issue={issue} />
                   <SyncWarning issue={issue} onRetry={() => void refresh()} />
                 </>
               ) : null}
@@ -507,11 +498,7 @@ export function NotesSurface({
               ) : (
                 <>
                   {issue ? null : (
-                    <NotesCollectionHeader
-                      count={notes.length}
-                      loading={loading}
-                      issue={null}
-                    />
+                    <NotesCollectionHeader count={notes.length} issue={null} />
                   )}
                   <ul
                     data-testid="simple-notes-list"

@@ -36,6 +36,7 @@ import {
 } from "./useVoiceChat";
 
 interface FakeSource {
+  context: FakeAudioContext;
   buffer: unknown;
   connect: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
@@ -55,7 +56,8 @@ class FakeAudioWorkletNode {
   disconnect = vi.fn();
 }
 
-class FakeAudioContext {
+class FakeAudioContext extends EventTarget {
+  currentTime = 0;
   state = "running";
   destination = {};
   audioWorklet = { addModule: vi.fn(async () => {}) };
@@ -74,6 +76,7 @@ class FakeAudioContext {
   }));
   createBufferSource = vi.fn((): FakeSource => {
     const source: FakeSource = {
+      context: this,
       buffer: null,
       connect: vi.fn(),
       disconnect: vi.fn(),
@@ -148,6 +151,8 @@ function installMocks() {
   fetchedUrls.length = 0;
   fetchedContexts.length = 0;
   decodedAudioInputs.length = 0;
+  // The hook shares its context across mounts; reset this fake platform between cases.
+  for (const source of createdSources) source.context.state = "running";
   createdSources.length = 0;
   finishPlaybackAutomatically = true;
   decodedSampleCount = 640;
@@ -741,5 +746,34 @@ describe("useVoiceChat TTS playback across providers", () => {
     await waitFor(() => {
       expect(result.current.isSpeaking).toBe(false);
     });
+  });
+  it("surfaces a context closed during buffered speech and does not start the queued reply", async () => {
+    finishPlaybackAutomatically = false;
+    const { result } = renderVoiceChat({ provider: "eliza-cloud" });
+    act(() =>
+      result.current.speak("Speech interrupted by a closed audio device."),
+    );
+    await waitFor(() => expect(createdSources[0]?.start).toHaveBeenCalled());
+    act(() =>
+      result.current.speak("This queued reply must not start.", {
+        append: true,
+      }),
+    );
+    const source = createdSources[0];
+    if (!source) throw new Error("No started audio source");
+    act(() => {
+      source.context.state = "closed";
+      source.context.dispatchEvent(new Event("statechange"));
+    });
+    await waitFor(() => {
+      expect(result.current.ttsError).toMatchObject({
+        engine: "eliza-cloud",
+        message: expect.stringMatching(/closed.*before speech completed/i),
+      });
+      expect(result.current.isSpeaking).toBe(false);
+    });
+    expect(createdSources).toHaveLength(1);
+    expect(source.disconnect).toHaveBeenCalled();
+    expect(speechSynthesisMock.speak).not.toHaveBeenCalled();
   });
 });

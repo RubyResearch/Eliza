@@ -133,6 +133,7 @@ type StreamChatEvent = {
   noResponseReason?: string;
   failureKind?: ChatFailureKind;
   terminalFailure?: ChatTerminalFailure;
+  replyRecoveryAvailable?: boolean;
   accountConnect?: AccountConnectRequest;
   localInference?: LocalInferenceChatMetadata;
   actionResults?: ChatActionResultSummary[];
@@ -265,6 +266,7 @@ type StreamChatState = {
   doneUsage: ChatTokenUsage | undefined;
   doneFailureKind: ChatFailureKind | undefined;
   doneTerminalFailure: ChatTerminalFailure | undefined;
+  doneReplyRecoveryAvailable: boolean;
   doneAccountConnect: AccountConnectRequest | undefined;
   doneLocalInference: LocalInferenceChatMetadata | undefined;
   doneActionResults: ChatActionResultSummary[] | undefined;
@@ -477,6 +479,7 @@ function applyStreamChatDoneEvent(
     state.doneFailureKind = parsed.failureKind;
   }
   state.doneTerminalFailure = parseChatTerminalFailure(parsed.terminalFailure);
+  state.doneReplyRecoveryAvailable = parsed.replyRecoveryAvailable === true;
   if (parsed.accountConnect && typeof parsed.accountConnect === "object") {
     state.doneAccountConnect = parsed.accountConnect;
   }
@@ -933,7 +936,8 @@ export class ElizaClient {
   /** Last cloud agent base released after an agent-gone 404 (idempotency). */
   private _releasedGoneAgentBase: string | null = null;
   private personalElizaRuntimeRepoint: Promise<boolean> | null = null;
-  private readonly clientId: string;
+  /** Renderer routing identity, shared by HTTP, WebSocket, and voice turns. */
+  readonly clientId: string;
   private requestTransport: AgentRequestTransport = fetchAgentTransport;
   private ws: WebSocket | null = null;
   private wsHandlers = new Map<string, Set<WsEventHandler>>();
@@ -2946,6 +2950,7 @@ export class ElizaClient {
     usage?: ChatTokenUsage;
     failureKind?: ChatFailureKind;
     terminalFailure?: ChatTerminalFailure;
+    replyRecoveryAvailable?: boolean;
     accountConnect?: AccountConnectRequest;
     localInference?: LocalInferenceChatMetadata;
     actionResults?: ChatActionResultSummary[];
@@ -3026,6 +3031,7 @@ export class ElizaClient {
       doneUsage: undefined,
       doneFailureKind: undefined,
       doneTerminalFailure: undefined,
+      doneReplyRecoveryAvailable: false,
       doneAccountConnect: undefined,
       doneLocalInference: undefined,
       doneActionResults: undefined,
@@ -3194,6 +3200,9 @@ export class ElizaClient {
       ...(streamState.doneUsage ? { usage: streamState.doneUsage } : {}),
       ...(streamState.doneFailureKind
         ? { failureKind: streamState.doneFailureKind }
+        : {}),
+      ...(streamState.doneReplyRecoveryAvailable
+        ? { replyRecoveryAvailable: true }
         : {}),
       ...(streamState.doneTerminalFailure
         ? { terminalFailure: streamState.doneTerminalFailure }

@@ -88,6 +88,8 @@ export async function completeLifeOpsEffect(
   if (
     result.replyFailure ||
     (result.transcriptVisibility === "internal" &&
+      typeof result.data?.replyGrounding === "string") ||
+    (result.transcriptVisibility === "internal" &&
       !result.text?.trim() &&
       !result.userFacingText?.trim() &&
       !result.modelReplyFallback?.trim())

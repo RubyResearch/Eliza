@@ -40,6 +40,9 @@ class RecordingShell implements NativeSurfaceShell {
   readonly occlusions = new Map<string, readonly SurfaceOcclusionRect[]>();
   readonly navigations: Array<{ id: string; url: string }> = [];
   readonly reloaded: string[] = [];
+  readonly navigationListeners = new Set<
+    Parameters<NativeSurfaceShell["subscribeNavigation"]>[0]
+  >();
   private readonly live = new Set<string>();
   presentedId: string | null = null;
 
@@ -80,6 +83,26 @@ class RecordingShell implements NativeSurfaceShell {
     this.commands.push(`reload:${id}`);
     this.reloaded.push(id);
     return Promise.resolve();
+  }
+  async back(id: string): Promise<void> {
+    this.commands.push(`back:${id}`);
+  }
+  async readPage(id: string) {
+    this.commands.push(`read:${id}`);
+    return {
+      url: "https://a.example/",
+      title: "A",
+      text: "A",
+      truncated: false,
+    };
+  }
+  async subscribeNavigation(
+    listener: Parameters<NativeSurfaceShell["subscribeNavigation"]>[0],
+  ) {
+    this.navigationListeners.add(listener);
+    return async () => {
+      this.navigationListeners.delete(listener);
+    };
   }
   presentSurface(id: string | null): Promise<void> {
     this.commands.push(`present:${id ?? "host"}`);
@@ -202,6 +225,18 @@ class InMemoryNativeManager implements ElizaSurfaceManagerPlugin {
   async setBounds(): Promise<void> {}
   async setOcclusionRects(): Promise<void> {}
   async reloadSurface(): Promise<void> {}
+  async goBack(): Promise<void> {}
+  async readPage() {
+    return {
+      url: "https://a.example/",
+      title: "A",
+      text: "A",
+      truncated: false,
+    };
+  }
+  async addListener() {
+    return { remove: async () => {} };
+  }
 
   async navigate(options: {
     owner: string;
@@ -351,6 +386,58 @@ describe("useMobileNativeTabSurfaces", () => {
     policy: ISOLATED,
     lifecycle: "ephemeral" as const,
   };
+
+  it("delivers native navigation only to the current surface lease and removes listeners", async () => {
+    const shell = new RecordingShell();
+    const olderListener = vi.fn();
+    const newerListener = vi.fn();
+    const older = renderHook(() =>
+      useMobileNativeTabSurfaces({
+        ...base,
+        shell,
+        onNavigation: olderListener,
+      }),
+    );
+    const newer = renderHook(() =>
+      useMobileNativeTabSurfaces({
+        ...base,
+        shell,
+        onNavigation: newerListener,
+      }),
+    );
+    await act(async () => Promise.resolve());
+    act(() => {
+      for (const listener of shell.navigationListeners)
+        listener({
+          id: "browser-tab:a",
+          url: "https://next.example/",
+          previousUrl: "https://a.example",
+        });
+    });
+    expect(olderListener).not.toHaveBeenCalled();
+    expect(newerListener).toHaveBeenCalledWith({
+      tabId: "a",
+      url: "https://next.example/",
+      previousUrl: "https://a.example",
+    });
+    await expect(older.result.current.backSurface("a")).rejects.toThrow(
+      "no longer owns",
+    );
+    await newer.result.current.backSurface("a");
+    await expect(older.result.current.readPage("a")).rejects.toThrow(
+      "no longer owns",
+    );
+    await expect(newer.result.current.readPage("a")).resolves.toMatchObject({
+      text: "A",
+    });
+    expect(
+      shell.commands.filter((command) => command.startsWith("back:")),
+    ).toEqual(["back:browser-tab:a"]);
+    newer.unmount();
+    older.unmount();
+    await act(async () => Promise.resolve());
+    expect(shell.navigationListeners.size).toBe(0);
+  });
 
   it("creates each surface with an explicit process AND storage policy", () => {
     const shell = new RecordingShell();

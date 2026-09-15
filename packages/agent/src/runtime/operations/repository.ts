@@ -9,8 +9,8 @@
  * `findByIdempotencyKey` O(1) on the hot path.
  *
  * Hydration:
- *   1. Reap abandoned ops — `pending`/`running` whose `startedAt` is older
- *      than `ABANDONED_AFTER_MS` are force-marked `failed` with code
+ *   1. Reap abandoned ops — `pending`/`running` with a confirmed dead local
+ *      executor or older than `ABANDONED_AFTER_MS` are marked `failed` with code
  *      `"abandoned"` (the process died mid-flight).
  *   2. Prune terminal ops — `succeeded`/`failed`/`rolled-back` records older
  *      than `RETENTION_MS` or beyond the `MAX_RECORDS` cap are deleted from
@@ -21,6 +21,7 @@
  */
 
 import fs from "node:fs/promises";
+import { hostname } from "node:os";
 import path from "node:path";
 import { logger } from "@elizaos/core";
 import { readJsonFile, writeJsonAtomic } from "@elizaos/core/atomic-json";
@@ -79,6 +80,26 @@ function stripLegacyApiKey(op: RuntimeOperation): {
     op: { ...op, intent: sanitizedIntent as RuntimeOperation["intent"] },
     changed: true,
   };
+}
+
+/** Reclaim only a known dead local executor; remote, legacy and uncertain owners stay active. */
+function localExecutorExited(op: RuntimeOperation): boolean {
+  const owner = op.processOwner;
+  if (
+    !owner ||
+    owner.hostname !== hostname() ||
+    !Number.isSafeInteger(owner.pid) ||
+    owner.pid <= 0
+  )
+    return false;
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    // error-policy:J4 ESRCH proves the executor exited. Permission failures
+    // and other ambiguous states retain the operation's busy gate.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
 }
 
 function operationsDirFor(stateDir: string): string {
@@ -155,7 +176,7 @@ export class FilesystemRuntimeOperationRepository
       // Reap abandoned operations: a process died with this op still "live".
       const isLive = op.status === "pending" || op.status === "running";
       const isStale = now - op.startedAt > ABANDONED_AFTER_MS;
-      if (isLive && isStale) {
+      if (isLive && (op.processOwner ? localExecutorExited(op) : isStale)) {
         const reaped: RuntimeOperation = {
           ...op,
           status: "failed",
@@ -367,16 +388,19 @@ export class FilesystemRuntimeOperationRepository
       this.activeId = null;
       return null;
     }
-    // A process exit can leave the filesystem-backed single-flight slot in a
-    // permanently active state. Runtime operations normally finish in
-    // seconds; recover abandoned records after two minutes so a dead process
-    // cannot block every future provider switch.
-    if (Date.now() - op.startedAt > 2 * 60 * 1000) {
+    // New records carry executor identity, so a dead process releases the
+    // gate immediately while a slow live operation keeps ownership. Retain
+    // the existing age fallback only for legacy records with no owner.
+    if (
+      op.processOwner
+        ? localExecutorExited(op)
+        : Date.now() - op.startedAt > 2 * 60 * 1000
+    ) {
       await this.update(op.id, {
         status: "failed",
         finishedAt: Date.now(),
         error: {
-          code: "strategy-failed",
+          code: "abandoned",
           message: "Operation abandoned by a previous process",
         },
       });

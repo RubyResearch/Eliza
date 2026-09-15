@@ -31,6 +31,32 @@ export interface ViewInteractResult {
   error?: string;
 }
 
+/** Renderer-owned delivery identity stamped on a runtime message, not model arguments. */
+export function readViewInteractionClientId(message: {
+  content: unknown;
+}): string | undefined {
+  if (
+    !message.content ||
+    typeof message.content !== "object" ||
+    Array.isArray(message.content)
+  )
+    return undefined;
+  const metadata = (message.content as Record<string, unknown>).metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
+    return undefined;
+  const clientId = (metadata as Record<string, unknown>).viewClientId;
+  return parseViewInteractionClientId(clientId);
+}
+
+/** Routing identifier only; never an authentication or permission credential. */
+export function parseViewInteractionClientId(
+  value: unknown,
+): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value)
+    ? value
+    : undefined;
+}
+
 /** Standard capabilities that every view is expected to support. */
 export const STANDARD_CAPABILITIES = {
   /** Returns the current view state as JSON. */

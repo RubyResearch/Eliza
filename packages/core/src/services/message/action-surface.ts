@@ -25,6 +25,7 @@ import type { Memory } from "../../types/memory";
 import type { IAgentRuntime } from "../../types/runtime";
 import type { State } from "../../types/state";
 import { getUserMessageText } from "../../utils/message-text";
+import { readEnvBool } from "../../utils/read-env";
 import {
 	buildRuntimeActionLookup,
 	resolveRuntimeAction,
@@ -43,6 +44,9 @@ import {
 export type V5PlannerActionSurfaceSummary = {
 	mode: "full" | "tiered" | "relay-delivery";
 	candidateActionCount: number;
+	/** Complete per-turn authorized catalog reachable through explicit discovery. */
+	discoverableActionCount?: number;
+	discoveryToolName?: string;
 	catalogParentCount: number;
 	exposedActionCount: number;
 	tierAParents: string[];
@@ -124,23 +128,33 @@ export async function collectV5PlannerCandidateActions(args: {
 	);
 	const selectedActions: Action[] = [];
 	const seen = new Set<string>();
-	const checks = getInferenceTimer()
-		? ([] as Array<{
-				action: string;
-				gate: "connector-policy" | "validate";
-				durationMs: number;
-				outcome: "returned" | "threw";
-			}>)
-		: undefined;
-	const discoveryStartedAt = checks ? performance.now() : 0;
-	// One summary preserves every check without consuming the per-turn span
-	// budget before the actual model and delivery spans can be recorded.
+	const timer = getInferenceTimer();
+	type Gate = "connector-policy" | "validate";
+	const totals: Record<
+		Gate,
+		{ count: number; totalMs: number; maxMs: number; throws: number }
+	> = {
+		"connector-policy": { count: 0, totalMs: 0, maxMs: 0, throws: 0 },
+		validate: { count: 0, totalMs: 0, maxMs: 0, throws: 0 },
+	};
+	const checks =
+		timer && readEnvBool("ELIZA_INFERENCE_TIMING")
+			? ([] as Array<{
+					action: string;
+					gate: Gate;
+					durationMs: number;
+					outcome: "returned" | "threw";
+				}>)
+			: undefined;
+	const discoveryStartedAt = timer ? performance.now() : 0;
+	// Default diagnostics have constant cardinality. Complete per-action checks
+	// are opt-in and never become model context or change candidate admission.
 	const observeCheck = async <T>(
-		gate: "connector-policy" | "validate",
+		gate: Gate,
 		action: Action,
 		run: () => Promise<T>,
 	): Promise<T> => {
-		if (!checks) return run();
+		if (!timer) return run();
 		const startedAt = performance.now();
 		let returned = false;
 		try {
@@ -148,10 +162,16 @@ export async function collectV5PlannerCandidateActions(args: {
 			returned = true;
 			return result;
 		} finally {
-			checks.push({
+			const durationMs = performance.now() - startedAt;
+			const total = totals[gate];
+			total.count++;
+			total.totalMs += durationMs;
+			total.maxMs = Math.max(total.maxMs, durationMs);
+			if (!returned) total.throws++;
+			checks?.push({
 				action: action.name,
 				gate,
-				durationMs: performance.now() - startedAt,
+				durationMs,
 				outcome: returned ? "returned" : "threw",
 			});
 		}
@@ -413,13 +433,14 @@ export async function collectV5PlannerCandidateActions(args: {
 		}
 	}
 
-	if (checks)
+	if (timer)
 		recordInferenceSpan(
 			"actions:discovery",
 			performance.now() - discoveryStartedAt,
 			{
 				phase: args.discoverActions ? "discovery" : "planner",
-				checks: JSON.stringify(checks),
+				summary: JSON.stringify(totals),
+				...(checks ? { checks: JSON.stringify(checks) } : {}),
 			},
 		);
 	return selectedActions;

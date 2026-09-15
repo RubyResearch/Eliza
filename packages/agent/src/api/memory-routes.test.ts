@@ -14,6 +14,7 @@ import {
   MESSAGE_SOURCE_CLIENT_CHAT,
   type Memory,
   ModelType,
+  RoomHandlerQueue,
   stringToUuid,
   type UUID,
 } from "@elizaos/core";
@@ -135,6 +136,7 @@ function makeRuntime(options: RuntimeOptions = {}) {
   const runtime = {
     agentId: AGENT_ID,
     character,
+    roomHandlerQueue: new RoomHandlerQueue(),
     ensureConnection,
     getMemories,
     countMemories,
@@ -1105,6 +1107,107 @@ describe("DELETE and PATCH /api/memories/:id", () => {
     const memory = (call.json[0] as { memory: { content: { text: string } } })
       .memory;
     expect(memory.content.text).toBe("new wording");
+  });
+
+  test("PATCH waits for a conversational lease and preserves content committed before admission", async () => {
+    const target = "aaaaaaaa-0000-4000-8000-000000000017";
+    const tables = { messages: [row(target, "old wording", 7)] };
+    const { runtime, updateMemory, useModel } = makeRuntime({ tables });
+    const acquire = vi.spyOn(runtime.roomHandlerQueue, "acquire");
+    const lease = await runtime.roomHandlerQueue.acquire(DEFAULT_ROOM_ID);
+    const pending = callRoute({
+      runtime,
+      method: "PATCH",
+      path: `/api/memories/${target}`,
+      body: { text: "edited wording" },
+    });
+    try {
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+      expect(useModel).not.toHaveBeenCalled();
+      expect(updateMemory).not.toHaveBeenCalled();
+      tables.messages[0] = {
+        ...row(target, "recovered wording", 7),
+        content: { text: "recovered wording", settledField: "keep latest" },
+      };
+    } finally {
+      await lease.release();
+    }
+    const result = await pending;
+    expect(result.errors).toEqual([]);
+    expect(tables.messages[0]?.content).toEqual({
+      text: "edited wording",
+      settledField: "keep latest",
+    });
+  });
+
+  test.each(["PATCH", "DELETE"])(
+    "%s rechecks existence after waiting for a conversational lease",
+    async (method) => {
+      const target = "aaaaaaaa-0000-4000-8000-000000000018";
+      const tables = { messages: [row(target, "obsolete wording", 7)] };
+      const { runtime, deleteMemory, updateMemory, useModel } = makeRuntime({
+        tables,
+      });
+      const acquire = vi.spyOn(runtime.roomHandlerQueue, "acquire");
+      const lease = await runtime.roomHandlerQueue.acquire(DEFAULT_ROOM_ID);
+      const pending = callRoute({
+        runtime,
+        method,
+        path: `/api/memories/${target}`,
+        body: { text: "edited wording" },
+      });
+      try {
+        await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+        expect(deleteMemory).not.toHaveBeenCalled();
+        expect(updateMemory).not.toHaveBeenCalled();
+        expect(useModel).not.toHaveBeenCalled();
+        tables.messages.length = 0;
+      } finally {
+        await lease.release();
+      }
+      const result = await pending;
+      expect(result.errors).toEqual([
+        { message: "Memory not found.", status: 404 },
+      ]);
+      expect(deleteMemory).not.toHaveBeenCalled();
+      expect(updateMemory).not.toHaveBeenCalled();
+      expect(useModel).not.toHaveBeenCalled();
+    },
+  );
+
+  test("PATCH preserves private reply recovery evidence in storage but excludes it from the response", async () => {
+    const target = "aaaaaaaa-0000-4000-8000-000000000019";
+    const existing = row(target, "old wording", 7, { source: "chat" });
+    const marker = {
+      version: 1,
+      scope: "original-turn",
+      clientMessageId: "original-client-id",
+      fingerprint: "original-fingerprint",
+      replyRecoveryJson: JSON.stringify({
+        context: "private-recovery-context-fixture",
+        actionResults: [{ success: true, text: "private-effect-fixture" }],
+      }),
+    };
+    existing.content.chatIdempotency = marker;
+    const { runtime } = makeRuntime({ tables: { messages: [existing] } });
+    const call = await callRoute({
+      runtime,
+      method: "PATCH",
+      path: `/api/memories/${target}`,
+      body: { text: "new wording" },
+    });
+    expect(call.errors).toEqual([]);
+    expect(call.json[0]).toMatchObject({
+      updated: true,
+      id: target,
+      memory: { content: { text: "new wording", source: "chat" } },
+    });
+    expect(JSON.stringify(call.json)).not.toContain(
+      "private-recovery-context-fixture",
+    );
+    expect(JSON.stringify(call.json)).not.toContain("private-effect-fixture");
+    expect(existing.content.chatIdempotency).toEqual(marker);
+    expect(existing.content.text).toBe("new wording");
   });
 
   test("an embedding failure answers 500 before touching the store", async () => {

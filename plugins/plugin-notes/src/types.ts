@@ -57,4 +57,9 @@ export interface UpdateNoteInput {
   title?: string;
   body?: string;
   color?: StickyColor;
+  textEdit?: {
+    field: "title" | "body";
+    oldText: string;
+    newText: string;
+  };
 }

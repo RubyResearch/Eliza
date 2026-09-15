@@ -11,6 +11,8 @@ import type {
   Memory,
 } from "@elizaos/core";
 import { logger } from "@elizaos/core";
+import { asRecord, readViewInteractionClientId } from "@elizaos/shared";
+import LinkifyIt from "linkify-it";
 import {
   BROWSER_SERVICE_TYPE,
   type BrowserService,
@@ -172,9 +174,31 @@ function getMessageText(message: Memory | undefined): string {
   return typeof content?.text === "string" ? content.text : "";
 }
 
+const browserMessageLinks = new LinkifyIt({
+  fuzzyLink: false,
+  fuzzyEmail: false,
+  fuzzyIP: false,
+});
+
 function extractFirstUrl(value: string): string | null {
-  const match = value.match(/https?:\/\/[^\s<>"'`]+/i);
-  return match?.[0] ?? null;
+  const candidate = /https?:\/\/[^\s<>"'`]+/i.exec(value);
+  if (!candidate) return null;
+  const before = value[candidate.index - 1];
+  const after = value[candidate.index + candidate[0].length];
+  if (before && /["'`]/.test(before) && after === before) {
+    return candidate[0];
+  }
+  // Prose punctuation is not part of the destination. Keep the matched URL
+  // bytes; quoted literals and explicit url arguments bypass linkification.
+  // Never skip the first HTTP(S) candidate in favor of a later destination.
+  return (
+    browserMessageLinks
+      .match(value)
+      ?.find(
+        (link) =>
+          link.index === candidate.index && /^https?:$/i.test(link.schema),
+      )?.raw ?? candidate[0]
+  );
 }
 
 function inferBrowserSubaction(
@@ -824,6 +848,27 @@ export const browserAction: Action = {
       | undefined;
     const messageText = getMessageText(message);
     const subaction = inferBrowserSubaction(params, messageText);
+    const nativePage =
+      asRecord(message.content.metadata)?.uiBrowserSurface === "native";
+
+    if (
+      nativePage &&
+      (subaction === "autofill-login" || subaction === "wait-for-url")
+    ) {
+      return {
+        success: false,
+        transcriptVisibility: "internal",
+        text: "This operation is not supported on the requesting native Browser. No Mac browser operation was dispatched.",
+      };
+    }
+
+    if (subaction === "get" && params?.url?.trim()) {
+      return {
+        success: false,
+        transcriptVisibility: "internal",
+        text: "BROWSER action=get reads an element on the current page and does not accept url. No read was dispatched. First use action=navigate with the requested url, wait for its result, then use action=get with selector and no url.",
+      };
+    }
 
     if (subaction === "autofill-login") {
       const { executeBrowserAutofillLogin } = await import(
@@ -878,11 +923,19 @@ export const browserAction: Action = {
       runtime.getService<BrowserService>(BROWSER_SERVICE_TYPE);
 
     try {
+      const nativeClientId = nativePage
+        ? readViewInteractionClientId(message)
+        : undefined;
+      if (nativePage && (!nativeClientId || !browserService)) {
+        throw new Error(
+          "The requesting native Browser client is unavailable; cannot substitute the Mac page.",
+        );
+      }
       logger.info(
         `[BROWSER] ${command.subaction} via target=${params?.target ?? "auto"} (workspace mode=${getBrowserWorkspaceMode(process.env)})`,
       );
       const result = browserService
-        ? await browserService.execute(command, params?.target)
+        ? await browserService.execute(command, params?.target, nativeClientId)
         : await executeBrowserWorkspaceCommand(command);
       const ownsTerminalReply = browserCommandOwnsTerminalReply(command);
       if (!ownsTerminalReply) {
@@ -1061,6 +1114,7 @@ export const browserAction: Action = {
     },
     {
       name: "pattern",
+      subactions: ["wait_for_url"],
       description:
         "For action=wait_for_url: substring or /regex/ to match the tab URL (e.g. callback?code=, or /\\/done$/).",
       required: false,
@@ -1068,12 +1122,14 @@ export const browserAction: Action = {
     },
     {
       name: "pollIntervalMs",
+      subactions: ["wait_for_url"],
       description: "For action=wait_for_url: poll cadence in ms. Default 2000.",
       required: false,
       schema: { type: "number" as const },
     },
     {
       name: "tabAction",
+      subactions: ["tab", "list_tabs", "open_tab", "close_tab", "switch_tab"],
       description: "Tab operation when subaction is tab",
       required: false,
       modelOmissionSentinels: [""],
@@ -1084,6 +1140,7 @@ export const browserAction: Action = {
     },
     {
       name: "domain",
+      subactions: ["autofill_login"],
       description:
         "Required for action=autofill_login: registrable hostname, e.g. github.com.",
       required: false,
@@ -1091,12 +1148,14 @@ export const browserAction: Action = {
     },
     {
       name: "username",
+      subactions: ["autofill_login"],
       description: "For autofill-login: saved login username; omit for latest.",
       required: false,
       schema: { type: "string" as const },
     },
     {
       name: "submit",
+      subactions: ["autofill_login"],
       description: "For autofill-login: submit after filling. Default false.",
       required: false,
       schema: { type: "boolean" as const },
@@ -1110,7 +1169,7 @@ export const browserAction: Action = {
     {
       name: "url",
       description:
-        "Website URL for open or navigate, grounded in the user's requested website or observed page links. Do not invent a URL from an Eliza app navigation command; app screens use VIEWS.",
+        "Website URL for open or navigate, grounded in the user's requested website or observed page links. Not accepted by get: navigate first, then read the current page without url. Do not invent a URL from an Eliza app navigation command; app screens use VIEWS.",
       required: false,
       schema: { type: "string" as const },
     },
@@ -1129,18 +1188,21 @@ export const browserAction: Action = {
     },
     {
       name: "key",
+      subactions: ["press", "realistic_press"],
       description: "Keyboard key for press",
       required: false,
       schema: { type: "string" as const },
     },
     {
       name: "pixels",
+      subactions: ["scroll"],
       description: "Scroll distance in pixels for action=scroll. Default 240.",
       required: false,
       schema: { type: "number" as const },
     },
     {
       name: "direction",
+      subactions: ["scroll"],
       description: "Scroll direction for action=scroll. Default down.",
       required: false,
       modelOmissionSentinels: [""],
@@ -1151,6 +1213,7 @@ export const browserAction: Action = {
     },
     {
       name: "targetSelector",
+      subactions: ["drag"],
       description:
         "Drop-target selector for action=drag; source comes from selector.",
       required: false,
@@ -1164,6 +1227,7 @@ export const browserAction: Action = {
     },
     {
       name: "script",
+      subactions: ["wait"],
       description: "Script for eval",
       required: false,
       schema: { type: "string" as const },
@@ -1177,30 +1241,46 @@ export const browserAction: Action = {
     },
     {
       name: "cursorDurationMs",
+      subactions: [
+        "click",
+        "fill",
+        "type",
+        "press",
+        "realistic_click",
+        "realistic_fill",
+        "realistic_type",
+        "realistic_press",
+        "cursor_move",
+        "cursor_hide",
+      ],
       description: "Cursor animation duration (ms) for realistic-* subactions",
       required: false,
       schema: { type: "number" as const },
     },
     {
       name: "perCharDelayMs",
+      subactions: ["fill", "type", "realistic_fill", "realistic_type"],
       description: "Per-character delay for realistic-type/realistic-fill (ms)",
       required: false,
       schema: { type: "number" as const },
     },
     {
       name: "replace",
+      subactions: ["fill", "clear", "type", "realistic_fill", "realistic_type"],
       description: "For realistic-fill: replace existing input, not append.",
       required: false,
       schema: { type: "boolean" as const },
     },
     {
       name: "x",
+      subactions: ["cursor_move"],
       description: "Cursor target X (CSS pixels) for cursor-move",
       required: false,
       schema: { type: "number" as const },
     },
     {
       name: "y",
+      subactions: ["cursor_move"],
       description: "Cursor target Y (CSS pixels) for cursor-move",
       required: false,
       schema: { type: "number" as const },

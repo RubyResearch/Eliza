@@ -723,7 +723,10 @@ export function isWebSocketAuthorized(
   }
 
   const handshakeToken = extractWebSocketHandshakeToken(request, url);
-  if (!handshakeToken) return false;
+  // HTTP already authorizes this exact same-machine boundary. Configuring a
+  // credential for remote devices must not strand the local dashboard in a
+  // post-open auth timeout; strict-local-auth and cloud gates still apply.
+  if (!handshakeToken) return isTrustedLocalRequest(request);
   return tokenMatches(expected, handshakeToken);
 }
 

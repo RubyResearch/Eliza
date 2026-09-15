@@ -257,11 +257,11 @@ export function resetRotationStateForTests(): void {
  * leakage). At most `maxRotations` swaps are attempted to bound the loop even if
  * the pool mis-reports health.
  */
-export async function withAccountRotation(
-  attempt: (env?: RotationSubprocessEnv) => Promise<string>,
+export async function withAccountRotation<T>(
+  attempt: (env?: RotationSubprocessEnv) => Promise<T>,
   ctx: RotationContext,
   maxRotations = 8
-): Promise<string> {
+): Promise<T> {
   const agentType = rotationAgentTypeForBackend(ctx.backend);
   const bridge = agentType ? getCodingAccountBridge() : null;
   // No rotation possible/desired → single, un-wrapped attempt (behavior

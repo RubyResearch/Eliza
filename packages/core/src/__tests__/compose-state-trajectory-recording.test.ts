@@ -7,6 +7,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { recentMessagesProvider } from "../features/basic-capabilities/providers/recentMessages";
 import { AgentRuntime } from "../runtime";
+import { ProviderStateComposer } from "../runtime/state-composition/composer";
+import { attestDeliveryAudienceFromCanonicalRoom } from "../security";
+import type {
+	TrajectoryProviderAccessLogger,
+	TrajectoryProviderAccessParams,
+} from "../trajectory-utils";
+import type { Service } from "../types";
 import {
 	ChannelType,
 	type Character,
@@ -32,6 +39,118 @@ function makeRecordedMessage(id: string, text = "gm"): Memory {
 }
 
 describe("composeState under trajectory recording", () => {
+	it("keeps diagnostics but omits provider text when the audience changes during execution", async () => {
+		const runtime = new AgentRuntime({
+			character: { name: "Private capture" } as Character,
+			settings: { ELIZA_ADMIN_ENTITY_ID: USER_ID },
+		});
+		let participants = [USER_ID, runtime.agentId];
+		vi.spyOn(runtime, "getRoom").mockResolvedValue({
+			id: ROOM_ID,
+			agentId: runtime.agentId,
+			source: "discord",
+			type: ChannelType.DM,
+		});
+		vi.spyOn(runtime, "getParticipantsForRoom").mockImplementation(
+			async () => participants,
+		);
+		const reads: TrajectoryProviderAccessParams[] = [];
+		const logger = {
+			logProviderAccess: (read: TrajectoryProviderAccessParams) =>
+				reads.push(read),
+		} as unknown as Service & TrajectoryProviderAccessLogger;
+		const composer = new ProviderStateComposer(runtime, {
+			hasProviderSelectionHooks: () => false,
+			ensureServiceStarted: async () => logger,
+			isStopping: () => false,
+		});
+		runtime.registerProvider({
+			name: "PRIVATE",
+			disclosureGate: { require: "owner_exclusive" },
+			get: async () => {
+				participants = [...participants, OTHER_ROOM_ID];
+				return { text: "REVOKED_TEXT_CANARY" };
+			},
+		});
+		const message = makeRecordedMessage("ffffffff-ffff-ffff-ffff-ffffffffffff");
+		message.agentId = runtime.agentId;
+		await attestDeliveryAudienceFromCanonicalRoom(runtime, message);
+		await expect(
+			composer.composeState(message, ["PRIVATE"], true),
+		).rejects.toMatchObject({ code: "OWNER_PRIVATE_AUDIENCE_CHANGED" });
+		expect(reads).toHaveLength(1);
+		expect(reads[0].data.text).toBeUndefined();
+		expect(JSON.stringify(reads)).not.toContain("REVOKED_TEXT_CANARY");
+	});
+
+	it("retains complete redacted text on fresh and reused reads without logging private internal data", async () => {
+		const secret = "sk-trajectory-recording-secret-canary-1234567890"; // gitleaks:allow -- synthetic redaction canary
+		const runtime = new AgentRuntime({
+			character: { name: "Recorded provider" } as Character,
+			settings: { OPENAI_API_KEY: secret },
+		});
+		const reads: TrajectoryProviderAccessParams[] = [];
+		const logger = {
+			logProviderAccess: (read: TrajectoryProviderAccessParams) =>
+				reads.push(read),
+		} as unknown as Service & TrajectoryProviderAccessLogger;
+		const composer = new ProviderStateComposer(runtime, {
+			hasProviderSelectionHooks: () => false,
+			ensureServiceStarted: async () => logger,
+			isStopping: () => false,
+		});
+		const source = `Start ${secret}\n${"provider output ".repeat(9000)}\nEXACT_END`;
+		const get = vi.fn(async () => ({
+			text: source,
+			data: { private: "INTERNAL_DATA_CANARY" },
+		}));
+		const denied = vi.fn(async () => ({ text: "DENIED_PROVIDER_CANARY" }));
+		runtime.registerProvider({ name: "PUBLIC_TEXT", get });
+		runtime.registerProvider({
+			name: "EMPTY",
+			get: async () => ({ text: "" }),
+		});
+		runtime.registerProvider({
+			name: "PRIVATE",
+			disclosureGate: { require: "owner_exclusive" },
+			get: denied,
+		});
+		const message = makeRecordedMessage("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+		await composer.composeState(
+			message,
+			["PUBLIC_TEXT", "EMPTY", "PRIVATE"],
+			true,
+		);
+		await composer.composeState(
+			message,
+			["PUBLIC_TEXT", "EMPTY"],
+			true,
+			false,
+			["EMPTY"],
+		);
+		const textReads = reads.filter(
+			(read) => read.providerName === "PUBLIC_TEXT",
+		);
+		expect(textReads).toHaveLength(2);
+		expect(get).toHaveBeenCalledTimes(1);
+		expect(denied).not.toHaveBeenCalled();
+		const expected = runtime.redactSecrets(source);
+		expect(expected).not.toContain(secret);
+		for (const read of textReads) {
+			expect(read.data).toMatchObject({
+				text: expected,
+				textLength: expected.length,
+			});
+		}
+		expect(textReads.map((read) => read.data.cacheHit)).toEqual([false, true]);
+		expect(reads.find((read) => read.providerName === "EMPTY")?.data.text).toBe(
+			"",
+		);
+		expect(JSON.stringify(reads)).not.toContain(secret);
+		expect(JSON.stringify(reads)).not.toContain("INTERNAL_DATA_CANARY");
+		expect(JSON.stringify(reads)).not.toContain("DENIED_PROVIDER_CANARY");
+	});
+
 	it("keeps cross-room interactions suppressed for a group during every compose", async () => {
 		const runtime = new AgentRuntime({
 			character: { name: "Agent" } as Character,

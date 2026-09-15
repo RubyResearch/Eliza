@@ -34,6 +34,9 @@ import {
 } from "./subaction-dispatch";
 
 export interface SubactionPromotionOverrides {
+	/** Complete authored parameters for this operation, before discriminator
+	 * pinning. The parent and other operations keep their original contracts. */
+	parameters?: readonly ActionParameter[];
 	/** Override the virtual action's description. */
 	description?: string;
 	/**
@@ -429,7 +432,10 @@ export function promoteSubactionsToActions(
 			examples,
 			handler: buildVirtualHandler(parent, subKey),
 			validate: buildVirtualValidator(parent, subKey),
-			parameters: pinDiscriminatorForVirtual(parent.parameters, subKey),
+			parameters: pinDiscriminatorForVirtual(
+				override.parameters ?? parent.parameters,
+				subKey,
+			),
 			toolSchemaStrict: parent.toolSchemaStrict,
 			contexts: parent.contexts,
 			contextGate: parent.contextGate,

@@ -13,6 +13,7 @@ export interface RendererBuildManifest {
   indexHtmlSha256: string;
   assetCount: number;
   builtAt: string;
+  startedAt?: string;
   commit: string | null;
   variant: string | null;
   capacitorTarget: string | null;
@@ -23,6 +24,7 @@ export interface RendererBuildManifest {
 
 export interface RendererBuildManifestMeta {
   builtAt?: string;
+  startedAt?: string;
   commit?: string | null;
   variant?: string | null;
   capacitorTarget?: string | null;

@@ -20,10 +20,11 @@ export function isRealtimeVoiceForceEnabled(): boolean {
   }
 }
 
-/** Whether this build carries the production self-hosted realtime stamp. */
+/** Paired runtimes may prove realtime availability by default; explicit opt-out wins. */
 export function isRealtimeVoiceSelfHostedEnabled(): boolean {
   try {
-    return isTruthyBuildFlag(import.meta.env?.VITE_VOICE_REALTIME_SELF_HOSTED);
+    const raw = import.meta.env?.VITE_VOICE_REALTIME_SELF_HOSTED;
+    return raw === undefined || isTruthyBuildFlag(raw);
   } catch {
     // error-policy:J4 An unreadable build stamp leaves self-hosted realtime disabled.
     return false;

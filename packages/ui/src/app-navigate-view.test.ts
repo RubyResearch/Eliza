@@ -527,4 +527,14 @@ describe("App navigate-view shell handler", () => {
     expect(window.location.search).toBe("?mode=edit");
     expect(window.location.hash).toBe("#row-7");
   });
+
+  it("keeps agent view navigation inside /dev with the original query and fragment", () => {
+    window.history.replaceState(null, "", "/dev#/chat");
+    navigateBrowserPath("/notes?mode=edit#note-7");
+    expect(window.location.pathname).toBe("/dev");
+    expect(window.location.hash).toBe("#/notes?mode=edit#note-7");
+    navigateBrowserPath("/chat");
+    expect(window.location.pathname).toBe("/dev");
+    expect(window.location.hash).toBe("#/chat");
+  });
 });

@@ -191,6 +191,7 @@ function getAdvancedMemoryEnvelope(memory: Memory): AdvancedMemoryEnvelope | nul
 
 export class AdvancedMemoryStorageService extends Service implements MemoryStorageProvider {
   static serviceType = "memoryStorage" as const;
+  readonly supportsIdempotentWrites = true;
 
   capabilityDescription = "Persistent advanced-memory storage backed by SQL memory tables";
 
@@ -366,6 +367,28 @@ export class AdvancedMemoryStorageService extends Service implements MemoryStora
   }
 
   async storeLongTermMemory(memory: LongTermMemoryInput): Promise<LongTermMemoryRecord> {
+    if (memory.agentId !== this.runtime.agentId) {
+      throw new ElizaError("Long-term memory belongs to a different agent", {
+        code: "LONG_TERM_MEMORY_ID_CONFLICT",
+      });
+    }
+    if (memory.id) {
+      const existing = await this.runtime.getMemoryById(memory.id);
+      if (existing) {
+        const parsed = this.parseLongTermMemory(existing);
+        const allowedGroup = await this.getIdentityGroup(memory.entityId);
+        if (
+          !parsed ||
+          existing.agentId !== this.runtime.agentId ||
+          !allowedGroup.has(parsed.entityId)
+        ) {
+          throw new ElizaError("Long-term memory ID belongs to a different record", {
+            code: "LONG_TERM_MEMORY_ID_CONFLICT",
+          });
+        }
+        return parsed;
+      }
+    }
     const now = new Date();
     const anchorEntityId = await this.getAnchorEntityId(memory.entityId);
     const worldId = await this.ensureMemoryWorld();
@@ -387,6 +410,7 @@ export class AdvancedMemoryStorageService extends Service implements MemoryStora
     }
     const id = await this.runtime.createMemory(
       {
+        ...(memory.id ? { id: memory.id } : {}),
         agentId: this.runtime.agentId,
         entityId: anchorEntityId,
         roomId,
@@ -408,8 +432,16 @@ export class AdvancedMemoryStorageService extends Service implements MemoryStora
 
     const stored = await this.runtime.getMemoryById(id);
     const parsed = stored ? this.parseLongTermMemory(stored) : null;
-    if (!parsed) {
+    if (!parsed || stored?.agentId !== this.runtime.agentId) {
       throw new Error("Failed to persist long-term memory");
+    }
+    // The insert is ON CONFLICT DO NOTHING: validate ownership again if a
+    // concurrent writer won the supplied ID, rather than exposing its row.
+    const allowedGroup = await this.getIdentityGroup(memory.entityId);
+    if (!allowedGroup.has(parsed.entityId)) {
+      throw new ElizaError("Long-term memory ID belongs to a different record", {
+        code: "LONG_TERM_MEMORY_ID_CONFLICT",
+      });
     }
     return parsed;
   }

@@ -168,6 +168,7 @@ export const commitmentExtractionEvaluator: Evaluator<
   Record<string, never>
 > = {
   name: "commitment_extraction",
+  inputScope: "current_message",
   description:
     "Extracts concrete first-person promises from the owner's message into the durable commitment ledger.",
   priority: 120,
@@ -199,6 +200,8 @@ Rules:
 - "dueAtIso" is an ISO-8601 timestamp only when the promise names an explicit date; otherwise omit it.
 - "confidence" in [0,1]: how certain you are this is a firm commitment.
 - Return {"commitments": []} when the message contains no firm promise.
+
+Source message timestamp: ${new Date(message.createdAt ?? Date.now()).toISOString()}
 
 Owner message:
 ${message.content.text ?? ""}`;

@@ -200,6 +200,50 @@ describe("ProviderCachePlan", () => {
 		expect(empty.providerOptions.eliza).not.toHaveProperty("conversationId");
 	});
 
+	it("scopes Cerebras routing by conversation across prefix changes without changing other providers", () => {
+		const first = buildProviderCachePlan({
+			prefixHash: "shared-instructions",
+			conversationId: "private-room-1",
+		});
+		const same = buildProviderCachePlan({
+			prefixHash: "shared-instructions",
+			conversationId: "private-room-1",
+			segmentHashes: ["new-turn"],
+		});
+		const otherRoom = buildProviderCachePlan({
+			prefixHash: "shared-instructions",
+			conversationId: "private-room-2",
+		});
+		const otherPrefix = buildProviderCachePlan({
+			prefixHash: "different-instructions",
+			conversationId: "private-room-1",
+		});
+		const key = (first.providerOptions.cerebras as { promptCacheKey: string })
+			.promptCacheKey;
+		expect(key).toMatch(/^eliza-workflow-v1:[0-9a-f]{64}$/);
+		expect(key).not.toContain("private-room-1");
+		expect(same.providerOptions.cerebras).toEqual(
+			first.providerOptions.cerebras,
+		);
+		expect(otherRoom.providerOptions.cerebras).not.toEqual(
+			first.providerOptions.cerebras,
+		);
+		expect(otherPrefix.providerOptions.cerebras).toEqual(
+			first.providerOptions.cerebras,
+		);
+		expect(first.providerOptions.cerebras).toEqual({
+			promptCacheKey: key,
+			prompt_cache_key: key,
+		});
+		const unscoped = buildProviderCachePlan({
+			prefixHash: "shared-instructions",
+		});
+		for (const name of ["openai", "openrouter", "anthropic", "gateway"])
+			expect(first.providerOptions[name]).toEqual(
+				unscoped.providerOptions[name],
+			);
+	});
+
 	it("forwards stable promptSegments on providerOptions.eliza for local backends", () => {
 		const plan = buildProviderCachePlan({
 			prefixHash: "abc123",

@@ -7,6 +7,7 @@
 import { asRecord } from "@elizaos/shared";
 import { readSettingsHashSectionId } from "../components/settings/settings-route";
 import { getWindowNavigationPath, type Tab } from "../navigation";
+import { getClientBrowserSurface } from "../platform/browser-surface";
 
 const CONTEXT_ROUTING_METADATA_KEY = "__responseContext";
 
@@ -228,6 +229,7 @@ export function buildChatViewMetadata(
     ...(subview ? { uiViewSubview: subview } : {}),
     uiTab: tab,
     uiViewPath: normalizedViewPath,
+    uiBrowserSurface: getClientBrowserSurface(),
     uiViewCapabilities: viewRouting.capabilities,
     uiTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     [CONTEXT_ROUTING_METADATA_KEY]: {

@@ -29,6 +29,21 @@ afterEach(() => {
 });
 
 describe("buildRuntimeSettingsProjection", () => {
+  it("honors an explicit launch-time brain selection without changing embeddings", () => {
+    const settings = buildRuntimeSettingsProjection({} as ElizaConfig, {
+      env: { ELIZA_BRAIN_PROVIDER: " cli-inference " },
+      brainProviderName: "openai",
+      embeddingProviderName: "local-inference",
+    });
+    expect(settings.ELIZA_BRAIN_PROVIDER).toBe("cli-inference");
+    expect(settings.ELIZA_EMBEDDING_PROVIDER).toBe("local-inference");
+    expect(
+      buildRuntimeSettingsProjection({} as ElizaConfig, {
+        env: { ELIZA_BRAIN_PROVIDER: " " },
+        brainProviderName: "openai",
+      }).ELIZA_BRAIN_PROVIDER,
+    ).toBe("openai");
+  });
   it("cannot restore gateway-owned credentials from legacy or env config", () => {
     const config = {
       channels: {

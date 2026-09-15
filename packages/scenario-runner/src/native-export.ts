@@ -927,9 +927,7 @@ function inferLifeOpsTaskType(
   kind: string | undefined,
   model: RecordedModelCall | undefined,
 ): string | null {
-  const normalized = normalizeTaskToken(
-    `${kind ?? ""}\n${recordedModelSearchText(model)}`,
-  );
+  const normalized = normalizeTaskToken(kind ?? "");
   for (const task of LIFEOPS_NATIVE_TASKS) {
     if (normalized.includes(task)) return task;
   }
@@ -971,9 +969,7 @@ function inferOrchestratorTaskType(
   kind: string | undefined,
   model: RecordedModelCall | undefined,
 ): string | null {
-  const normalized = normalizeTaskToken(
-    `${kind ?? ""}\n${recordedModelSearchText(model)}`,
-  );
+  const normalized = normalizeTaskToken(kind ?? "");
   for (const task of ORCHESTRATOR_NATIVE_TASKS) {
     if (normalized.includes(task)) return task;
   }
@@ -1010,6 +1006,30 @@ function stageKindToTaskType(
   modelType: string | undefined,
   model?: RecordedModelCall,
 ): string {
+  // The call's declared purpose owns its training bucket. Tool catalog text,
+  // user quotations, and generated answers cannot redefine that purpose.
+  const declared = normalizeTaskToken(kind ?? "");
+  if (
+    LIFEOPS_NATIVE_TASK_SET.has(declared) ||
+    ORCHESTRATOR_NATIVE_TASK_SET.has(declared)
+  ) {
+    return declared;
+  }
+  if (
+    declared === "message_handler" ||
+    declared === "should_respond" ||
+    modelType === "RESPONSE_HANDLER"
+  ) {
+    return "should_respond";
+  }
+  if (
+    declared === "planner" ||
+    declared === "action_planner" ||
+    modelType === "ACTION_PLANNER"
+  )
+    return "action_planner";
+  if (declared === "response") return "response";
+
   const orchestratorTask = inferOrchestratorTaskType(kind, model);
   if (orchestratorTask) return orchestratorTask;
 

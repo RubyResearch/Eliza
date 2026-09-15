@@ -6,7 +6,13 @@
 // pickers, inline forms). Mirrors the story inputs in MessageContent.stories so
 // the story-gate screenshots have a fast unit guard that they render at all.
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import type * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationMessage } from "../../api/client-types-chat";
@@ -194,6 +200,50 @@ describe("MessageContent non-bytes interaction rendering", () => {
 
     fireEvent.click(cta);
     expect(setTab).toHaveBeenCalledWith("settings");
+  });
+
+  it("offers reply regeneration for a durable terminal failure and holds repeated clicks", async () => {
+    let finish!: () => void;
+    const handleChatRetry = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const appValue = {
+      t: (key: string) => key,
+      sendActionMessage: vi.fn(),
+      handleChatRetry,
+    } as never;
+    __setAppValueForTests(appValue);
+    render(
+      <AppContext.Provider value={appValue}>
+        <MessageContent
+          message={assistant({
+            id: "saved-failure",
+            text: "Reply failed after saving the note.",
+            failureKind: "provider_issue",
+            replyRecoveryAvailable: true,
+            terminalFailure: {
+              kind: "provider_issue",
+              transient: false,
+              message: "Reply failed.",
+            },
+          })}
+        />
+      </AppContext.Provider>,
+    );
+    const control = screen.getByRole("button", { name: "Regenerate reply" });
+    fireEvent.click(control);
+    fireEvent.click(control);
+    expect(handleChatRetry).toHaveBeenCalledTimes(1);
+    expect(handleChatRetry).toHaveBeenCalledWith("saved-failure");
+    expect((control as HTMLButtonElement).disabled).toBe(true);
+    expect(control.textContent).toContain("Regenerating reply…");
+    await act(async () => {
+      finish();
+    });
+    expect((control as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("renders Retry for planner exhaustion and invokes the canonical retry handler", () => {

@@ -20,6 +20,27 @@ afterEach(() => {
 });
 
 describe("useNavigationPathSync — app-shell registry reactivity", () => {
+  it("reconciles developer app navigation and canonicalizes Home inside /dev", () => {
+    registerAppShellPage({
+      id: "notes",
+      pluginId: "test-notes",
+      label: "Notes",
+      path: "/notes",
+      loader: async () => ({ default: () => null }),
+    });
+    window.history.replaceState(null, "", "/dev#/home");
+    const setTabRaw = vi.fn();
+    renderHook(() => useNavigationPathSync({ tab: "views" as Tab, setTabRaw }));
+    expect(window.location.pathname).toBe("/dev");
+    expect(window.location.hash).toBe("#/chat");
+    expect(setTabRaw).toHaveBeenCalledWith("chat");
+    act(() => {
+      window.history.replaceState(null, "", "/dev#/notes");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(setTabRaw).toHaveBeenLastCalledWith("notes");
+  });
+
   it("replaces /home with the canonical chat-backed Home canvas", () => {
     window.history.replaceState(null, "", "/home");
     const setTabRaw = vi.fn();

@@ -450,19 +450,13 @@ function describeRealtimeVoiceFailure(
   surfacedError: string | null,
 ): string {
   if (outcome.kind === "error") {
-    if (outcome.error.kind === "consent") {
-      return "Cartesia voice could not confirm microphone consent. Tap Talk to retry.";
-    }
-    if (outcome.error.kind === "mint") {
-      return "Cartesia voice could not start a session. Tap Talk to retry.";
-    }
     return outcome.error.message;
   }
   if (surfacedError) return surfacedError;
   if (outcome.kind === "fallback-to-batch") {
     if (outcome.message) return outcome.message;
     if (outcome.reason === "consent") {
-      return "Cartesia voice could not confirm microphone consent. Tap Talk to retry.";
+      return "Voice setup couldn't complete. Tap the mic to try again.";
     }
     if (outcome.reason === "mint") {
       return "Cartesia voice could not start a session. Tap Talk to retry.";
@@ -627,7 +621,11 @@ export function useShellController(): ShellController {
       // the sole reader and deduper for saved history. Reconcile again when
       // playback actually starts so the saved assistant bubble appears with
       // its first audible frame instead of waiting for the terminal usage event.
+      // Expiry/recovery may replace the socket before those terminal frames.
+      // A newly authenticated ready boundary reloads saved history too; it must
+      // never replay the prior utterance or its potentially committed actions.
       if (
+        event.t !== "ready" &&
         event.t !== "stt_final" &&
         event.t !== "speaking_start" &&
         event.t !== "usage"
@@ -638,9 +636,11 @@ export function useShellController(): ShellController {
       dispatchConversationResync({
         conversationId,
         reason:
-          event.t === "stt_final" || event.t === "speaking_start"
-            ? "voice-turn-progress"
-            : "voice-turn-complete",
+          event.t === "ready"
+            ? "connection-recovered"
+            : event.t === "stt_final" || event.t === "speaking_start"
+              ? "voice-turn-progress"
+              : "voice-turn-complete",
       });
     },
     [],
@@ -681,18 +681,19 @@ export function useShellController(): ShellController {
     React.useState(!realtimeVoiceEnabled);
   const realtimeVoiceSelected =
     realtimeVoiceEnabled && !realtimeVoiceBatchFallback;
+  const realtimeVoiceWantedRef = React.useRef(false);
   // During an identity handoff the availability probe disarms before the old
   // client finishes teardown. Keep batch media out until that prior owner has
   // actually released the microphone/audio path.
   const realtimeVoiceOwnsMedia =
     realtimeVoiceBuildEnabled &&
     (realtimeVoiceSelected ||
+      realtimeVoiceWantedRef.current ||
       realtimeVoice.active ||
       realtimeVoice.connecting ||
       realtimeVoice.agentSpeaking);
   const realtimeVoiceRef = React.useRef(realtimeVoice);
   realtimeVoiceRef.current = realtimeVoice;
-  const realtimeVoiceWantedRef = React.useRef(false);
   const realtimeVoiceWasEnabledRef = React.useRef(realtimeVoiceEnabled);
   // True once the CURRENT wanted session has reached live; distinguishes a
   // mid-session death (parked by the effect below startRealtimeVoice) from an
@@ -1078,6 +1079,7 @@ export function useShellController(): ShellController {
         cached.interrupted === (message.interrupted || undefined) &&
         cached.failureKind === message.failureKind &&
         cached.terminalFailure === message.terminalFailure &&
+        cached.replyRecoveryAvailable === message.replyRecoveryAvailable &&
         (cached.reasoning || undefined) === (message.reasoning || undefined) &&
         cached.secretRequest === message.secretRequest &&
         cached.capabilityHandoff === message.capabilityHandoff &&
@@ -1100,6 +1102,7 @@ export function useShellController(): ShellController {
         ...(message.source ? { source: message.source } : {}),
         failureKind: message.failureKind,
         terminalFailure: message.terminalFailure,
+        replyRecoveryAvailable: message.replyRecoveryAvailable,
         ...(message.reasoning ? { reasoning: message.reasoning } : {}),
         ...(message.toolEvents?.length
           ? { toolEvents: message.toolEvents }
@@ -2145,11 +2148,9 @@ export function useShellController(): ShellController {
   };
   stopRealtimeVoiceRef.current = stopRealtimeVoice;
 
-  // Availability is conversation-scoped. If the active conversation stops
-  // matching the local gateway, latch this Talk session onto batch ASR/TTS.
-  // A later positive probe must not steal a batch turn between capture, text,
-  // and playback; realtime becomes selectable again only after Talk is off and
-  // every batch owner is idle.
+  // Identity loss ends the current realtime intent; it must not silently
+  // reopen the microphone through a different transcription provider. A
+  // recovered identity becomes selectable only when all media owners are idle.
   React.useEffect(() => {
     const wasEnabled = realtimeVoiceWasEnabledRef.current;
     realtimeVoiceWasEnabledRef.current = realtimeVoiceEnabled;
@@ -2162,11 +2163,12 @@ export function useShellController(): ShellController {
       realtimeVoiceWantedRef.current = false;
       realtimeVoiceWasActiveRef.current = false;
       setRealtimeVoiceBatchFallback(true);
-      setRealtimeVoiceBoundaryError(null);
       if (shouldContinue) {
-        setHandsFree(true);
-        handsFreeRef.current = true;
-        setIsOpen(true);
+        stopRealtimeVoice();
+        const message =
+          "Cartesia voice connection changed. Tap Talk to reconnect.";
+        setRealtimeVoiceBoundaryError(message);
+        setActionNotice(message, "error", 6000);
       }
     }
 
@@ -2196,6 +2198,8 @@ export function useShellController(): ShellController {
     realtimeVoiceEnabled,
     recording,
     sttPending,
+    stopRealtimeVoice,
+    setActionNotice,
     voiceOutput.speaking,
   ]);
 
@@ -2723,15 +2727,7 @@ export function useShellController(): ShellController {
     realtimeVoiceOwnsMedia &&
     realtimeVoice.error
   ) {
-    if (realtimeVoice.error.kind === "consent") {
-      realtimeVoiceErrorMessage =
-        "Cartesia voice could not confirm microphone consent. Tap Talk to retry.";
-    } else if (realtimeVoice.error.kind === "mint") {
-      realtimeVoiceErrorMessage =
-        "Cartesia voice could not start a session. Tap Talk to retry.";
-    } else {
-      realtimeVoiceErrorMessage = realtimeVoice.error.message;
-    }
+    realtimeVoiceErrorMessage = realtimeVoice.error.message;
   }
   const unlockVoiceAudio = React.useCallback(() => {
     if (

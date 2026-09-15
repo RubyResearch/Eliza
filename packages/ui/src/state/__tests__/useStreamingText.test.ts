@@ -82,6 +82,34 @@ describe("applyStreamingTextModification", () => {
     expect(harness.current).toBe(initial);
   });
 
+  it("binds an unchanged terminal reply to its recorded user turn without inventing a durable reply ID", () => {
+    const initial = [assistantMsg("temp-reply", "Try again.")];
+    const harness = makeSetter(initial);
+    const modification = {
+      messageId: "temp-reply",
+      mode: "complete" as const,
+      fullText: "Try again.",
+      assistantEphemeral: true,
+      replyToMessageId: "server-user",
+    };
+    applyStreamingTextModification(harness.setter, modification);
+    expect(harness.current[0]).toMatchObject({
+      id: "temp-reply",
+      replyToMessageId: "server-user",
+      assistantEphemeral: true,
+    });
+    const linked = harness.current;
+    applyStreamingTextModification(harness.setter, modification);
+    expect(harness.current).toBe(linked);
+    applyStreamingTextModification(harness.setter, {
+      messageId: "temp-reply",
+      mode: "complete",
+      fullText: "Try again.",
+      assistantEphemeral: true,
+    });
+    expect(harness.current).toBe(linked);
+  });
+
   it("complete updates text and stamps failureKind together", () => {
     const initial = [assistantMsg("a1", "partial")];
     const harness = makeSetter(initial);

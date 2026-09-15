@@ -230,6 +230,9 @@ export function shellToChatMessageData(m: ShellMessage): ChatMessageData {
     ...(m.interrupted ? { interrupted: true } : {}),
     ...(m.failureKind ? { failureKind: m.failureKind } : {}),
     ...(m.terminalFailure ? { terminalFailure: m.terminalFailure } : {}),
+    ...(m.replyRecoveryAvailable === true
+      ? { replyRecoveryAvailable: true }
+      : {}),
     ...(m.attachments ? { attachments: m.attachments } : {}),
     ...(m.secretRequest ? { secretRequest: m.secretRequest } : {}),
     ...(m.capabilityHandoff ? { capabilityHandoff: m.capabilityHandoff } : {}),

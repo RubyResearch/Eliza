@@ -52,9 +52,13 @@ function observeHttpDiagnostic<T>(observe: () => T): T | undefined {
   }
 }
 
-export function createOpenAIClient(runtime: IAgentRuntime): OpenAIProvider {
-  const baseURL = getBaseURL(runtime);
-  const apiKey = getApiKey(runtime) || (isProxyMode(runtime) ? PROXY_API_KEY : undefined);
+export function createOpenAIClient(
+  runtime: IAgentRuntime,
+  endpoint?: { baseURL: string; apiKey: string; provider: "openrouter" }
+): OpenAIProvider {
+  const baseURL = endpoint?.baseURL ?? getBaseURL(runtime);
+  const apiKey =
+    endpoint?.apiKey ?? (getApiKey(runtime) || (isProxyMode(runtime) ? PROXY_API_KEY : undefined));
 
   if (!apiKey) {
     throw new Error(
@@ -101,6 +105,19 @@ export function createOpenAIClient(runtime: IAgentRuntime): OpenAIProvider {
     // Never log request bodies, credentials, query strings, or response text.
     fetch: Object.assign(
       async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        // OpenRouter routes only to backends honoring the full tool/schema
+        // contract. Its unified reasoning field differs from Cerebras's.
+        if (endpoint?.provider === "openrouter" && typeof init?.body === "string") {
+          const body = JSON.parse(init.body) as Record<string, unknown>;
+          const reasoning = body.reasoning_effort;
+          delete body.reasoning_effort;
+          delete body.prompt_cache_retention;
+          body.provider = { require_parameters: true, data_collection: "deny", sort: "latency" };
+          if (typeof reasoning === "string") {
+            body.reasoning = reasoning === "none" ? { enabled: false } : { effort: reasoning };
+          }
+          init = { ...init, body: JSON.stringify(body) };
+        }
         const attempt = ++httpAttempt;
         const startedAt = Date.now();
         const startedMonotonic = performance.now();

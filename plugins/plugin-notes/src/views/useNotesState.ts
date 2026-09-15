@@ -111,13 +111,21 @@ export function useNotesState(): NotesState {
     refreshAbortController.current = abortController;
     if (mounted.current && authorityRef.current === requestAuthority) {
       setLoadingState({ authority: requestAuthority, value: true });
-      setErrorState(null);
     }
     try {
       acceptSnapshot(
         await fetchNotesState(abortController.signal),
         requestAuthority,
       );
+      if (
+        mounted.current &&
+        authorityRef.current === requestAuthority &&
+        generation === refreshGeneration.current
+      ) {
+        // Keep a cached snapshot's sync warning until a newer request succeeds;
+        // starting a retry does not establish that the connection recovered.
+        setErrorState(null);
+      }
     } catch (cause) {
       if (abortController.signal.aborted) return;
       // error-policy:J4 render transport failure distinctly from empty state.

@@ -360,3 +360,11 @@ The fetch boundary applies standard RequestInit overrides and observes caller
 cancellation; cancellation cannot undo native side effects already dispatched.
 Native stream failures propagate without replay. Buffered compatibility is
 selected only before dispatch when streaming events are unavailable.
+
+Chat JSONL rendering may ignore only redundant closing braces following a complete valid patch object. Do not synthesize missing values, repair truncated input, consume trailing prose, or alter stored message/trajectory bytes. The same parser and existing prototype-pollution checks serve all chat surfaces.
+
+The local developer tab relay reads synchronous, conversation-owned transcript snapshots before dispatch (to track synchronously retired rows) and flushes final rows before settling the send. Relayed temporary and rekeyed rows use the canonical conversation overlay registry so history refresh preserves unsaved failures and honors later removals. Never infer ownership from the current React render or copy another conversation's rows during a switch.
+
+Terminal streaming replies retain the server-confirmed userMessageId as replyToMessageId even when text is already fully streamed or the assistant reply is ephemeral. Preserve ephemeral retirement and non-persistence policy; never infer request ownership from adjacent rows or invent a durable assistant ID to attach telemetry.
+
+When merging ephemeral reply overlays, an explicit replyToMessageId keeps the row after its matching user request despite client/server timestamp skew. Preserve original timestamps, all rows, ownership fences and normal ephemeral removals; missing links do not authorize pairing with an unrelated request.

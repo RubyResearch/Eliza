@@ -13,8 +13,10 @@
  * the real mint fetch + the real getUserMedia denial, not simulated.
  */
 
+import { Capacitor } from "@capacitor/core";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { client } from "../api/client";
 
 import {
   deniedGetUserMedia,
@@ -194,6 +196,43 @@ describe("useRealtimeVoiceSession", () => {
       expect.objectContaining({ sessionId: "sess-1" }),
     );
     await expect(startPromise).resolves.toEqual({ kind: "live" });
+  });
+
+  it("carries the native Browser implementation in voice view context", async () => {
+    const native = vi
+      .spyOn(Capacitor, "isNativePlatform")
+      .mockReturnValue(true);
+    const { options, ws, micCtx } = makeOptions();
+    const { result, unmount } = renderHook(() =>
+      useRealtimeVoiceSession(options),
+    );
+    try {
+      const start = beginStart(result);
+      await flushAsync();
+      await act(async () => {
+        ws.last().emitOpen();
+        await flushAsync();
+        ws.last().emitControl({
+          t: "ready",
+          sessionId: "sess-1",
+          traceId: "native-context",
+          uiContext: true,
+        });
+        await flushAsync();
+      });
+      await expect(start).resolves.toEqual({ kind: "live" });
+      micCtx.scriptNode?.feed(new Float32Array(1600).fill(0.25));
+      expect(ws.last().sentControls()).toContainEqual({
+        t: "ui_context",
+        context: expect.objectContaining({
+          uiBrowserSurface: "native",
+          uiClientId: client.clientId,
+        }),
+      });
+    } finally {
+      unmount();
+      native.mockRestore();
+    }
   });
 
   it("full flow: start → listening → partial → final → speaking → barge-in → stop through the REAL client", async () => {
@@ -627,8 +666,10 @@ describe("useRealtimeVoiceSession", () => {
     expect(result.current.active).toBe(false);
     // This interaction falls back, while the next user tap may retry realtime.
     expect(result.current.available).toBe(true);
-    expect(result.current.error?.actionable).toBe(false);
-    expect(result.current.error?.message).toMatch(/standard voice/i);
+    expect(result.current.error?.actionable).toBe(true);
+    expect(result.current.error?.message).toBe(
+      "Voice setup couldn't complete. Tap the mic to try again.",
+    );
     expect(startOutcome).toEqual({
       kind: "fallback-to-batch",
       reason: "consent",
@@ -1004,10 +1045,17 @@ describe("useRealtimeVoiceSession", () => {
 });
 
 describe("isRealtimeVoiceFlagEnabled", () => {
-  it("defaults to off in non-cloud builds (batch path is the default)", () => {
-    // In the test env both VITE_VOICE_REALTIME_WS and
-    // VITE_ELIZA_DESKTOP_RUNTIME_MODE are unset → the flag reads false.
-    expect(isRealtimeVoiceFlagEnabled()).toBe(false);
+  it("makes realtime available without build flags while preserving explicit opt-out", () => {
+    try {
+      vi.stubEnv("VITE_VOICE_REALTIME_WS", undefined);
+      expect(isRealtimeVoiceFlagEnabled()).toBe(true);
+      vi.stubEnv("VITE_VOICE_REALTIME_WS", "0");
+      expect(isRealtimeVoiceFlagEnabled()).toBe(false);
+      vi.stubEnv("VITE_VOICE_REALTIME_WS", "invalid");
+      expect(isRealtimeVoiceFlagEnabled()).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each(["1", "true", "TRUE", " yes ", "on"])(

@@ -28,6 +28,19 @@ export const currentViewProvider: Provider = {
 		runtime: IAgentRuntime,
 		message: Memory,
 	): Promise<ProviderResult> => {
+		// UI_CONTEXT already renders this turn's registry-enriched client view.
+		// A process-global snapshot may belong to another connected renderer;
+		// do not duplicate or contradict the per-message source of truth.
+		const metadata = message.content.metadata;
+		if (
+			metadata &&
+			typeof metadata === "object" &&
+			"uiView" in metadata &&
+			typeof metadata.uiView === "string" &&
+			metadata.uiView.trim()
+		) {
+			return EMPTY;
+		}
 		try {
 			const current = await createViewsClient().getCurrentView();
 

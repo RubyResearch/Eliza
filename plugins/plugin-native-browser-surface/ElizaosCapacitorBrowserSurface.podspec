@@ -11,6 +11,7 @@ Pod::Spec.new do |s|
   s.authors = { 'elizaOS' => 'dev@elizaos.ai' }
   s.source = { :git => 'https://github.com/elizaOS/eliza.git', :tag => s.version.to_s }
   s.source_files = 'ios/Sources/**/*.{swift,h,m}'
+  s.resource_bundles = { 'ElizaBrowserSurface' => ['resources/read-page.js'] }
   s.ios.deployment_target = '15.0'
   s.dependency 'Capacitor'
   s.swift_version = '5.9'

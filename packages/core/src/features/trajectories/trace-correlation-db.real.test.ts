@@ -539,6 +539,52 @@ describe("trajectories trace_id join key (real PGLite)", () => {
 		expect(rows[0]?.trace_id).toBe(traceId);
 	});
 
+	it("filters exact room and source before pagination through the read route", async () => {
+		const roomId = "room'_%filter";
+		const id = await service.startTrajectory(
+			"00000000-0000-4000-8000-000000000001",
+			{
+				source: "room-filter-chat",
+				metadata: { roomId },
+			},
+		);
+		await service.startTrajectory("00000000-0000-4000-8000-000000000001", {
+			source: "room-filter-chat",
+			metadata: { roomId: "other-room", note: roomId },
+		});
+		await service.startTrajectory("00000000-0000-4000-8000-000000000001", {
+			source: "background_memory",
+			metadata: { roomId },
+		});
+		let body = "";
+		const res = {
+			setHeader: () => {},
+			end: (text: string) => {
+				body = text;
+			},
+		} as unknown as ServerResponse;
+		const handled = await tryHandleTrajectoryReadRoutes({
+			method: "GET",
+			pathname: "/api/trajectories",
+			url: new URL(
+				`http://localhost/api/trajectories?roomId=${encodeURIComponent(roomId)}&source=room-filter-chat&limit=1`,
+			),
+			runtime: {
+				...serviceRuntime,
+				getService: () => service,
+				getServicesByType: () => [service],
+			} as unknown as IAgentRuntime,
+			res,
+		});
+		expect(handled).toBe(true);
+		expect(res.statusCode).toBe(200);
+		const result = JSON.parse(body);
+		expect(result.total).toBe(1);
+		expect(result.trajectories.map((row: { id: string }) => row.id)).toEqual([
+			id,
+		]);
+	});
+
 	it("round-trips terminated status through the public list filter", async () => {
 		const trajectoryId = await service.startTrajectory(
 			"00000000-0000-4000-8000-000000000001",

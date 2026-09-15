@@ -46,6 +46,28 @@ const CLAIM_EVALUATOR_NAME = "core.simple_completed_side_effect_claim";
 const EMPTY_CLAIM_EVALUATOR_NAME = "core.simple_empty_tracked_state_claim";
 const DIRECT_ROUTE_EVALUATOR_NAME = "core.direct_registered_capability_request";
 
+describe("no-change reply validation", () => {
+	it.each([
+		"Understood. I will not perform that edit. No notes or saved settings were changed.",
+		"No saved notes and existing records have been edited.",
+	])(
+		"does not turn a no-change acknowledgement into an empty-list claim: %s",
+		(reply) => {
+			expect(replyClaimsEmptyTrackedWorkState(reply)).toBe(false);
+			expect(
+				evaluatePlannedReplyEgress({ reply, actionResults: [], actions: [] }),
+			).toEqual({ verdict: "allow" });
+			for (const separator of [". ", "; ", ", but "]) {
+				expect(
+					replyClaimsEmptyTrackedWorkState(
+						`${reply.replace(/\.$/, "")}${separator}no tasks saved today.`,
+					),
+				).toBe(true);
+			}
+		},
+	);
+});
+
 // The byte-exact fabricated empty-day reply from #17058 run 729acaf2: a recap
 // ask routed contexts=["simple"] and invented an absent day with no read tool.
 const FABRICATED_EMPTY_DAY_REPLY =
@@ -342,6 +364,27 @@ describe("replyClaimsCompletedSideEffect", () => {
 });
 
 describe(CLAIM_EVALUATOR_NAME, () => {
+	it.each(["none", "non_applied"] as const)(
+		"keeps explicit %s claims in reply-only validation",
+		async (status) => {
+			for (const reply of [
+				"Cancelled. The Safety fixture history QA note won't be saved unless you send a fresh create request.",
+				"Saved your note.",
+			]) {
+				const handler = simpleReplyHandler(reply);
+				handler.plan.replyEffectStatus = status;
+				expect(await getClaimEvaluator().shouldRun(makeContext(handler))).toBe(
+					false,
+				);
+				// A terminal no-effect decision cannot authorize tools to make its prose
+				// true. Contradictory wording still fails egress and needs reply repair.
+				expect(
+					evaluatePlannedReplyEgress({ reply, actionResults: [], actions: [] }),
+				).toMatchObject({ verdict: "reject", kind: "completed_side_effect" });
+			}
+		},
+	);
+
 	it.each([
 		"Your reminder is ready for tomorrow.",
 		"You’ll get a nudge tomorrow at 9.",
@@ -387,6 +430,32 @@ describe(CLAIM_EVALUATOR_NAME, () => {
 		const nonSimple = simpleReplyHandler("Done — I've set two reminders.");
 		nonSimple.plan.contexts = ["simple", "general"];
 		expect(await evaluator.shouldRun(makeContext(nonSimple))).toBe(false);
+	});
+
+	it("preserves the real historical-quotation reply without authorizing a new effect", async () => {
+		// Full-app run step-1789282849432-005r4s: the correct Stage-1 reply
+		// was cleared, causing two restoration calls and failed reply recovery.
+		const reply =
+			'No, the fictional rule is not active now: it was revoked, and the assistant acknowledged that revocation. The original assistant sentence was exactly: "I set it: for any future note, I would show its title and body before saving." That was the stated setup of the fictional rule, not a note action. The later revocation ended it. This explanation only; no real rule was established, and nothing was saved, edited, navigated, or turned on.';
+		const handler = simpleReplyHandler(reply);
+		handler.plan.replyEffectStatus = "none";
+		const evaluator = getClaimEvaluator();
+		expect(await evaluator.shouldRun(makeContext(handler))).toBe(false);
+		expect(handler.plan.reply).toBe(reply);
+		expect(
+			evaluatePlannedReplyEgress({ reply, actionResults: [], actions: [] }),
+		).toEqual({ verdict: "allow" });
+
+		// Semantic applied status remains authoritative even with quoted prose.
+		handler.plan.replyEffectStatus = "applied";
+		expect(await evaluator.shouldRun(makeContext(handler))).toBe(true);
+		expect(
+			evaluatePlannedReplyEgress({
+				reply: `${reply} I saved your note.`,
+				actionResults: [],
+				actions: [],
+			}),
+		).toMatchObject({ verdict: "reject", kind: "completed_side_effect" });
 	});
 
 	// Ordered before the rule-registration case: the backstop registry is
@@ -1019,6 +1088,46 @@ describe("evaluatePlannedReplyEgress", () => {
 			}),
 		).toEqual({ verdict: "allow" });
 	});
+
+	it.each(["valid", "different-text", "invented-id", "missing-id", "preview"])(
+		"binds a recovered planner reply to its own recorded text and receipts (%s)",
+		(variant) => {
+			const reply = "Created your reminder for tomorrow at 9am.";
+			const decision = evaluatePlannedReplyEgress({
+				reply,
+				actions: [reminderSurface],
+				actionResults: [
+					{
+						success: true,
+						effectReceipts: [
+							variant === "preview"
+								? { ...effectBase, outcome: "preview" }
+								: appliedReceipt,
+						],
+						data: { actionName: "OWNER_REMINDERS", action: "create" },
+					},
+				],
+				evaluator: {
+					success: true,
+					decision: "FINISH",
+					thought: "The outcome was verified before presentation recovery.",
+					messageToUser: reply,
+					// These older IDs alone must never authorize the new wording.
+					effectReceiptIds: [appliedReceipt.receiptId],
+					plannerReply: {
+						text: variant === "different-text" ? "An earlier response." : reply,
+						effectReceiptIds:
+							variant === "invented-id"
+								? ["invented"]
+								: variant === "missing-id"
+									? []
+									: [appliedReceipt.receiptId],
+					},
+				},
+			});
+			expect(decision.verdict).toBe(variant === "valid" ? "allow" : "reject");
+		},
+	);
 
 	it("rejects a paraphrased completion without manufacturing replacement prose", () => {
 		const canonical = "Updated “Local calendar proof” for tomorrow at 9:10 PM.";
@@ -1730,6 +1839,33 @@ describe("core.simple_progress_promise", () => {
 		}
 		return evaluator;
 	}
+
+	it.each(["none", "non_applied"] as const)(
+		"does not reopen a terminal %s acknowledgement as work",
+		async (status) => {
+			const handler = simpleReplyHandler("Got it.");
+			handler.plan.replyEffectStatus = status;
+			expect(
+				await getProgressEvaluator().shouldRun(
+					makeContext(handler, {
+						userText:
+							"This is only an acknowledgement, with no app action or saved-record changes. Reply exactly: Got it.",
+					}),
+				),
+			).toBe(false);
+		},
+	);
+
+	it("still routes explicitly pending work with a conversational acknowledgement", async () => {
+		const handler = simpleReplyHandler("Got it.");
+		handler.plan.replyEffectStatus = "pending";
+		const context = makeContext(handler);
+		expect(await getProgressEvaluator().shouldRun(context)).toBe(true);
+		expect(await getProgressEvaluator().evaluate(context)).toMatchObject({
+			requiresTool: true,
+			clearReply: true,
+		});
+	});
 
 	it("fires only on simple-path bare promises (live: 'On it.' with zero tools)", async () => {
 		const evaluator = getProgressEvaluator();

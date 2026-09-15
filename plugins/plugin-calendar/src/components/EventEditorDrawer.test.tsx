@@ -377,6 +377,148 @@ describe("EventEditorDrawer", () => {
 
   // ----- create mode --------------------------------------------------------
 
+  it.each([
+    ["2026-03-08", "2026-03-08", "2026-03-09"],
+    ["2026-10-31", "2026-11-02", "2026-11-03"],
+    ["2028-02-29", "2028-02-29", "2028-03-01"],
+  ])(
+    "creates an all-day civil interval starting %s without timed bounds",
+    async (first, last, exclusive) => {
+      uiClient.createLifeOpsCalendarEvent.mockResolvedValue({
+        outcome: "event",
+        event: editEvent,
+        writeOnlyReceipt: null,
+      });
+      const onCreated = vi.fn();
+      render(
+        <EventEditorDrawer
+          open
+          mode="create"
+          event={null}
+          onClose={vi.fn()}
+          onCreated={onCreated}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText("Event title"), {
+        target: { value: "School closed" },
+      });
+      await waitFor(() => expect(saveButton().disabled).toBe(false));
+      fireEvent.click(screen.getByRole("button", { name: "All day" }));
+      fireEvent.change(
+        document.getElementById("event-editor-start-at") as HTMLInputElement,
+        { target: { value: first } },
+      );
+      fireEvent.change(
+        document.getElementById("event-editor-end-at") as HTMLInputElement,
+        { target: { value: last } },
+      );
+      fireEvent.click(saveButton());
+      await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+      const request = uiClient.createLifeOpsCalendarEvent.mock.calls[0][0];
+      expect(request.allDay).toEqual({
+        startDate: first,
+        endDateExclusive: exclusive,
+      });
+      expect(request.startAt).toBeUndefined();
+      expect(request.endAt).toBeUndefined();
+    },
+  );
+
+  it("rejects reversed all-day dates before dispatch", async () => {
+    render(
+      <EventEditorDrawer open mode="create" event={null} onClose={vi.fn()} />,
+    );
+    fireEvent.change(screen.getByLabelText("Event title"), {
+      target: { value: "School closed" },
+    });
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "All day" }));
+    fireEvent.change(
+      document.getElementById("event-editor-start-at") as HTMLInputElement,
+      { target: { value: "2026-03-09" } },
+    );
+    fireEvent.change(
+      document.getElementById("event-editor-end-at") as HTMLInputElement,
+      { target: { value: "2026-03-08" } },
+    );
+    fireEvent.click(saveButton());
+    expect(uiClient.createLifeOpsCalendarEvent).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        "Choose valid dates with the last day on or after the first day.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("preserves civil dates when renaming an existing all-day event", async () => {
+    const event = {
+      ...editEvent,
+      isAllDay: true,
+      startAt: "2026-03-08T00:00:00.000Z",
+      endAt: "2026-03-10T00:00:00.000Z",
+    };
+    uiClient.updateLifeOpsCalendarEvent.mockResolvedValue({ event });
+    const onSaved = vi.fn();
+    render(
+      <EventEditorDrawer
+        open
+        mode="edit"
+        event={event}
+        onClose={vi.fn()}
+        onSaved={onSaved}
+      />,
+    );
+    await waitFor(() => expect(editSaveButton().disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("Event title"), {
+      target: { value: "Updated school closure" },
+    });
+    fireEvent.click(editSaveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const patch = uiClient.updateLifeOpsCalendarEvent.mock.calls[0][1];
+    expect(patch.allDay).toEqual({
+      startDate: "2026-03-08",
+      endDateExclusive: "2026-03-10",
+    });
+    expect(patch.startAt).toBeUndefined();
+    expect(patch.endAt).toBeUndefined();
+  });
+
+  it("converts an edited all-day date range to timed bounds only on explicit selection", async () => {
+    const event = {
+      ...editEvent,
+      isAllDay: true,
+      startAt: "2026-03-08T00:00:00.000Z",
+      endAt: "2026-03-09T00:00:00.000Z",
+    };
+    uiClient.updateLifeOpsCalendarEvent.mockResolvedValue({ event });
+    const onSaved = vi.fn();
+    render(
+      <EventEditorDrawer
+        open
+        mode="edit"
+        event={event}
+        onClose={vi.fn()}
+        onSaved={onSaved}
+      />,
+    );
+    await waitFor(() => expect(editSaveButton().disabled).toBe(false));
+    fireEvent.change(
+      document.getElementById("event-editor-start-at") as HTMLInputElement,
+      { target: { value: "2026-03-10" } },
+    );
+    fireEvent.change(
+      document.getElementById("event-editor-end-at") as HTMLInputElement,
+      { target: { value: "2026-03-10" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Timed", exact: true }));
+    fireEvent.click(editSaveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const patch = uiClient.updateLifeOpsCalendarEvent.mock.calls[0][1];
+    expect(patch.allDay).toBeUndefined();
+    expect(patch.startAt).toBe(new Date(2026, 2, 10, 9, 0).toISOString());
+    expect(patch.endAt).toBe(new Date(2026, 2, 10, 9, 30).toISOString());
+  });
+
   it("seeds a blank create form with a next-half-hour start window", async () => {
     render(
       <EventEditorDrawer

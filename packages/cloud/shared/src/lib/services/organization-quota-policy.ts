@@ -136,6 +136,9 @@ export async function readOrganizationQuotaPolicyInTransaction(
   // inputs together without paying a separate database round trip for each.
   const [inputs] = await tx
     .select({
+      // Legacy policy has no expiry boundary to recheck after further reads.
+      // Observe its database clock with the policy inputs, not another round trip.
+      legacyObservedAt: sql<Date>`clock_timestamp()`,
       org: {
         balance: organizations.credit_balance,
         revision: sql<string>`${organizations.balance_revision}::text`,
@@ -211,12 +214,7 @@ export async function readOrganizationQuotaPolicyInTransaction(
     if (inputs.legacyCreditTotal === null)
       return unavailable(organizationId, "missing_legacy_selector");
     const creditTotal = inputs.legacyCreditTotal;
-    const [clock] = await tx
-      .select({ now: sql<Date>`clock_timestamp()` })
-      .from(organizations)
-      .where(eq(organizations.id, organizationId));
-    if (!clock) return unavailable(organizationId, "missing_database_clock");
-    const now = observedAt ?? new Date(clock.now);
+    const now = observedAt ?? new Date(inputs.legacyObservedAt);
     return {
       ...base,
       observedAt: now.toISOString(),

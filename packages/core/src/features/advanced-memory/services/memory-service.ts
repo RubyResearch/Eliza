@@ -33,6 +33,7 @@ import {
 	type UUID,
 } from "../../../types/index.ts";
 import type { MemoryStorageProvider } from "../../../types/memory-storage.ts";
+import { isActiveMemoryEvidence } from "../../../utils/extraction-evidence.ts";
 import type {
 	LongTermMemory,
 	LongTermMemoryCategory,
@@ -270,7 +271,11 @@ export class MemoryService extends Service {
 		messageCount: number,
 	): Promise<void> {
 		const key = this.getExtractionKey(entityId, roomId);
-		await this.runtime.setCache(key, messageCount);
+		if (!(await this.runtime.setCache(key, messageCount))) {
+			throw new ElizaError("Extraction checkpoint was not persisted", {
+				code: "MEMORY_EXTRACTION_CHECKPOINT_FAILED",
+			});
+		}
 		this.lastExtractionCheckpoints.set(key, messageCount);
 		this.capSessionMap(this.lastExtractionCheckpoints);
 		logger.debug(
@@ -320,12 +325,30 @@ export class MemoryService extends Service {
 
 	// ── Storage operations (delegated to provider) ──────────────────────
 
+	/** Select the legacy evaluator path until a replay-safe backend is resolved. */
+	get supportsIncrementalExtraction(): boolean {
+		return this.storage?.supportsIdempotentWrites === true;
+	}
+
+	async ensureIncrementalExtractionSupported(): Promise<void> {
+		const storage = await this.requireStorage("process incremental extraction");
+		if (storage.supportsIdempotentWrites !== true) {
+			throw new ElizaError(
+				"Memory storage does not support replay-safe incremental extraction",
+				{
+					code: "MEMORY_INCREMENTAL_STORAGE_UNSUPPORTED",
+				},
+			);
+		}
+	}
+
 	async storeLongTermMemory(
 		memory: Omit<
 			LongTermMemory,
 			"id" | "createdAt" | "updatedAt" | "accessCount"
-		>,
+		> & { id?: UUID },
 	): Promise<LongTermMemory> {
+		if (memory.id) await this.ensureIncrementalExtractionSupported();
 		const entityId = await resolvePrimaryEntityId(
 			this.runtime,
 			memory.entityId,
@@ -344,6 +367,7 @@ export class MemoryService extends Service {
 		entityId: UUID,
 		category?: LongTermMemoryCategory,
 		limit?: number,
+		options: { includeInactive?: boolean } = {},
 	): Promise<LongTermMemory[]> {
 		if (limit !== undefined && limit <= 0) return [];
 		const storage = await this.getStorage();
@@ -354,7 +378,6 @@ export class MemoryService extends Service {
 				entityIds.map((relatedEntityId) =>
 					storage.getLongTermMemories(this.runtime.agentId, relatedEntityId, {
 						category,
-						...(limit === undefined ? {} : { limit }),
 					}),
 				),
 			)
@@ -365,6 +388,7 @@ export class MemoryService extends Service {
 		// not `limit` copies of the same one.
 		const deduped = new Map<UUID, LongTermMemory>();
 		for (const memory of memories) {
+			if (!options.includeInactive && !isActiveMemoryEvidence(memory)) continue;
 			if (!deduped.has(memory.id)) deduped.set(memory.id, memory);
 		}
 		const sorted = [...deduped.values()].sort(

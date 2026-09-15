@@ -463,6 +463,10 @@ const CANDIDATE_ACTION_PARENT_ALIASES: Record<string, readonly string[]> = {
 	CLOSE_ALL_VIEWS: ["VIEWS"],
 	CLOSE_VIEW: ["VIEWS"],
 	LIST_VIEWS: ["VIEWS"],
+	// Stage-1 sometimes names the Home destination rather than its navigation
+	// action. Resolve that model hint through the existing VIEWS parent; the
+	// authorized view catalog and planner still select and execute the target.
+	HOME: ["VIEWS"],
 	OPEN_APP: ["VIEWS", "APP"],
 	OPEN_APPLICATION: ["VIEWS", "APP"],
 	OPEN_VIEW: ["VIEWS"],

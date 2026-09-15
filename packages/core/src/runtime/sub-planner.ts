@@ -57,30 +57,6 @@ function buildSubPlannerActionLookup(
 	return lookup;
 }
 
-function buildSubPlannerTools(actions: readonly Action[]): ToolDefinition[] {
-	const canonicalTools = buildPlannerToolsFromActions(actions);
-	const toolsByName = new Map(canonicalTools.map((tool) => [tool.name, tool]));
-	const tools: ToolDefinition[] = [...canonicalTools];
-	for (const action of actions) {
-		const canonical = toolsByName.get(action.name);
-		if (!canonical) continue;
-		for (const simile of action.similes ?? []) {
-			if (typeof simile !== "string" || simile.trim().length === 0) continue;
-			const name = simile.trim();
-			if (toolsByName.has(name)) continue;
-			const aliasTool = {
-				...canonical,
-				name,
-				description:
-					`${canonical.description ?? action.description ?? ""}\nAlias for ${action.name}.`.trim(),
-			};
-			toolsByName.set(name, aliasTool);
-			tools.push(aliasTool);
-		}
-	}
-	return tools;
-}
-
 export function actionHasSubActions(action: Action): boolean {
 	return Array.isArray(action.subActions) && action.subActions.length > 0;
 }
@@ -253,11 +229,13 @@ export async function runSubPlanner(
 	const childActionNames = new Set(childActions.map((action) => action.name));
 	const childActionLookup = buildSubPlannerActionLookup(childActions);
 	// Sub-planner exposes each child action directly as its own native tool
-	// (same surface as the top-level planner). The universal terminal-sentinel
+	// (same surface as the top-level planner). Aliases remain accepted by the
+	// lookup below, but must not duplicate full native schemas on the wire.
+	// The universal terminal-sentinel
 	// tools (REPLY / IGNORE / STOP) are always exposed so the model has a
 	// stable way to end the sub-planner pass.
 	const tools: ToolDefinition[] = [
-		...buildSubPlannerTools(childActions),
+		...buildPlannerToolsFromActions(childActions),
 		...CORE_PLANNER_TERMINALS,
 	];
 	const execute = params.execute ?? executePlannedToolCall;
@@ -310,10 +288,10 @@ export async function runSubPlanner(
 				};
 			}
 			const resolvedChildAction =
+				childActions.find((action) => action.name === toolCall.name) ??
 				childActionLookup.get(
 					normalizeSubPlannerActionIdentifier(toolCall.name),
 				) ??
-				childActions.find((action) => action.name === toolCall.name) ??
 				null;
 			if (!resolvedChildAction) {
 				return {

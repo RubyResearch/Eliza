@@ -9,8 +9,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Entity, IAgentRuntime, Memory, UUID } from "../../types/index.ts";
 import {
+	applyAddressedTo,
 	messageAddressedToOtherParticipant,
 	messageVocativelyAddressesOtherParticipant,
+	resolveAddressedTargets,
 } from "../addressed-to.ts";
 
 const AGENT_ID = "00000000-0000-0000-0000-0000000000aa" as UUID;
@@ -57,6 +59,64 @@ function roomWithOthers(): Partial<IAgentRuntime> {
 		]),
 	} as unknown as Partial<IAgentRuntime>;
 }
+
+describe("addressed-to persistence boundary", () => {
+	it("rejects invented UUIDs before relationship writes while keeping real room targets", async () => {
+		const createRelationship = vi.fn<IAgentRuntime["createRelationship"]>(
+			async () => true,
+		);
+		const runtime = makeRuntime({
+			...roomWithOthers(),
+			getRelationships: vi.fn(async () => []),
+			createRelationship,
+		});
+		const invented = "95c2e2ac-949b-4818-b058-9a046602fb9a";
+		const result = await applyAddressedTo({
+			runtime,
+			message: makeMessage(),
+			addressedTo: [
+				invented,
+				HUMAN_X.toUpperCase(),
+				"@Alice",
+				AGENT_ID,
+				SENDER_ID,
+			],
+		});
+		expect(result.resolved).toEqual([HUMAN_X, AGENT_ID]);
+		expect(result.created).toBe(2);
+		expect(createRelationship).toHaveBeenCalledTimes(2);
+		expect(
+			createRelationship.mock.calls.map(([edge]) => edge.targetEntityId),
+		).toEqual([HUMAN_X, AGENT_ID]);
+	});
+
+	it("does not resolve a UUID outside the current room merely because its shape is valid", async () => {
+		const runtime = makeRuntime();
+		expect(
+			await resolveAddressedTargets({
+				runtime,
+				message: makeMessage(),
+				addressedTo: [HUMAN_X],
+			}),
+		).toEqual([]);
+	});
+
+	it("propagates room lookup failures rather than trusting unverified targets", async () => {
+		const error = new Error("room lookup unavailable");
+		const runtime = makeRuntime({
+			getEntitiesForRoom: vi.fn(async () => {
+				throw error;
+			}),
+		});
+		await expect(
+			resolveAddressedTargets({
+				runtime,
+				message: makeMessage(),
+				addressedTo: [HUMAN_X],
+			}),
+		).rejects.toBe(error);
+	});
+});
 
 describe("messageAddressedToOtherParticipant (#9874 — uniform addressing gate)", () => {
 	it("returns false when there are no explicit addressees (DMs / undirected asks)", async () => {

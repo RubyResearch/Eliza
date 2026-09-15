@@ -1,43 +1,37 @@
 /**
- * Warm Codex SDK inference session — the codex peer of {@link ClaudeSdkSession}.
+ * Request-isolated Codex SDK inference for Eliza text and structured decisions.
  *
  * Runs an Eliza chat brain (chat + planner) on a personal ChatGPT/Codex
  * subscription via `@openai/codex-sdk`, which wraps the bundled `codex` binary
- * and reads its own `~/.codex/auth.json` (eliza never sees the token). Unlike
- * `codex exec` (CodexCli), which cold-spawns a fresh process per call, this keeps
- * ONE warm `Thread` alive (`codex.startThread()` once; `thread.run()` per turn),
- * so the startup cost is paid once.
+ * and manages its own authentication. The installed TypeScript SDK spawns the
+ * CLI for every run. Each request starts a fresh thread: Eliza supplies the
+ * complete authorized context, without a second hidden conversation history.
  *
  * TWO MODES:
  *  - TEXT mode (`generate`): pure completion for the reply / large tiers. The
- *    thread runs read-only, no network, no approvals — a warm completion engine.
+ *    thread runs read-only, no network, no approvals.
  *    Returns the turn's `finalResponse`.
  *  - ROUTE mode (`route`): the ACTION_PLANNER decision via codex NATIVE structured
  *    output (`TurnOptions.outputSchema`). The schema constrains the turn to
  *    `{action, params}` with `params` as a JSON STRING (OpenAI strict mode forbids
  *    open-ended objects), which `normalizeRoute` parses back into the bare
  *    `{action, params}` shape the planner loop's text-mode parser accepts. This
- *    is reliable at scale (the model cannot drift off-shape) — unlike free-text
- *    JSON. REQUIRES the system codex binary (`codexBinPath`): the SDK's bundled
- *    binary is too old and rejects structured output ("requires a newer version").
+ *    is validated before being returned to Eliza. Use a current installed Codex
+ *    binary supporting structured output and the inference isolation flags.
  *
- * codex-sdk has NO thread-level system prompt (ThreadOptions carries none), so
- * the system content is folded into the body per call — which also means ONE warm
- * thread per (model, mode) can serve every system prompt (no per-systemPrompt
- * keying needed, unlike claude). Calls are SERIALIZED; the session self-heals on
- * error and restarts after `restartAfterTurns` to bound the thread's accumulating
- * context.
- *
- * LIVE-VERIFIED on a ChatGPT/Codex subscription: btc/eth/weather route to
- * WEB_FETCH and synthesize the real fetched value; math/chat/identity work. Needs
- * the system codex binary via `codexBinPath` (the SDK's bundled 0.80.0 rejects
- * gpt-5.5). Unit-tested via the injectable `codexModule` seam.
+ * System content is folded into each request body. Calls on an adapter instance
+ * are serialized, but no provider thread survives a completed or failed call.
  *
  * @module plugin-cli-inference/codex-sdk-session
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { logger } from "@elizaos/core";
 import type { RotationSubprocessEnv } from "./account-rotation";
+import { filterEnv } from "./sandbox";
 
 const DEFAULT_MODEL = "gpt-5.5";
 const DEFAULT_RESTART_AFTER_TURNS = 20;
@@ -72,7 +66,10 @@ interface CodexTurn {
   usage?: unknown;
 }
 interface CodexThread {
-  run(input: string, turnOptions?: { outputSchema?: unknown }): Promise<CodexTurn>;
+  run(
+    input: string,
+    turnOptions?: { outputSchema?: unknown; signal?: AbortSignal }
+  ): Promise<CodexTurn>;
 }
 interface CodexInstance {
   startThread(options?: Record<string, unknown>): CodexThread;
@@ -96,7 +93,7 @@ export interface CodexSdkSessionConfig {
    * gpt-5.5 work.
    */
   codexBinPath?: string | null;
-  /** Restart the warm thread after this many turns (bounds context growth). */
+  /** Legacy compatibility option; requests now always use fresh threads. */
   restartAfterTurns?: number;
   /**
    * Optional subprocess-only env for a pooled account. Passed to the Codex SDK
@@ -140,9 +137,9 @@ function turnToText(turn: CodexTurn): string {
 }
 
 /**
- * A single warm Codex SDK thread for one (model, mode). Lazily starts on first
- * call, serializes calls, and self-heals (restarts) on error or after
- * `restartAfterTurns`.
+ * Serializes requests for one adapter configuration. Every request creates a
+ * fresh thread: Eliza owns the authorized conversation context. The installed
+ * SDK starts a subprocess for each run, not a persistent inference process.
  */
 export class CodexSdkSession {
   private readonly model: string;
@@ -154,8 +151,10 @@ export class CodexSdkSession {
   private readonly codexOverride?: CodexModule;
 
   private thread: CodexThread | null = null;
+  private workingDirectory: string | null = null;
   private turns = 0;
   private chain: Promise<unknown> = Promise.resolve();
+  private lifecycle = new AbortController();
 
   constructor(config: CodexSdkSessionConfig) {
     this.model = config.model?.trim() || DEFAULT_MODEL;
@@ -171,8 +170,9 @@ export class CodexSdkSession {
   }
 
   /** TEXT mode: generate one completion's text. Serialized. */
-  generate(body: string): Promise<string> {
-    return this.enqueue(() => this.sendOnce(body, "text"));
+  generate(body: string, outputSchema?: unknown, signal?: AbortSignal): Promise<string> {
+    const requestSignal = this.requestSignal(signal);
+    return this.enqueue(() => this.sendOnce(body, "text", outputSchema, requestSignal));
   }
 
   /**
@@ -180,8 +180,13 @@ export class CodexSdkSession {
    * picked via codex's native structured output. Consumed directly by the planner
    * loop's text-mode parser, so no core change is needed.
    */
-  route(body: string): Promise<string> {
-    return this.enqueue(() => this.sendOnce(body, "route"));
+  route(body: string, signal?: AbortSignal): Promise<string> {
+    const requestSignal = this.requestSignal(signal);
+    return this.enqueue(() => this.sendOnce(body, "route", undefined, requestSignal));
+  }
+
+  private requestSignal(signal?: AbortSignal): AbortSignal {
+    return signal ? AbortSignal.any([signal, this.lifecycle.signal]) : this.lifecycle.signal;
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -193,26 +198,35 @@ export class CodexSdkSession {
     return run;
   }
 
-  private async sendOnce(body: string, mode: "text" | "route"): Promise<string> {
+  private async sendOnce(
+    body: string,
+    mode: "text" | "route",
+    outputSchema: unknown,
+    signal: AbortSignal
+  ): Promise<string> {
+    signal.throwIfAborted();
     if (!body.trim()) {
       throw new Error("[cli-inference:codex-sdk] empty prompt body");
     }
     if (this.thread && this.turns >= this.restartAfterTurns) {
-      this.dispose();
+      this.releaseThread();
     }
-    if (!this.thread) {
-      await this.start();
-    }
-    this.turns += 1;
     try {
+      if (!this.thread) await this.start();
+      signal.throwIfAborted();
+      this.turns += 1;
       const thread = this.thread;
       if (!thread) throw new Error("[cli-inference:codex-sdk] thread not started");
       // ROUTE: constrain output to {action, params:json-string} via the codex
       // native output schema (reliable shape; needs the system codex binary).
-      const turn = await thread.run(
-        body,
-        mode === "route" ? { outputSchema: ROUTE_OUTPUT_SCHEMA } : undefined
-      );
+      const turn = await thread.run(body, {
+        signal,
+        ...(outputSchema
+          ? { outputSchema }
+          : mode === "route"
+            ? { outputSchema: ROUTE_OUTPUT_SCHEMA }
+            : {}),
+      });
       const text = turnToText(turn);
       if (mode === "route") {
         return this.normalizeRoute(text);
@@ -224,8 +238,14 @@ export class CodexSdkSession {
     } catch (err) {
       // error-policy:J2 context-adding rethrow — self-heal (a dead/erroring thread
       // must not poison the next turn), then rethrow so the caller sees the failure.
-      this.dispose();
+      this.releaseThread();
       throw err instanceof Error ? err : new Error(`[cli-inference:codex-sdk] ${String(err)}`);
+    } finally {
+      // Eliza owns conversation history and access filtering, not the SDK.
+      this.releaseThread();
+      const directory = this.workingDirectory;
+      this.workingDirectory = null;
+      if (directory) await rm(directory, { recursive: true, force: true });
     }
   }
 
@@ -237,34 +257,22 @@ export class CodexSdkSession {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
-    } catch {
-      // error-policy:J3 untrusted model output — structured output SHOULD be valid
-      // JSON; if wrapped, salvage the first {...} block, else throw a typed
-      // "non-JSON output" (does not fabricate a valid route).
-      const match = text.match(/\{[\s\S]*\}/);
-      if (!match) {
-        throw new Error("[cli-inference:codex-sdk] route: non-JSON output");
-      }
-      parsed = JSON.parse(match[0]);
+    } catch (cause) {
+      // error-policy:J3 reject malformed structured output, never infer a route.
+      throw new Error("[cli-inference:codex-sdk] route: non-JSON output", { cause });
     }
-    const obj = parsed as { action?: unknown; params?: unknown };
+    if (!isRecord(parsed) || Array.isArray(parsed)) {
+      throw new Error("[cli-inference:codex-sdk] route: expected an object");
+    }
+    const obj = parsed;
     if (typeof obj.action !== "string" || !obj.action.trim()) {
       throw new Error("[cli-inference:codex-sdk] route: missing action");
     }
     // `params` arrives as a JSON STRING (ROUTE_OUTPUT_SCHEMA encodes it that way
     // for strict-mode), or already as an object on the free-text fallback path.
-    let params: Record<string, unknown> = {};
-    if (typeof obj.params === "string" && obj.params.trim()) {
-      try {
-        const p = JSON.parse(obj.params);
-        if (p && typeof p === "object") params = p as Record<string, unknown>;
-      } catch {
-        // error-policy:J3 untrusted model output — a malformed `params` JSON
-        // string degrades to {} (a valid "no params" route arg), the action
-        // itself is already validated above; not a swallowed required-data failure.
-      }
-    } else if (obj.params && typeof obj.params === "object") {
-      params = obj.params as Record<string, unknown>;
+    const params: unknown = typeof obj.params === "string" ? JSON.parse(obj.params) : obj.params;
+    if (!params || typeof params !== "object" || Array.isArray(params)) {
+      throw new Error("[cli-inference:codex-sdk] route: params must be an object");
     }
     return JSON.stringify({
       action: obj.action.trim(),
@@ -276,12 +284,34 @@ export class CodexSdkSession {
     const { Codex } = this.codexOverride ?? (await loadCodex());
     // Drive the system codex binary (not the SDK's bundled-and-often-stale one)
     // when a path is configured, so current models work.
-    const codexOptions: Record<string, unknown> = {};
-    if (this.codexBinPath) codexOptions.codexPathOverride = this.codexBinPath;
-    if (this.subprocessEnv) codexOptions.env = this.subprocessEnv;
+    // The inference child must not inherit tools or memories from the owner's
+    // interactive Codex setup. Authentication still belongs to the SDK/CLI.
+    const codexOptions: Record<string, unknown> = {
+      config: {
+        features: {
+          apps: false,
+          plugins: false,
+          shell_tool: false,
+          unified_exec: false,
+          multi_agent: false,
+          hooks: false,
+          memories: false,
+          image_generation: false,
+        },
+      },
+    };
+    codexOptions.codexPathOverride = join(
+      dirname(createRequire(import.meta.url).resolve("@elizaos/plugin-cli-inference/package.json")),
+      "codex-inference-exec.mjs"
+    );
+    codexOptions.env = {
+      ...(this.subprocessEnv ??
+        filterEnv(process.env, undefined, { CODEX_HOME: process.env.CODEX_HOME })),
+      ELIZA_CODEX_INFERENCE_BIN: this.codexBinPath ?? "codex",
+    };
     const codex = new Codex(codexOptions);
-    // Pure inference: read-only, no network, no approvals, no git-repo coupling —
-    // a warm completion engine, not a coding agent.
+    this.workingDirectory = await mkdtemp(join(tmpdir(), "eliza-codex-inference-"));
+    // This SDK run is inference-only; Eliza executes returned action decisions.
     const options: Record<string, unknown> = {
       model: this.model,
       sandboxMode: "read-only",
@@ -289,18 +319,25 @@ export class CodexSdkSession {
       networkAccessEnabled: false,
       webSearchEnabled: false,
       skipGitRepoCheck: true,
+      workingDirectory: this.workingDirectory,
     };
     if (this.reasoningEffort) options.modelReasoningEffort = this.reasoningEffort;
     this.thread = codex.startThread(options);
     this.turns = 0;
     logger.debug(
       { src: "cli-inference:codex-sdk", model: this.model, mode: this.router ? "route" : "text" },
-      "warm Codex SDK thread started"
+      "isolated Codex SDK thread started"
     );
   }
 
-  /** Tear down the warm thread (on restart, error, or dispose). */
+  /** Cancel active and already queued requests; later requests start a fresh lifecycle. */
   dispose(): void {
+    this.lifecycle.abort(new DOMException("Codex inference session disposed", "AbortError"));
+    this.lifecycle = new AbortController();
+    this.releaseThread();
+  }
+
+  private releaseThread(): void {
     this.thread = null;
     this.turns = 0;
   }

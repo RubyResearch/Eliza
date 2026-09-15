@@ -14,7 +14,8 @@
  *    without the bridge method all still reject (1008 in-band, 401 handshake).
  *
  * Harness: real HTTP server + real `ws` clients over loopback with an API
- * token configured (loopback gets no WS trust when a token is set). The host
+ * token configured and strict local auth enabled, so loopback exercises the
+ * credential boundary instead of trusted same-machine access. The host
  * bridge is substituted at its documented injection seam
  * (`setAgentHostBridge`) with a session resolver that recognizes one active
  * session id — the session-store internals themselves are app-core's contract
@@ -100,7 +101,7 @@ beforeEach(async () => {
   delete process.env.ELIZA_ALLOW_WS_QUERY_TOKEN;
   delete process.env.ELIZA_API_AUTH_TOKEN;
   delete process.env.ELIZA_CLOUD_PROVISIONED;
-  delete process.env.ELIZA_REQUIRE_LOCAL_AUTH;
+  process.env.ELIZA_REQUIRE_LOCAL_AUTH = "1";
 });
 
 afterEach(async () => {

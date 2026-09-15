@@ -64,6 +64,9 @@ Set these as environment variables or in your character's `settings` object.
 | `OPENAI_RESPONSE_HANDLER_MODEL` | falls back to small | Response-handler slot |
 | `OPENAI_ACTION_PLANNER_MODEL` | falls back to medium | Action-planner slot |
 | `OPENAI_FALLBACK_MODEL` / `CEREBRAS_FALLBACK_MODEL` | unset | Optional same-endpoint model for requests made while the primary is in a rate-limit cooldown |
+| `OPENROUTER_FALLBACK_MODEL` | unset | Explicit OpenRouter text model used after a Cerebras 429, e.g. `qwen/qwen3.8-27b` |
+| `OPENROUTER_API_KEY` | unset | Server-side credential for the opt-in OpenRouter fallback |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter-compatible fallback endpoint |
 | `OPENAI_REASONING_EFFORT` | — | `minimal`/`low`/`medium`/`high` for o-series models |
 
 The optional fallback applies only after a provider rate-limit response has put
@@ -72,6 +75,28 @@ and credentials; it does not switch providers. An unset, identical, or also-held
 fallback preserves the explicit cooldown error. After cooldown expires, requests
 return to the primary. Configure a fallback that supports the request's tools,
 attachments, and structured output; unsupported requests still fail explicitly.
+
+For cross-provider rate-limit recovery, configure both `OPENROUTER_API_KEY` and
+`OPENROUTER_FALLBACK_MODEL` on the backend while leaving Cerebras primary. This
+retries only the failed **model call**, not previously executed actions, with
+the complete messages, tools, constraints and response schema. It applies to
+all text tiers and the response-handler/planner slots. It never sends the
+credential to a browser build, changes embeddings or voice, activates a local
+model, or substitutes a canned reply.
+
+OpenRouter recovery is limited to HTTP 429/cooldown failures before any output
+has reached the caller. With that explicit fallback configured, the first eligible
+429 yields immediately even without Retry-After; it does not repeat the same
+rate-limited request through transient backoff first. Other transient errors
+retain bounded retries, and installations without a fallback keep their prior
+retry policy. Auth/schema failures and partial streams stay explicit;
+an aborted call never starts a fallback. Each endpoint has an independent
+credential-scoped cooldown, and Cerebras becomes primary again when its window
+expires. OpenRouter routing requires all request parameters, denies providers
+that collect prompts for training, and sorts eligible providers by latency.
+The equivalent Qwen model retains disabled thinking through OpenRouter's
+`reasoning.enabled=false` contract. Actual cost and speed depend on the serving
+provider; monitor usage rather than assuming equal pricing or latency.
 
 ### Embeddings
 
@@ -233,6 +258,15 @@ await runtime.useModel(ModelType.TEXT_LARGE, {
   },
 });
 ```
+
+For Cerebras, `providerOptions.cerebras.promptCacheKey` (or `prompt_cache_key`)
+takes precedence over the OpenAI key. An explicit empty Cerebras options object
+suppresses the legacy OpenAI key. Core supplies a stable conversation-and-stage
+routing key when a conversation ID is available, so unrelated chats do not share
+one routing hint merely because their system instructions match. Prefix changes
+do not change that routing key. Calls that only supply the OpenAI key remain supported. This does not alter prompt text,
+token counts, or permissions; Cerebras still matches actual prompt prefixes and
+controls cache retention. See [Cerebras prompt caching](https://inference-docs.cerebras.ai/capabilities/prompt-caching).
 
 ## Free-form record/map tool arguments
 

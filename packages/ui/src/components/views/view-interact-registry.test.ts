@@ -83,6 +83,25 @@ describe("view-interact-registry", () => {
     expect(sendWsMessage).not.toHaveBeenCalled();
   });
 
+  it("fails directed native reads immediately when their view is not mounted", async () => {
+    const { dispatchViewInteract } = await import("./view-interact-registry");
+    await dispatchViewInteract(
+      "browser",
+      "gui",
+      "get-text",
+      { nativeOnly: true },
+      "native-missing",
+    );
+    expect(sendWsMessage).toHaveBeenCalledWith({
+      type: "view:interact:result",
+      requestId: "native-missing",
+      success: false,
+      error: expect.stringContaining(
+        "Show that view with VIEWS before reading",
+      ),
+    });
+  });
+
   it("returns a failure result when a handler throws", async () => {
     const { dispatchViewInteract, registerViewInteractHandler } = await import(
       "./view-interact-registry"

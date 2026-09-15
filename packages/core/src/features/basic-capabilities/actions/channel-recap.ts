@@ -30,7 +30,8 @@
  * strips what was never legitimate conversation (the agent's own
  * action_result records, internal bridge relays, synthetic assistant failure
  * replies, transient status posts, leaked tool transcripts, local-path
- * dumps) and dedupes assistant noise, so none of it can be laundered back to
+ * dumps). Only identical copies of the same stored record are deduplicated;
+ * distinct message occurrences remain. Machinery cannot be laundered back to
  * the model — or to the user — through a recap. It is NOT an application
  * size cap: every row that survives hygiene is still served complete and
  * bounds-free, and hygienic rows are back-filled from older pages so

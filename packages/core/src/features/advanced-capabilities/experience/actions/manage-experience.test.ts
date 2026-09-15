@@ -259,7 +259,7 @@ describe("EXPERIENCE update", () => {
 });
 
 describe("EXPERIENCE delete", () => {
-	it("deletes by id and reports the removal through the callback", async () => {
+	it("deletes by id and retains the receipt for the planner without a public callback", async () => {
 		const { runtime, store, deleteCalls } = makeRuntime([
 			experience({ id: EXPERIENCE_ID_1, learning: "obsolete" }),
 		]);
@@ -276,7 +276,9 @@ describe("EXPERIENCE delete", () => {
 		expect(result.success).toBe(true);
 		expect(deleteCalls).toEqual([EXPERIENCE_ID_1]);
 		expect(store.has(EXPERIENCE_ID_1)).toBe(false);
-		expect(callbackTexts.join(" ")).toContain(EXPERIENCE_ID_1);
+		expect(callbackTexts).toEqual([]);
+		expect(result.text).toContain(EXPERIENCE_ID_1);
+		expect(result.transcriptVisibility).toBe("internal");
 	});
 
 	it("requires an id or query and surfaces not-found deletes", async () => {
@@ -284,12 +286,23 @@ describe("EXPERIENCE delete", () => {
 		const missing = await invoke(runtime, { action: "delete", confirm: true });
 		expect(missing.data?.error).toBe("EXPERIENCE_MISSING_ID");
 
-		const notFound = await invoke(runtime, {
-			action: "delete",
-			experienceId: MISSING_ID,
-			confirm: true,
-		});
+		const callbackTexts: string[] = [];
+		const notFound = await invoke(
+			runtime,
+			{
+				action: "delete",
+				experienceId: MISSING_ID,
+				confirm: true,
+			},
+			async (content) => {
+				callbackTexts.push(content.text ?? "");
+				return [];
+			},
+		);
 		expect(notFound.data?.error).toBe("EXPERIENCE_NOT_FOUND");
+		expect(notFound.text).toContain(MISSING_ID);
+		expect(notFound.transcriptVisibility).toBe("internal");
+		expect(callbackTexts).toEqual([]);
 	});
 
 	it("deletes the single strong query match", async () => {

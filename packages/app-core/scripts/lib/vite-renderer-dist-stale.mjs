@@ -1,8 +1,8 @@
 /**
  * Returns true when the main app needs a production `vite build`.
  *
- * Uses the renderer manifest for build-time variants, then **mtime** of `dist/index.html`
- * vs. app sources, shared packages, and key config files.
+ * Uses the renderer manifest for build-time variants and the build START time
+ * vs. source mtimes. Output mtimes cannot detect edits made during compilation.
  * **Why not always build:** A full Vite production compile is expensive; skipping when dist
  * is fresh makes `dev:desktop` restarts fast. **Why mtime:** Good enough for local dev; use
  * `--force-renderer` / `ELIZA_DESKTOP_RENDERER_BUILD=always` when you need a guaranteed
@@ -115,7 +115,19 @@ export function viteRendererBuildNeeded(appDir, repoRoot, options = {}) {
   ) {
     return true;
   }
-  const distMtime = fileMtime(distIndex);
+  const manifest = readRendererBuildManifest(path.dirname(distIndex));
+  const startedAt = Date.parse(manifest?.startedAt);
+  const builtAt = Date.parse(manifest?.builtAt);
+  // Legacy stamps record completion only; rebuild once to establish the input
+  // boundary instead of accepting code changed after Vite already read it.
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(builtAt) ||
+    startedAt > builtAt
+  ) {
+    return true;
+  }
+  const distMtime = Math.min(fileMtime(distIndex), startedAt);
   if (!distMtime) return true;
 
   const candidates = [

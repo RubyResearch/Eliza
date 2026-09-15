@@ -287,7 +287,7 @@ export interface TextStreamResult {
   /** Concrete backend and model identity retained through runtime stream consumption. */
   providerMetadata?: {
     modelName: string;
-    provider: "cerebras" | "evolink" | "openai";
+    provider: "cerebras" | "evolink" | "openai" | "openrouter";
     /**
      * Transient attempts re-issued before this stream was served; 0 = clean
      * first attempt. Present so consumers can tell a degraded-provider success

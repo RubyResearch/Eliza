@@ -14,6 +14,51 @@ afterEach(cleanup);
 beforeEach(() => sendWsMessage.mockClear());
 
 describe("ShellViewAgentSurface", () => {
+  it("reads a native child through its shell owner and rejects host-text substitution", async () => {
+    const { ShellViewAgentSurface } = await import("./ShellViewAgentSurface");
+    const { dispatchViewInteract } = await import("./view-interact-registry");
+    const read = vi.fn(async () => ({
+      text: "Second native page",
+      url: "https://phone.example/",
+      title: "Phone",
+      truncated: false,
+    }));
+    const view = render(
+      <ShellViewAgentSurface viewId="browser" readPage={read}>
+        <div>Host chrome only</div>
+      </ShellViewAgentSurface>,
+    );
+    await dispatchViewInteract(
+      "browser",
+      "gui",
+      "get-text",
+      { selector: "h1", nativeOnly: true },
+      "native-read-1",
+    );
+    expect(read).toHaveBeenCalledWith("h1");
+    expect(sendWsMessage.mock.calls.at(-1)?.[0]).toMatchObject({
+      success: true,
+      result: { text: "Second native page" },
+    });
+    view.rerender(
+      <ShellViewAgentSurface viewId="browser">
+        <div>Host chrome only</div>
+      </ShellViewAgentSurface>,
+    );
+    await dispatchViewInteract(
+      "browser",
+      "gui",
+      "get-text",
+      { nativeOnly: true },
+      "native-read-2",
+    );
+    expect(sendWsMessage.mock.calls.at(-1)?.[0]).toMatchObject({
+      success: false,
+    });
+    expect(sendWsMessage.mock.calls.at(-1)?.[0].error).toContain(
+      "no mounted native page reader",
+    );
+  });
   it("makes a wrapped shell page controllable via the interact dispatch", async () => {
     const { ShellViewAgentSurface } = await import("./ShellViewAgentSurface");
     const { AgentButton } = await import("../../agent-surface");

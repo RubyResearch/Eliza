@@ -38,7 +38,7 @@ describe("UI_CONTEXT", () => {
 			"Treat view_capabilities as available context, not as a request",
 		);
 		expect(result.text).toContain("it does not contain its displayed content");
-		expect(result.text).toContain("prefer the focused domain action");
+		expect(result.text).toContain("Opening a view is not a record operation");
 		expect(result.data).toMatchObject({
 			uiView: "notes",
 			uiViewPath: "/notes",

@@ -222,6 +222,162 @@ function visibleTexts(contents: Content[]): string[] {
 }
 
 describe("planner-loop death after a completed tool", () => {
+	it.each([true, false])(
+		"propagates an unexpected post-effect error without apology inference (result success=%s)",
+		async (success) => {
+			let actionCalls = 0;
+			const h = await createHarness({
+				actionResult: {
+					success,
+					transcriptVisibility: "internal",
+					modelReplyRequired: true,
+					data: { noteId: "note-1" },
+					effectReceipts: [
+						{
+							receiptId: "saved-note-1",
+							operation: "notes.note.create",
+							outcome: "applied",
+							resource: { kind: "note", id: "note-1" },
+							artifacts: [],
+							idempotency: { key: null, replayed: false },
+							observedAt: "2026-09-14T00:00:00.000Z",
+							commit: {
+								kind: "durable",
+								id: "note-1",
+								committedAt: "2026-09-14T00:00:00.000Z",
+							},
+						},
+					],
+				},
+				actionGate: async () => {
+					actionCalls++;
+				},
+			});
+			const failure = new TypeError(
+				"unexpected evaluator failure after commit",
+			);
+			let handlerCalls = 0;
+			h.runtime.registerModel(
+				ModelType.RESPONSE_HANDLER,
+				async () => {
+					if (handlerCalls++ === 0) return stageOneToolTurn();
+					throw failure;
+				},
+				"post-effect-error-test",
+				300,
+			);
+			const apologyModel = vi.fn(async () => {
+				throw failure;
+			});
+			h.runtime.registerModel(
+				ModelType.TEXT_SMALL,
+				apologyModel,
+				"post-effect-error-test",
+				300,
+			);
+			const onSettledActionResult = vi.fn();
+			await expect(
+				new DefaultMessageService().handleMessage(
+					h.runtime,
+					makeMessage(h.runtime, "Save the note."),
+					h.callback,
+					{ onSettledActionResult },
+				),
+			).rejects.toBe(failure);
+			expect(actionCalls).toBe(1);
+			expect(onSettledActionResult).toHaveBeenCalledTimes(1);
+			expect(onSettledActionResult).toHaveBeenCalledWith(
+				expect.objectContaining({
+					effectReceipts: [
+						expect.objectContaining({
+							receiptId: "saved-note-1",
+							outcome: "applied",
+						}),
+					],
+				}),
+			);
+			expect(apologyModel).not.toHaveBeenCalled();
+			expect(visibleTexts(h.callbacks)).toEqual([]);
+		},
+	);
+
+	it("retains prior dialogue when immediate reply grounding needs a rewrite without replaying the tool", async () => {
+		let actionCalls = 0;
+		const h = await createHarness({
+			actionResult: {
+				success: true,
+				text: "The live page heading is Example Domain.",
+			},
+			actionGate: async () => {
+				actionCalls++;
+			},
+		});
+		const history =
+			"In this fictional story, Ada packs a cobalt notebook and a copper flask.";
+		h.runtime.composeState = vi.fn(async () => ({
+			values: { availableContexts: "general" },
+			data: {
+				providers: {
+					RECENT_MESSAGES: {
+						data: {
+							recentMessages: [
+								{
+									...makeMessage(h.runtime, history),
+									id: "00000000-0000-4000-8000-000000000099",
+									createdAt: 1,
+								},
+							],
+						},
+					},
+				},
+			},
+			text: "",
+		})) as AgentRuntime["composeState"];
+		let handlerCalls = 0;
+		h.runtime.registerModel(
+			ModelType.RESPONSE_HANDLER,
+			async () => {
+				if (handlerCalls++ === 0) return stageOneToolTurn();
+				return JSON.stringify({
+					thought: "The read succeeded; answer the compound request.",
+					success: true,
+					decision: "FINISH",
+					messageToUser:
+						"Cancelled the note edit. The page heading is Example Domain.",
+				});
+			},
+			"inline-recovery-context-test",
+			300,
+		);
+		let rewriteCalls = 0;
+		const answer =
+			"I will not perform the edit. The page heading is Example Domain. Ada packs a cobalt notebook and a copper flask.";
+		h.runtime.registerModel(
+			ModelType.TEXT_SMALL,
+			async (_runtime, params) => {
+				rewriteCalls++;
+				expect(params.prompt).toContain(history);
+				expect(params.prompt).toContain(
+					"The live page heading is Example Domain.",
+				);
+				return JSON.stringify({ response: answer, effectReceiptIds: [] });
+			},
+			"inline-recovery-context-test",
+			300,
+		);
+		const result = await new DefaultMessageService().handleMessage(
+			h.runtime,
+			makeMessage(
+				h.runtime,
+				"Withdraw the unstarted note edit, look up the live page heading, and recall Ada's fictional packing list. Do not change any records.",
+			),
+			h.callback,
+		);
+		expect(actionCalls).toBe(1);
+		expect(rewriteCalls).toBe(1);
+		expect(result.responseContent?.text).toBe(answer);
+	});
+
 	beforeEach(() => {
 		vi.stubEnv("ELIZA_TRAJECTORY_LOGGING", "0");
 	});
@@ -473,8 +629,9 @@ describe("planner-loop death after a completed tool", () => {
 			let stageCalls = 0;
 			harness.runtime.registerModel(
 				ModelType.RESPONSE_HANDLER,
-				async () => {
+				async (_runtime, params) => {
 					if (stageCalls++ === 0) return stageOne;
+					expect(JSON.stringify(params)).toContain(completeRequest);
 					throw overflow;
 				},
 				"overflow-test",
@@ -501,7 +658,10 @@ describe("planner-loop death after a completed tool", () => {
 				makeMessage(harness.runtime, completeRequest),
 				harness.callback,
 			);
-			expect(plannerCalls).toBeGreaterThan(0);
+			// A safe Stage-1 draft reaches pre-execution evaluation first. Its
+			// overflow must stop the turn before planning or action dispatch.
+			expect(plannerCalls).toBe(settled ? 1 : 0);
+			expect(stageCalls).toBeGreaterThan(1);
 			expect(actionCalls).toBe(settled ? 1 : 0);
 			expect(harness.callbacks).toContainEqual(
 				expect.objectContaining({

@@ -58,6 +58,102 @@ describe("BrowserService target routing", () => {
     process.env = { ...originalEnv };
   });
 
+  it("reads the originating native page and never the Mac workspace", async () => {
+    const service = new BrowserService();
+    const mac = createTarget({ id: "workspace", priority: 100 });
+    service.registerTarget(mac);
+    const reader = vi.fn(async () => ({
+      url: "https://phone.example/",
+      title: "Phone",
+      text: "Second native page",
+      truncated: false,
+    }));
+    service.setNativeClientTransport({ readPage: reader, navigate: vi.fn() });
+    const result = await service.execute(
+      { subaction: "snapshot" },
+      "workspace",
+      "seeker-client",
+    );
+    expect(reader).toHaveBeenCalledWith("seeker-client", undefined);
+    expect(result).toMatchObject({
+      targetId: "native-client",
+      value: { bodyText: "Second native page", url: "https://phone.example/" },
+    });
+    expect(mac.execute).not.toHaveBeenCalled();
+    await expect(
+      service.execute(
+        { subaction: "get", id: "tab-main", selector: "h1" },
+        undefined,
+        "seeker-client",
+      ),
+    ).rejects.toThrow("Omit id");
+    await expect(
+      service.execute(
+        { subaction: "get", selector: "h1" },
+        undefined,
+        "seeker-client",
+      ),
+    ).resolves.toMatchObject({ value: "Second native page" });
+    expect(reader).toHaveBeenLastCalledWith("seeker-client", "h1");
+    reader.mockRejectedValueOnce(new Error("Phone disconnected"));
+    await expect(
+      service.execute({ subaction: "snapshot" }, undefined, "seeker-client"),
+    ).rejects.toThrow("Phone disconnected");
+    expect(mac.execute).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for unavailable native reads and unsupported native DOM commands", async () => {
+    const service = new BrowserService();
+    const mac = createTarget({ id: "workspace", priority: 100 });
+    service.registerTarget(mac);
+    await expect(
+      service.execute({ subaction: "snapshot" }, undefined, "seeker-client"),
+    ).rejects.toMatchObject({ kind: "UNAVAILABLE" });
+    await expect(
+      service.execute(
+        { subaction: "click", selector: "button" },
+        undefined,
+        "seeker-client",
+      ),
+    ).rejects.toMatchObject({ kind: "UNSUPPORTED" });
+    expect(mac.execute).not.toHaveBeenCalled();
+    const navigate = vi.fn(async () => {});
+    service.setNativeClientTransport({ readPage: vi.fn(), navigate });
+    await service.execute(
+      { subaction: "navigate", url: "https://example.com/" },
+      "native-client",
+      "seeker-client",
+    );
+    expect(navigate).toHaveBeenCalledWith(
+      "seeker-client",
+      "https://example.com/",
+    );
+    expect(mac.execute).not.toHaveBeenCalled();
+  });
+
+  it("never presents truncated native get-text as a complete string", async () => {
+    const service = new BrowserService();
+    service.setNativeClientTransport({
+      navigate: vi.fn(),
+      readPage: async () => ({
+        url: "https://phone.example/",
+        title: "Phone",
+        text: "partial",
+        truncated: true,
+      }),
+    });
+    await expect(
+      service.execute(
+        { subaction: "get", selector: "body" },
+        undefined,
+        "phone",
+      ),
+    ).rejects.toThrow("exceeds the read limit");
+    expect(
+      await service.execute({ subaction: "snapshot" }, undefined, "phone"),
+    ).toMatchObject({ value: { bodyText: "partial", truncated: true } });
+  });
+
   it("uses target priority instead of registration order for automatic routing", async () => {
     const service = new BrowserService();
     service.registerTarget(createTarget({ id: "stagehand", priority: 10 }));

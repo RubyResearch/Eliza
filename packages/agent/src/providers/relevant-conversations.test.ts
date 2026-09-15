@@ -134,6 +134,61 @@ function makeMessage(text: string): Memory {
 const EMPTY_STATE = { values: {}, data: {}, text: "" } as unknown as State;
 
 describe("relevantConversationsProvider — shared recall embed fail-open", () => {
+  it.each(["hello!", "hey there", "Good morning.", "bonjour"])(
+    "does not retrieve old conversations for %s",
+    async (greeting) => {
+      const { runtime } = makeRuntime();
+      const result = await relevantConversationsProvider.get(
+        runtime,
+        makeMessage(greeting),
+        EMPTY_STATE,
+      );
+      expect(result.text).toBe("");
+      expect(runtime.getMemories).not.toHaveBeenCalled();
+      expect(embedRecallQuery).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["Mira", "hi, what was Mira's earlier packing list?"])(
+    "retains substantive recall for %s",
+    async (query) => {
+      embedRecallQuery.mockResolvedValue(null);
+      const { runtime } = makeRuntime();
+      await relevantConversationsProvider.get(
+        runtime,
+        makeMessage(query),
+        EMPTY_STATE,
+      );
+      expect(embedRecallQuery).toHaveBeenCalledWith(runtime, query);
+    },
+  );
+  it("skips a greeting even when the host appended language instructions", async () => {
+    const { runtime, searchMemories } = makeRuntime();
+    const result = await relevantConversationsProvider.get(
+      runtime,
+      makeMessage(
+        "hi\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]",
+      ),
+      EMPTY_STATE,
+    );
+    expect(result.text).toBe("");
+    expect(embedRecallQuery).not.toHaveBeenCalled();
+    expect(searchMemories).not.toHaveBeenCalled();
+    expect(runtime.getMemories).not.toHaveBeenCalled();
+  });
+
+  it("searches the complete authored recall query without host instructions", async () => {
+    embedRecallQuery.mockResolvedValue(null);
+    const { runtime } = makeRuntime();
+    const query = "What color was Rowan's mug before blue?";
+    await relevantConversationsProvider.get(
+      runtime,
+      makeMessage(
+        `${query}\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]`,
+      ),
+      EMPTY_STATE,
+    );
+    expect(embedRecallQuery).toHaveBeenCalledWith(runtime, query);
+  });
   beforeEach(() => {
     // A resolved role is required: `filterByAccessContext` folds an absent
     // `role` into the `UNRESOLVED` actor, which every scope denies, so a

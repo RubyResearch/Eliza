@@ -139,6 +139,69 @@ describe("interrupted conversation receipts", () => {
     },
   );
 
+  it("retains reply recovery authority through SSE and history, and requests only the stored reply", async () => {
+    const failed = {
+      id: "assistant-1",
+      role: "assistant",
+      timestamp: 2,
+      text: "The action completed but its reply failed.",
+      failureKind: "provider_issue",
+      replyRecoveryAvailable: true,
+    };
+    const streamed = makeClient(
+      sseResponse([
+        {
+          type: "done",
+          fullText: failed.text,
+          messageId: failed.id,
+          userMessageId: "user-1",
+          failureKind: failed.failureKind,
+          replyRecoveryAvailable: true,
+        },
+      ]),
+    );
+    expect(
+      await streamed.client.sendConversationMessageStream(
+        "conv-1",
+        "create note",
+        vi.fn(),
+      ),
+    ).toMatchObject({ messageId: failed.id, replyRecoveryAvailable: true });
+    const history = makeClient(jsonResponse({ messages: [failed] }));
+    expect(
+      (await history.client.getConversationMessages("conv-1")).messages,
+    ).toEqual([failed]);
+    const recovered = {
+      text: "The note is saved.",
+      agentName: "Eliza",
+      messageId: failed.id,
+      userMessageId: "user-1",
+    };
+    const recovery = makeClient(jsonResponse(recovered));
+    expect(
+      await recovery.client.retryConversationReply("conv/1", "assistant/1"),
+    ).toEqual(recovered);
+    expect(recovery.request).toHaveBeenCalledTimes(1);
+    const [url, init] = recovery.request.mock.calls[0];
+    expect(String(url)).toContain(
+      "/api/conversations/conv%2F1/messages/assistant%2F1/retry-reply",
+    );
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({});
+  });
+
+  it("rejects malformed SSE recovery flags instead of advertising mutation-safe retry", async () => {
+    const { client } = makeClient(
+      sseResponse([
+        { type: "done", fullText: "failed", replyRecoveryAvailable: "true" },
+      ]),
+    );
+    expect(
+      (await client.sendConversationMessageStream("conv", "hello", vi.fn()))
+        .replyRecoveryAvailable,
+    ).toBeUndefined();
+  });
+
   it("does not treat a malformed interruption flag as a terminal interruption", async () => {
     const { client } = makeClient(
       sseResponse([{ type: "done", fullText: "", interrupted: "true" }]),

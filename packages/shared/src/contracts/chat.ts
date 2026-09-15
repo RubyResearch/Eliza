@@ -78,6 +78,7 @@ export interface ChatToolCallEvent {
  * - `missing_capability` — tool/capability absent; retry cannot help.
  * - `no_provider` — no model configured; UX gate, not a chat retry.
  * - `planner_exhaustion` — budget/attempt limit with tools present; retry may help.
+ * - `context_overflow` — model input exceeds its limit; do not retry as-is.
  * - `provider_issue` — provider/auth/infrastructure; often retryable.
  * - `generation_timeout` — turn wall-clock expired; retryable.
  * - `rate_limited` — throttle; retryable after a pause.
@@ -93,6 +94,7 @@ export const CHAT_FAILURE_KINDS = [
   "missing_capability",
   "no_provider",
   "planner_exhaustion",
+  "context_overflow",
   "provider_issue",
   "generation_timeout",
   "rate_limited",

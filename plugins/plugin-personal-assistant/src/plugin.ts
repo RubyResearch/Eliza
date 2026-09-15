@@ -65,7 +65,10 @@ import { MEETING_TRANSCRIPT_FINALIZED_EVENT } from "@elizaos/shared";
 import { ownerAgreementKnowledgeAction } from "./actions/agreement-knowledge.js";
 import { blockAction } from "./actions/block.js";
 import { briefAction } from "./actions/brief.js";
-import { calendarAction } from "./actions/calendar.js";
+import {
+  calendarAction,
+  calendarActionPromotionOptions,
+} from "./actions/calendar.js";
 import { registerPersonalAssistantCalendarSourcesHost } from "./actions/calendar-sources.js";
 import {
   conflictDetectAction,
@@ -737,7 +740,10 @@ const rawPersonalAssistantPlugin: Plugin = {
     ...promoteSubactionsToActions(blockAction),
     ...promoteSubactionsToActions(ownerFinancesAction),
     ...promoteSubactionsToActions(credentialsAction),
-    ...promoteSubactionsToActions(calendarAction),
+    ...promoteSubactionsToActions(
+      calendarAction,
+      calendarActionPromotionOptions,
+    ),
     ...promoteSubactionsToActions(householdCoordinationAction),
     ...promoteSubactionsToActions(householdOperationsAction),
     ...promoteSubactionsToActions(resourceCapacityAction),

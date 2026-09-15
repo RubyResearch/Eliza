@@ -1,6 +1,6 @@
 /**
  * Shared room transcript for the merged post-turn evaluator: connector
- * record-of-send rows that duplicate a delivered reply collapse, distinct
+ * record-of-send rows retain their distinct provenance, distinct
  * turns with identical wording are kept, hygiene filtering applies, and the
  * read is memoized per message. Runtime doubles; no database or model.
  */
@@ -43,7 +43,7 @@ function runtimeWith(memories: Memory[]) {
 }
 
 describe("getRoomTranscript", () => {
-	it("collapses a connector record-of-send echo of the same reply", async () => {
+	it("preserves a connector record-of-send row with distinct provenance", async () => {
 		// Live Discord 2026-09-05: core persists the reply, then the connector
 		// persists its own copy ~100 ms later with metadata.platformMessageId.
 		const memories = [
@@ -63,9 +63,10 @@ describe("getRoomTranscript", () => {
 		expect(transcript.map((memory) => memory.content.text)).toEqual([
 			"what is 8*7?",
 			"56",
+			"56",
 			"thanks",
 		]);
-		expect(formatRecentMessages(transcript).split("56")).toHaveLength(2);
+		expect(formatRecentMessages(transcript).split("56")).toHaveLength(3);
 	});
 
 	it("keeps identical wording from distinct turns", async () => {

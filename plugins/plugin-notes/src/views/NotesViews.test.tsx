@@ -181,6 +181,27 @@ describe("Notes state labels", () => {
     },
   );
 
+  it("keeps cached Notes labels and content stable across background refreshes", () => {
+    const cached = snapshot(4);
+    cached.notes = [stickyNote()];
+    stateHook.mockReturnValue(hookState({ snapshot: cached }));
+    const notes = render(<NotesView />);
+    const helper = screen.getByText("Ask Eliza to create or edit");
+    const content = screen.getByText("Verify the signed build");
+    for (const loading of [true, false, true, false]) {
+      stateHook.mockReturnValue(hookState({ snapshot: cached, loading }));
+      notes.rerender(<NotesView />);
+      const main = screen.getByRole("main", { name: "Notes. 1 note." });
+      expect(main.getAttribute("aria-busy")).toBe(String(loading));
+      expect(screen.getByText("Ask Eliza to create or edit")).toBe(helper);
+      expect(screen.getByText("Verify the signed build")).toBe(content);
+      expect(screen.queryByText("Refreshing")).toBeNull();
+      expect(
+        screen.queryByRole("status", { name: "Loading notes" }),
+      ).toBeNull();
+    }
+  });
+
   it("does not report healthy zero counts before the first snapshot", () => {
     stateHook.mockReturnValue(hookState({ loading: true }));
     const _notes = render(<NotesView />);

@@ -61,6 +61,30 @@ export function normalizeBrowserWorkspaceText(value: unknown): string {
     .trim();
 }
 
+/** Page prose only; raw HTML remains available through the explicit html read. */
+export function readBrowserWorkspaceElementText(
+  element: Element | null,
+): string {
+  if (!element || element.closest("script, style, template")) return "";
+  // SHOW_TEXT: walk without cloning or modifying the document being controlled.
+  const walker = element.ownerDocument.createTreeWalker(element, 4);
+  const text: string[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.parentElement?.closest("script, style, template")) {
+      text.push(node.nodeValue ?? "");
+    }
+  }
+  return normalizeBrowserWorkspaceText(text.join(""));
+}
+
+/** Ambient page context may describe these controls, but must not copy values. */
+export function isBrowserWorkspacePrivateControl(element: Element): boolean {
+  return (
+    element.tagName === "INPUT" &&
+    ["password", "hidden"].includes((element as HTMLInputElement).type)
+  );
+}
+
 export function parseBrowserWorkspaceNumberLike(
   value: unknown,
 ): number | undefined {

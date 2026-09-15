@@ -14,6 +14,7 @@ import {
   PAGES_AUTHORITY_SCHEMA,
   parseDeployedRendererProof,
   parseWranglerPagesDeploymentOutput,
+  resolveWranglerPagesDeploymentOutput,
   verifyPublicPagesDeployment,
 } from "../pages-deployment-authority.mjs";
 
@@ -81,6 +82,204 @@ function authority() {
     runAttempt: "2",
   });
 }
+
+describe("Pages alias reconciliation", () => {
+  const options = {
+    expectedProject: "eliza-app",
+    expectedCommit: sourceSha,
+    expectedBranch: "staging",
+    expectedAlias: aliasUrl,
+    expectedEnvironment: "preview",
+    expectedProductionBranch: "main",
+    runId: "32500000001",
+    runAttempt: "2",
+  };
+  const credentials = {
+    accountId: "a".repeat(32),
+    apiToken: "test-only-token",
+  };
+  function deployment(overrides: Record<string, unknown> = {}) {
+    return {
+      id: deploymentId,
+      project_name: "eliza-app",
+      url: deploymentUrl,
+      aliases: [aliasUrl],
+      environment: "preview",
+      production_branch: "main",
+      deployment_trigger: {
+        metadata: {
+          commit_hash: sourceSha,
+          branch: "staging",
+          commit_dirty: false,
+        },
+      },
+      latest_stage: { name: "deploy", status: "success" },
+      ...overrides,
+    };
+  }
+  const apiResponse = (value: unknown) =>
+    new Response(JSON.stringify({ success: true, result: value }));
+
+  test("keeps complete Wrangler output offline and unchanged", async () => {
+    const result = await resolveWranglerPagesDeploymentOutput(
+      wranglerRecord(),
+      options,
+      {
+        fetchImpl: async () => {
+          throw new Error("Unexpected provider lookup");
+        },
+      },
+    );
+    expect(result).toEqual(authority());
+  });
+
+  test("waits for the exact deployment alias without rewriting Wrangler records", async () => {
+    const raw = wranglerRecord({ alias: undefined });
+    expect(() => parseWranglerPagesDeploymentOutput(raw, options)).toThrow(
+      "exact closed schema",
+    );
+    const requests: string[] = [];
+    const delays: number[] = [];
+    const result = await resolveWranglerPagesDeploymentOutput(raw, options, {
+      ...credentials,
+      fetchImpl: async (url: string, init: RequestInit) => {
+        requests.push(url);
+        expect(init.redirect).toBe("error");
+        expect(init.headers).toEqual({
+          Authorization: "Bearer test-only-token",
+        });
+        return apiResponse(
+          deployment({ aliases: requests.length === 1 ? null : [aliasUrl] }),
+        );
+      },
+      sleep: async (ms: number) => {
+        delays.push(ms);
+      },
+    });
+    expect(requests).toEqual(
+      Array(2).fill(
+        `https://api.cloudflare.com/client/v4/accounts/${credentials.accountId}/pages/projects/eliza-app/deployments/${deploymentId}`,
+      ),
+    );
+    expect(delays).toEqual([1000]);
+    expect(result).toEqual(authority());
+    expect(raw).toBe(wranglerRecord({ alias: undefined }));
+    expect(JSON.stringify(result)).not.toContain(credentials.apiToken);
+    expect(JSON.stringify(result)).not.toContain(deploymentId);
+  });
+
+  test.each([
+    { id: "4d07ff31-d66e-4cf0-948c-3f44cd9ed23d" },
+    { project_name: "other-app" },
+    { url: "https://other.eliza-app.pages.dev" },
+    { environment: "production" },
+    { production_branch: "staging" },
+    {
+      deployment_trigger: {
+        metadata: {
+          commit_hash: "b".repeat(40),
+          branch: "staging",
+          commit_dirty: false,
+        },
+      },
+    },
+    {
+      deployment_trigger: {
+        metadata: {
+          commit_hash: sourceSha,
+          branch: "main",
+          commit_dirty: false,
+        },
+      },
+    },
+    {
+      deployment_trigger: {
+        metadata: {
+          commit_hash: sourceSha,
+          branch: "staging",
+          commit_dirty: true,
+        },
+      },
+    },
+    { latest_stage: { name: "deploy", status: "failure" } },
+  ])("rejects conflicting provider identity %j", async (overrides) => {
+    await expect(
+      resolveWranglerPagesDeploymentOutput(
+        wranglerRecord({ alias: undefined }),
+        options,
+        {
+          ...credentials,
+          fetchImpl: async () => apiResponse(deployment(overrides)),
+        },
+      ),
+    ).rejects.toThrow("differs from release identity");
+  });
+
+  test("bounds alias polling and never fabricates the expected alias", async () => {
+    let calls = 0;
+    await expect(
+      resolveWranglerPagesDeploymentOutput(
+        wranglerRecord({ alias: undefined }),
+        options,
+        {
+          ...credentials,
+          fetchImpl: async () => {
+            calls += 1;
+            return apiResponse(deployment({ aliases: [] }));
+          },
+          sleep: async () => {},
+        },
+      ),
+    ).rejects.toThrow("bounded identity lookup");
+    expect(calls).toBe(5);
+  });
+
+  test("rejects extra Wrangler fields before any authenticated lookup", async () => {
+    let calls = 0;
+    await expect(
+      resolveWranglerPagesDeploymentOutput(
+        wranglerRecord({ alias: undefined, unexpected: true }),
+        options,
+        {
+          ...credentials,
+          fetchImpl: async () => {
+            calls += 1;
+            return apiResponse(deployment());
+          },
+        },
+      ),
+    ).rejects.toThrow("exact closed schema");
+    expect(calls).toBe(0);
+  });
+
+  test.each(["transport", "http", "json"])(
+    "fails closed without exposing provider payloads on %s errors",
+    async (failure) => {
+      let thrown: unknown;
+      try {
+        await resolveWranglerPagesDeploymentOutput(
+          wranglerRecord({ alias: undefined }),
+          options,
+          {
+            ...credentials,
+            fetchImpl: async () => {
+              if (failure === "transport")
+                throw new Error(credentials.apiToken);
+              if (failure === "http")
+                return new Response(credentials.apiToken, { status: 403 });
+              return new Response(credentials.apiToken);
+            },
+          },
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(String(thrown)).toContain("Pages deployment identity");
+      expect(String(thrown)).not.toContain(credentials.apiToken);
+    },
+  );
+});
 
 function rendererManifest() {
   return {

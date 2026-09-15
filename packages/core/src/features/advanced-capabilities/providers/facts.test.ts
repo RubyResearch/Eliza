@@ -99,6 +99,52 @@ function makeRuntime(args: {
 }
 
 describe("factsProvider keyword retrieval", () => {
+	it("keeps standing corrections inline and the complete attributed evidence available on demand", async () => {
+		const runtime = makeRuntime({
+			facts: [
+				memory("pref", "Use short replies.", {
+					kind: "durable",
+					category: "preference",
+				}),
+				memory("correction", "Correction: the meeting is Tuesday.", {
+					kind: "current",
+					category: "correction",
+				}),
+				memory("detail", "The old fixture contains an amber folder.", {
+					kind: "current",
+					category: "working_on",
+				}),
+				memory(
+					"other",
+					"Another participant prefers Spanish.",
+					{ kind: "durable", category: "preference" },
+					Date.now(),
+					otherEntityId,
+				),
+			],
+		});
+		const result = await factsProvider.get(
+			runtime,
+			memory("message", "hello"),
+			{ values: {}, data: {}, text: "" },
+		);
+		expect(result.discoveryText).toContain("Use short replies.");
+		expect(result.discoveryText).toContain("[current.correction");
+		expect(result.discoveryText).toContain(
+			"Correction: the meeting is Tuesday.",
+		);
+		expect(result.discoveryText).not.toContain("amber folder");
+		expect(result.discoveryText).not.toContain(
+			"Another participant prefers Spanish.",
+		);
+		expect(result.text).toContain("amber folder");
+		expect(result.text).toContain(
+			"Known facts in this room (about other participants)",
+		);
+		expect(result.text).toContain("Another participant prefers Spanish.");
+		expect(result.data?.facts).toHaveLength(4);
+		expect(runtime.useModel).not.toHaveBeenCalled();
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});

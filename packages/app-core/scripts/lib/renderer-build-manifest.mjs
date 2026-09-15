@@ -73,19 +73,21 @@ export function computeRendererFingerprint(distDir) {
 /**
  * Build the manifest object for a renderer dir (does not write it).
  * @param {string} distDir
- * @param {{ builtAt?: string, commit?: string|null, variant?: string|null,
+ * @param {{ builtAt?: string, startedAt?: string, commit?: string|null, variant?: string|null,
  *           capacitorTarget?: string|null, runtimeMode?: string|null,
  *           playwrightTestAuth?: boolean|null,
  *           iosApnsEnabled?: boolean|null }} [meta]
  */
 export function buildRendererManifest(distDir, meta = {}) {
   const fingerprint = computeRendererFingerprint(distDir);
+  const builtAt = meta.builtAt ?? new Date().toISOString();
   return {
     schema: RENDERER_BUILD_MANIFEST_SCHEMA,
     buildId: fingerprint.buildId,
     indexHtmlSha256: fingerprint.indexHtmlSha256,
     assetCount: fingerprint.assetCount,
-    builtAt: meta.builtAt ?? new Date().toISOString(),
+    builtAt,
+    startedAt: meta.startedAt ?? builtAt,
     commit: meta.commit ?? null,
     variant: meta.variant ?? null,
     capacitorTarget: meta.capacitorTarget ?? null,

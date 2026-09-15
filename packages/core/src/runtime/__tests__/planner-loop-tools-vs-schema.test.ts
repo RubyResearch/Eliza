@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ToolDefinition } from "../../types/model";
 import { runPlannerLoop } from "../planner-loop";
+import type { PlannerRuntime } from "../planner-types";
 
 /**
  * Regression: when tools[] is non-empty the planner must pass tools to useModel
@@ -184,6 +185,59 @@ describe("planner-loop responseSchema/tools collision regression", () => {
 		const plannerCall = capturedParams[0] as Record<string, unknown>;
 		expect(plannerCall.toolChoice).toBe("required");
 	});
+
+	it.each(["final", undefined] as const)(
+		"allows a closing reply after a settled action without pending scope (%s)",
+		async (scope) => {
+			const useModel = vi.fn<PlannerRuntime["useModel"]>();
+			useModel
+				.mockResolvedValueOnce({
+					text: "",
+					toolCalls: [
+						{
+							id: "lookup",
+							name: "LOOKUP",
+							arguments: {
+								query: "x",
+								...(scope ? { eliza_turn_scope: scope } : {}),
+							},
+						},
+					],
+				})
+				.mockResolvedValueOnce({
+					text: "",
+					toolCalls: [
+						{
+							id: "reply",
+							name: "REPLY",
+							arguments: { text: "Found x.", eliza_turn_scope: "final" },
+						},
+					],
+				});
+			const execute = vi.fn(async () => ({ success: true, text: "x" }));
+			let evaluations = 0;
+			const result = await runPlannerLoop({
+				runtime: { useModel },
+				context: { id: "ctx" },
+				tools: [MOCK_TOOL, { name: "REPLY" }],
+				requireNonTerminalToolCall: true,
+				executeToolCall: execute,
+				evaluate: async () =>
+					++evaluations === 1
+						? {
+								success: false,
+								decision: "CONTINUE",
+								thought: "Answer from the read result.",
+							}
+						: { success: true, decision: "FINISH", messageToUser: "Found x." },
+			});
+			expect(
+				useModel.mock.calls.map(([, params]) => params.toolChoice),
+			).toEqual(["required", "auto"]);
+			expect(execute).toHaveBeenCalledTimes(1);
+			expect(result.finalMessage).toBe("Found x.");
+		},
+	);
 
 	it("caps required-tool planner misses and surfaces the captured refusal text instead of throwing", async () => {
 		// Live trajectory tj-3bb6dc66be0c16.json on 2026-05-25 showed that when

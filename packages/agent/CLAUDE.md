@@ -172,7 +172,13 @@ Connector health monitoring (`api/connector-health.ts`): the interval is validat
 - `core-plugins.ts` splits plugins into blocking vs deferred boot phases; slow feature/provider plugins must stay in the deferred set or boot regresses.
 - Several barrel re-exports avoid duplicate-symbol (`TS2308`) collisions and lazy-load heavy plugins (wallet, app-manager, elizacloud) — read the inline comments in `index.ts`/`api/index.ts`/`services/index.ts` before adding broad `export *` lines.
 - `lint`/`lint:check` and `format` cover the complete `src/` tree.
-- Grounded action replies pass complete conversation memories, action results,
+- Post-turn evidence must wait for the current room lease's delivery settlement:
+  both JSON and SSE routes reconcile the final assistant text, reply correlation,
+  and action callback history before extraction snapshots are frozen. Failed
+  reconciliation cancels extraction; it must not deadlock the route or advance a
+  memory checkpoint. Keep the paired transport cases in
+  `api/__tests__/conversation-idempotency.test.ts` when changing this boundary.
+- Standalone grounded action replies pass complete conversation memories, action results,
   trajectories, character context, and model output without trimming, deduping,
   summarizing, or silently falling back from a partial prompt. Missing or invalid
   context is an explicit failure; final-wire model limits are enforced by core.
@@ -200,3 +206,19 @@ changes, additionally capture and inspect:
   service path ran end to end; and
 - the resulting memory, entity, relationship, scheduled-task, media, or other
   persistent artifacts rather than inferring them from a successful response.
+
+Chat widget and generative-UI providers publish complete bodies plus discovery notices. Direct text turns load syntax only through the explicit context-read protocol, including planner/completion restoration. Do not activate full generative guides by scanning arbitrary old dialogue for keywords; visual follow-ups can request the same complete reference. Channel and role gates still apply.
+
+Always-on response providers bypass context selection only, never role or private-provider gates. The generative UI guide is an ADMIN-authorized discovery reference in Stage 1 and later stages; do not require historical keywords or expose its full syntax before a context read.
+
+Recall queries use authored message text, excluding host language wrappers. Dynamic skill scores return discovery candidates; only an explicitly named strong match loads instructions automatically. Configured app display names are labeled separately from historical entity aliases. Protected trajectory model fields use complete secret-redacted projection, including nested tool schemas; runtime-only diagnostics retain bounded projection.
+
+Planner-owned LifeOps replies hand complete action-specific facts, character
+context and reply rules to the final response model through `data.replyGrounding`.
+Only the full message planner grants this ownership for the same message while
+its action handler is active. Direct/background callers and withheld result
+payloads keep standalone rendering. Deferred replies are internal evidence,
+never unavailable status or canned user prose; preserve receipts, clarification
+states, permission rechecks, final-context restoration and reply-only recovery.
+
+Backup metadata listing enumerates an existing directory directly, without an unconditional existence stat. After ENOENT, distinguish an absent directory from a dangling symlink before returning an empty list. Permission and non-directory errors remain errors; per-file identity checks, complete results and encrypted restore behavior remain unchanged.

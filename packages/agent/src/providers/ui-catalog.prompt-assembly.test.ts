@@ -22,7 +22,11 @@ import {
   type UUID,
 } from "@elizaos/core";
 import { beforeAll, describe, expect, it } from "vitest";
-import { uiGenerativeProvider, uiWidgetsProvider } from "./ui-catalog.ts";
+import {
+  uiGenerativeProvider,
+  uiWidgetCapabilitiesProvider,
+  uiWidgetsProvider,
+} from "./ui-catalog.ts";
 
 const ROOM_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" as UUID;
 const ENTITY_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" as UUID;
@@ -46,6 +50,7 @@ beforeAll(() => {
     character: { name: "ui-catalog-prompt-assembly-test" } as Character,
   });
   runtime.registerProvider(uiWidgetsProvider);
+  runtime.registerProvider(uiWidgetCapabilitiesProvider);
   runtime.registerProvider(uiGenerativeProvider);
 });
 
@@ -68,11 +73,11 @@ describe("v5 planner selection — ordinary-user reachability, no admin leak", (
     expect(plannerNames(["GUEST"])).toContain("uiWidgets");
   });
 
-  it("selects uiWidgets regardless of the turn's Stage-1 contexts (always-on)", () => {
-    // `alwaysInResponseState` is the reachability guarantee: even a turn whose
-    // Stage-1 contexts miss the declared gate still composes the guide, so
-    // marker emission never depends on context-classifier luck.
-    expect(plannerNames(["GUEST"], ["wallet"])).toContain("uiWidgets");
+  it("keeps compact marker support reachable without injecting long examples into unrelated contexts", () => {
+    expect(plannerNames(["GUEST"], ["wallet"])).toContain(
+      "uiWidgetCapabilities",
+    );
+    expect(plannerNames(["GUEST"], ["wallet"])).not.toContain("uiWidgets");
   });
 
   it("keeps the ADMIN-gated generative catalog out of non-admin turns", () => {

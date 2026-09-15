@@ -2037,7 +2037,10 @@ export class RelationshipsService extends Service {
 				confidence = GREATEST(entity_identities.confidence, EXCLUDED.confidence),
 				verified = entity_identities.verified OR EXCLUDED.verified,
 				last_seen = now(),
-				source = COALESCE(EXCLUDED.source, entity_identities.source),
+				source = CASE
+					WHEN EXCLUDED.source = 'reflection' THEN entity_identities.source
+					ELSE COALESCE(EXCLUDED.source, entity_identities.source)
+				END,
 				evidence_message_ids = (
 					SELECT to_jsonb(array_agg(DISTINCT element))
 					FROM jsonb_array_elements_text(
@@ -2201,7 +2204,23 @@ export class RelationshipsService extends Service {
 				ON CONFLICT ON CONSTRAINT unique_entity_identity DO UPDATE SET
 					confidence = GREATEST(entity_identities.confidence, EXCLUDED.confidence),
 					verified = entity_identities.verified OR EXCLUDED.verified,
-					last_seen = GREATEST(entity_identities.last_seen, EXCLUDED.last_seen)`,
+					first_seen = LEAST(entity_identities.first_seen, EXCLUDED.first_seen),
+					last_seen = GREATEST(entity_identities.last_seen, EXCLUDED.last_seen),
+					source = CASE
+						WHEN entity_identities.source IS NOT NULL AND entity_identities.source <> 'reflection'
+							THEN entity_identities.source
+						WHEN EXCLUDED.source IS NOT NULL AND EXCLUDED.source <> 'reflection'
+							THEN EXCLUDED.source
+						WHEN entity_identities.source IS NULL OR EXCLUDED.source IS NULL THEN NULL
+						ELSE 'reflection'
+					END,
+					evidence_message_ids = (
+						SELECT COALESCE(to_jsonb(array_agg(DISTINCT element)), '[]'::jsonb)
+						FROM jsonb_array_elements_text(
+							COALESCE(entity_identities.evidence_message_ids, '[]'::jsonb)
+							|| COALESCE(EXCLUDED.evidence_message_ids, '[]'::jsonb)
+						) AS element
+					)`,
 			);
 			await this.execSql(
 				`DELETE FROM entity_identities

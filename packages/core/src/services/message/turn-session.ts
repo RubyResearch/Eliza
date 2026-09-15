@@ -7,7 +7,10 @@ import { EventType } from "../../types/events";
 import type { Memory } from "../../types/memory";
 import type { UUID } from "../../types/primitives";
 import type { IAgentRuntime } from "../../types/runtime";
-import { trackPostDeliveryTask } from "../post-delivery-task-tracker.ts";
+import {
+	roomDeliverySettlement,
+	trackPostDeliveryTask,
+} from "../post-delivery-task-tracker.ts";
 
 /**
  * Tracks the latest response ID per agent+room to handle message superseding
@@ -135,6 +138,29 @@ export class MessageRunTerminalOwner {
 
 	adopt(label: string, task: Promise<unknown>): Promise<void> {
 		return this.track(label, () => task);
+	}
+
+	/** Evidence extraction must observe the connector's settled persisted reply,
+	 * including delivery receipts/callback history, not its provisional row. */
+	trackAfterDelivery(
+		label: string,
+		task: () => Promise<unknown>,
+	): Promise<void> {
+		const delivered = roomDeliverySettlement(
+			this.runtime,
+			this.message.roomId,
+			this.roomHandlerLease,
+		);
+		return this.track(label, async () => {
+			if (!(await delivered))
+				throw new ElizaError(
+					"Post-turn work skipped because delivery did not settle",
+					{
+						code: "POST_DELIVERY_NOT_SETTLED",
+					},
+				);
+			return task();
+		});
 	}
 
 	request(status: RunEventPayload["status"], error?: unknown): Promise<void> {

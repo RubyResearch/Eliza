@@ -810,6 +810,39 @@ Result: / and /home are on /dev/sda1, 387G total, 223G used, 165G free, 58% used
 		expect(result.messageToUser).toContain("165G free");
 	});
 
+	it.each(["", " (session: pty-1778500471501-4cf0e3a6)"])(
+		"preserves literal reply whitespace while removing only an internal annotation: %s",
+		async (annotation) => {
+			// The mixed preview/count live result kept both spaces on the wire,
+			// but evaluator cleanup collapsed them before client delivery.
+			const literal =
+				'Row 1: {"mode":"read-only"}.\nRow 2: keep  two spaces; don\'t normalize—OK!\n\tindented  text  \n : literal punctuation\n';
+			const expected = `Preview only:\n\n${literal}\nEnd of preview.`;
+			const result = await runEvaluator({
+				runtime: {
+					useModel: vi.fn(async () =>
+						JSON.stringify({
+							thought: "Only the supplied literal preview is requested.",
+							success: true,
+							decision: "FINISH",
+							messageToUser: `Preview only:\n\n${literal}\nEnd of preview${annotation}.`,
+						}),
+					),
+				},
+				context: { id: "literal-preview", events: [] },
+				trajectory: {
+					context: { id: "literal-preview" },
+					steps: [],
+					archivedSteps: [],
+					plannedQueue: [],
+					evaluatorOutputs: [],
+				},
+			});
+			expect(result.decision).toBe("FINISH");
+			expect(result.messageToUser).toBe(expected);
+		},
+	);
+
 	it("strips internal task-agent session-ids and auto-generated labels from messageToUser", async () => {
 		const runtime = {
 			useModel: vi.fn(
@@ -1473,6 +1506,26 @@ describe("fabricated marker invocations are rejected, real widgets pass", () => 
 			evaluatorOutputs: [],
 		},
 		effects: { copyToClipboard: vi.fn(), messageToUser: vi.fn() },
+	});
+
+	it.each(["[CALL:tool-1-0]", "Searching now. [CALL:tool-1-0]"])(
+		"replans instead of delivering a call reference: %s",
+		async (marker) => {
+			for (const output of [marker, finishWith(marker)]) {
+				const result = await runEvaluator(paramsWithTool(output));
+				expect(result.decision).toBe("CONTINUE");
+				expect(result.messageToUser ?? "").toBe("");
+			}
+		},
+	);
+
+	it.each([
+		"The internal reference is `[CALL:tool-1-0]`.",
+		"Example:\n```text\n[CALL:tool-1-0]\n```",
+	])("preserves quoted call-reference documentation: %s", async (answer) => {
+		const result = await runEvaluator(paramsWithTool(finishWith(answer)));
+		expect(result.decision).toBe("FINISH");
+		expect(result.messageToUser).toBe(answer);
 	});
 
 	it("a fabricated [DOCUMENT_SEARCH] marker coerces to CONTINUE and does not ship (live leak)", async () => {

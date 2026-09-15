@@ -13,6 +13,7 @@ import type { State } from "../../types/state";
 import type { V5MessageRuntimeStage1Result } from "./contracts.js";
 import {
 	appliedEffectReceiptIdsForReply,
+	capturePlannerReplyRecovery,
 	evaluatePlannedReplyEgress,
 	resolvePlannedReplyEgress,
 } from "./egress-policy.js";
@@ -254,6 +255,11 @@ export async function finalizePlannerReply(
 			reply: effectiveReplyText,
 			actionResults,
 			evaluator: plannerResult.evaluator,
+			recovery: capturePlannerReplyRecovery(
+				args.runtime,
+				args.message,
+				plannerResult.trajectory,
+			),
 		});
 		effectiveReplyText = recoveredReply.text;
 		replyRecovered = true;
@@ -439,6 +445,11 @@ export async function finalizePlannerReply(
 			message: args.message,
 			reply: zeroDeliveryRecovery.text,
 			actionResults,
+			recovery: capturePlannerReplyRecovery(
+				args.runtime,
+				args.message,
+				plannerResult.trajectory,
+			),
 		});
 		effectiveReplyText = recoveredReply.text;
 		strippedPlannedReplyText = effectiveReplyText;

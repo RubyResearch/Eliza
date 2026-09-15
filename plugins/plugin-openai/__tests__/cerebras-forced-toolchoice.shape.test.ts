@@ -26,6 +26,7 @@ import { handleTextSmall } from "../models/text";
 vi.mock("ai", () => ({
   generateText: aiMocks.generateText,
   streamText: aiMocks.streamText,
+  RetryError: { isInstance: () => false },
   jsonSchema: (schema: unknown) => ({ jsonSchema: schema }),
   Output: {
     object: () => ({ name: "object", responseFormat: Promise.resolve({ type: "json" }) }),

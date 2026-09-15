@@ -57,6 +57,7 @@ describe("local runtime conversation fetch", () => {
           [LOCAL_VOICE_RUNTIME_CONVERSATION_HEADER]: "spoofed-conversation",
           Cookie: "session=cloud-secret",
           "X-Future-Cloud-Secret": "must-not-cross-loopback",
+          "X-ElizaOS-Client-Id": "wrong-renderer-header",
         },
         body: JSON.stringify({
           text: "hello locally",
@@ -64,6 +65,10 @@ describe("local runtime conversation fetch", () => {
           clientMessageId: "twilio-call:CA123:started",
           metadata: {
             clientTransport: REALTIME_VOICE_CLIENT_TRANSPORT,
+            uiViewPath: "/notes",
+            uiTimeZone: "America/New_York",
+            uiClientId: "ui-speaking-seeker",
+            uiViewActionNames: ["UNTRUSTED_ACTION"],
           },
           streamProtocol: "delta-v2",
         }),
@@ -84,10 +89,13 @@ describe("local runtime conversation fetch", () => {
       clientMessageId: "twilio-call:CA123:started",
       metadata: {
         clientTransport: REALTIME_VOICE_CLIENT_TRANSPORT,
+        uiViewPath: "/notes",
+        uiTimeZone: "America/New_York",
       },
       streamProtocol: "delta-v2",
     });
     const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get("X-ElizaOS-Client-Id")).toBe("ui-speaking-seeker");
     expect(headers.has("Authorization")).toBe(false);
     expect(headers.has("X-Service-Key")).toBe(false);
     expect(headers.has("X-Eliza-Organization-Id")).toBe(false);
@@ -239,6 +247,19 @@ describe("local runtime conversation fetch", () => {
     },
     { text: "hello" },
     { text: "hello", metadata: { clientTransport: "browser-chat" } },
+    ...[
+      "",
+      "other renderer",
+      "ui-a\r\nAuthorization:x",
+      "x".repeat(129),
+      7,
+    ].map((uiClientId) => ({
+      text: "hello",
+      metadata: {
+        clientTransport: REALTIME_VOICE_CLIENT_TRANSPORT,
+        uiClientId,
+      },
+    })),
   ])(
     "rejects invalid text or transport metadata before downstream fetch",
     async (fields) => {

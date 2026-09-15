@@ -4,14 +4,18 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { RoomHandlerQueue } from "../runtime/room-handler-queue.ts";
+import type { Memory, UUID } from "../types/index.ts";
 import type { IAgentRuntime } from "../types/runtime.ts";
+import { MessageRunTerminalOwner } from "./message/turn-session.ts";
 import {
 	drainPostDeliveryTasks,
 	drainRoomPostDeliveryTasks,
 	pendingPostDeliveryTaskCount,
 	pendingRoomPostDeliveryTaskCount,
 	postDeliveryTaskQuarantineReason,
+	roomDeliverySettlement,
 	trackPostDeliveryTask,
+	withRoomDeliverySettlement,
 } from "./post-delivery-task-tracker.ts";
 
 function runtimeStub(roomHandlerQueue?: RoomHandlerQueue) {
@@ -23,6 +27,140 @@ function runtimeStub(roomHandlerQueue?: RoomHandlerQueue) {
 }
 
 describe("post-delivery task tracker", () => {
+	it("waits for settled connector evidence before extraction and terminal drain", async () => {
+		const queue = new RoomHandlerQueue();
+		const runtime = {
+			...runtimeStub(queue),
+			emitEvent: vi.fn(async () => undefined),
+		} as unknown as IAgentRuntime;
+		const roomId = "00000000-0000-4000-8000-000000000002" as UUID;
+		const message = {
+			id: "trigger",
+			roomId,
+			entityId: runtime.agentId,
+			content: { text: "Remember this" },
+		} as Memory;
+		const order: string[] = [];
+		await queue.withLease(roomId, async (lease) => {
+			await withRoomDeliverySettlement(runtime, roomId, lease, async () => {
+				const owner = new MessageRunTerminalOwner(
+					runtime,
+					"run" as UUID,
+					message,
+					Date.now(),
+					lease,
+				);
+				owner.trackAfterDelivery("post_turn", async () => {
+					order.push("extraction");
+				});
+				owner.request("completed");
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(order).toEqual([]);
+				expect(runtime.emitEvent).not.toHaveBeenCalled();
+				order.push("persist-final-reply", "persist-callback-evidence");
+			});
+			expect(order).toEqual([
+				"persist-final-reply",
+				"persist-callback-evidence",
+				"extraction",
+			]);
+			expect(runtime.emitEvent).toHaveBeenCalledTimes(1);
+			expect(pendingRoomPostDeliveryTaskCount(runtime, roomId)).toBe(0);
+			expect(queue.ownsLease(roomId, lease)).toBe(true);
+		});
+	});
+
+	it("cancels extraction without deadlocking terminal drain when connector persistence fails", async () => {
+		const queue = new RoomHandlerQueue();
+		const runtime = {
+			...runtimeStub(queue),
+			emitEvent: vi.fn(async () => undefined),
+		} as unknown as IAgentRuntime;
+		const roomId = "00000000-0000-4000-8000-000000000002" as UUID;
+		const message = {
+			id: "trigger",
+			roomId,
+			entityId: runtime.agentId,
+			content: { text: "Remember this" },
+		} as Memory;
+		const extract = vi.fn(async () => undefined);
+		await queue.withLease(roomId, async (lease) => {
+			await expect(
+				withRoomDeliverySettlement(runtime, roomId, lease, async () => {
+					const owner = new MessageRunTerminalOwner(
+						runtime,
+						"run" as UUID,
+						message,
+						Date.now(),
+						lease,
+					);
+					owner.trackAfterDelivery("post_turn", extract);
+					owner.request("completed");
+					throw new Error("delivery persistence failed");
+				}),
+			).rejects.toThrow("delivery persistence failed");
+			expect(extract).not.toHaveBeenCalled();
+			expect(runtime.emitEvent).toHaveBeenCalledTimes(1);
+			expect(pendingRoomPostDeliveryTaskCount(runtime, roomId)).toBe(0);
+			expect(runtime.reportError).toHaveBeenCalledWith(
+				"PostDeliveryTask",
+				expect.objectContaining({ code: "POST_DELIVERY_NOT_SETTLED" }),
+				expect.anything(),
+			);
+			await expect(
+				roomDeliverySettlement(runtime, roomId, lease),
+			).resolves.toBe(true);
+		});
+	});
+
+	it("scopes settlement to runtime/room/live lease and preserves hosts without a gate", async () => {
+		const queue = new RoomHandlerQueue();
+		const runtime = runtimeStub(queue);
+		const otherRuntime = runtimeStub(queue);
+		const roomId = "room-one";
+		const otherRoom = "room-two";
+		const lease = await queue.acquire(roomId);
+		const otherLease = await queue.acquire(otherRoom);
+		await expect(
+			withRoomDeliverySettlement(
+				runtime,
+				roomId,
+				otherLease,
+				async () => undefined,
+			),
+		).rejects.toMatchObject({
+			code: "POST_DELIVERY_SETTLEMENT_LEASE_MISMATCH",
+		});
+		await withRoomDeliverySettlement(runtime, roomId, lease, async () => {
+			expect(() =>
+				roomDeliverySettlement(runtime, roomId, otherLease),
+			).toThrowError(
+				expect.objectContaining({
+					code: "POST_DELIVERY_SETTLEMENT_LEASE_MISMATCH",
+				}),
+			);
+			await expect(
+				roomDeliverySettlement(otherRuntime, roomId, lease),
+			).resolves.toBe(true);
+			await expect(
+				roomDeliverySettlement(runtime, otherRoom, otherLease),
+			).resolves.toBe(true);
+			await expect(
+				withRoomDeliverySettlement(
+					runtime,
+					roomId,
+					lease,
+					async () => undefined,
+				),
+			).rejects.toMatchObject({
+				code: "POST_DELIVERY_SETTLEMENT_ALREADY_ACTIVE",
+			});
+		});
+		await lease.release();
+		await otherLease.release();
+	});
+
 	it("drains nested work before reporting quiescence", async () => {
 		const runtime = runtimeStub();
 		const order: string[] = [];

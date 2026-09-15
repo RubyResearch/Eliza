@@ -29,6 +29,26 @@ const receipt = lifeOpsNoopEffect({
 });
 
 describe("completeLifeOpsEffect with an unavailable grounded reply", () => {
+  it("keeps deferred grounding and internal text without promoting it to a visible reply", async () => {
+    const callback = vi.fn(async () => []);
+    const result = applyGroundedActionReply(
+      {
+        success: true,
+        text: "  Exact internal result 🦊  ",
+        data: { definition: { id: "definition-1" } },
+      },
+      { kind: "deferred", grounding: "Complete action facts and rules" },
+    );
+    const completed = await completeLifeOpsEffect(callback, result, receipt);
+    expect(completed).toEqual({ ...result, effectReceipts: [receipt] });
+    expect(completed.text).toBe("  Exact internal result 🦊  ");
+    expect(completed.data?.replyGrounding).toBe(
+      "Complete action facts and rules",
+    );
+    expect(completed.userFacingText).toBeUndefined();
+    expect(completed.turnComplete).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
+  });
   it("binds the receipt and passes the typed reply failure through without a callback", async () => {
     const settled = applyGroundedActionReply(
       {

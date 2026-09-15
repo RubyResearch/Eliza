@@ -13,13 +13,40 @@ import {
 	isHygienicDialogueMessage,
 } from "../features/basic-capabilities/providers/recentMessages.ts";
 import { renderStoredEnvelopesForPrompt } from "../security/external-content";
-import type { IAgentRuntime, Memory } from "../types";
+import type { IAgentRuntime, Memory, UUID } from "../types";
 import { isSyntheticConversationArtifactMemory } from "../utils/synthetic-conversation-artifact.ts";
 
 const transcriptsByRuntime = new WeakMap<
 	IAgentRuntime,
 	WeakMap<Memory, Promise<Memory[]>>
 >();
+
+/** Canonical dialogue projection shared by full-history and incremental extraction. */
+export function canonicalEvaluatorMessages(
+	memories: readonly Memory[],
+	agentId: UUID,
+): Memory[] {
+	return dedupeHygienicDialogueMessages(
+		memories
+			.filter(
+				(memory) =>
+					!isSyntheticConversationArtifactMemory(memory) &&
+					isHygienicDialogueMessage(memory, agentId),
+			)
+			.sort((left, right) => {
+				const l = Number.isFinite(left.createdAt ?? 0)
+					? (left.createdAt ?? 0)
+					: 0;
+				const r = Number.isFinite(right.createdAt ?? 0)
+					? (right.createdAt ?? 0)
+					: 0;
+				return (
+					l - r || String(left.id ?? "").localeCompare(String(right.id ?? ""))
+				);
+			}),
+		agentId,
+	);
+}
 
 /** Complete room transcript for the message's room, newest last. */
 export function getRoomTranscript(
@@ -39,33 +66,7 @@ export function getRoomTranscript(
 			roomId: message.roomId,
 			unique: false,
 		})
-		.then((memories) =>
-			// The same hygiene + dedupe pass the RECENT_MESSAGES transcript applies:
-			// connector record-of-send rows duplicate every delivered reply (live
-			// Discord: two identical agent rows per reply, ~100 ms apart), and the
-			// merged post-turn prompt otherwise carries each of them.
-			dedupeHygienicDialogueMessages(
-				memories
-					.filter(
-						(memory) =>
-							!isSyntheticConversationArtifactMemory(memory) &&
-							isHygienicDialogueMessage(memory, runtime.agentId),
-					)
-					.sort((left, right) => {
-						const l = Number.isFinite(left.createdAt ?? 0)
-							? (left.createdAt ?? 0)
-							: 0;
-						const r = Number.isFinite(right.createdAt ?? 0)
-							? (right.createdAt ?? 0)
-							: 0;
-						return (
-							l - r ||
-							String(left.id ?? "").localeCompare(String(right.id ?? ""))
-						);
-					}),
-				runtime.agentId,
-			),
-		);
+		.then((memories) => canonicalEvaluatorMessages(memories, runtime.agentId));
 	transcriptByMessage.set(message, loading);
 	// error-policy:J2 a failed read is not an empty room: drop the memo so the
 	// next caller retries, and let the storage error reach the evaluator run.
@@ -73,7 +74,10 @@ export function getRoomTranscript(
 	return loading;
 }
 
-export function formatRecentMessages(memories: Memory[]): string {
+export function formatRecentMessages(
+	memories: Memory[],
+	includeMessageIds = false,
+): string {
 	const lines: string[] = [];
 	for (const memory of memories) {
 		if (isSyntheticConversationArtifactMemory(memory)) continue;
@@ -86,7 +90,9 @@ export function formatRecentMessages(memories: Memory[]): string {
 			(typeof memory.content.name === "string" && memory.content.name) ||
 			memory.entityId ||
 			"someone";
-		lines.push(`- ${senderName}: ${text}`);
+		lines.push(
+			`- ${includeMessageIds ? `[messageId=${memory.id ?? "unavailable"}] ` : ""}${senderName}: ${text}`,
+		);
 	}
 	return lines.length > 0 ? lines.join("\n") : "(none)";
 }

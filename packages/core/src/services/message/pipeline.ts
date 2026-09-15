@@ -1,8 +1,10 @@
 /** Coordinates Stage 1 decisions, planner execution, visible reply resolution, and ordered trajectory finalization for a message turn. */
 
 import { TurnAbortedError } from "../../runtime/turn-controller";
+import { sanitizeUserVisibleModelOutput } from "../../runtime/user-visible-model-output";
 import { getStreamingContext } from "../../streaming-context";
 import { isObjectRecord as isRecord } from "../../utils/type-guards";
+import type { EvaluatorService } from "../evaluator";
 import { generateStage1Decision } from "./stage1-decision.js";
 
 export { directCodingResponseHandlerResult } from "./stage1-decision.js";
@@ -12,6 +14,7 @@ import type { V5MessageRuntimeInput } from "./turn-input.js";
 
 export type { V5MessageRuntimeInput } from "./turn-input.js";
 
+import { DISCOVER_TOOLS_NAME } from "../../actions/to-tool";
 import { ElizaError } from "../../errors";
 import { runShouldRespondInjectionGate } from "../../features/trust/should-respond-risk-gate";
 import { timeInferenceSpan } from "../../inference-timing";
@@ -37,7 +40,9 @@ import {
 	getMessageHandlerReply,
 	routeMessageHandlerOutput,
 } from "../../runtime/message-handler";
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "../../runtime/model-input-budget";
 import {
+	buildInitialPlannerModelInputBudget,
 	type PlannerLoopResult,
 	type PlannerRuntime,
 	type PlannerToolCall,
@@ -66,7 +71,8 @@ import type {
 	MessageHandlerResult,
 } from "../../types/components";
 import type { ContextEvent } from "../../types/context-object";
-import type { GenerateTextParams } from "../../types/model";
+import type { MessageReplyRecoveryContext } from "../../types/message-service";
+import { type GenerateTextParams, ModelType } from "../../types/model";
 import type { JsonValue } from "../../types/primitives";
 import { ChannelType } from "../../types/primitives";
 import type { IAgentRuntime } from "../../types/runtime";
@@ -106,13 +112,16 @@ import type { V5MessageRuntimeStage1Result } from "./contracts.js";
 import { withoutIntermediateVisibleText } from "./delivery.js";
 import { normalizeActionIdentifier } from "./direct-action-heuristics";
 import {
+	capturePlannerReplyRecovery,
 	evaluatePlannedReplyEgress,
 	resolvePlannedReplyEgress,
 } from "./egress-policy.js";
 import {
 	buildV5ExecutorContext,
+	collectBudgetedStageOneCandidateActions,
 	collectPlannerTools,
 	collectPreviousActionResults,
+	decideUmbrellaPlannerBudget,
 	executeV5PlannedToolCall,
 } from "./planned-tool.js";
 import {
@@ -150,6 +159,10 @@ import {
 	uniqueActionNames,
 } from "./stage1-reply-policy.js";
 import { subAgentCompletionRelayBody } from "./task-completion-relay.js";
+import {
+	appendDiscoveredPlannerTools,
+	createPlannerToolDiscoveryAction,
+} from "./tool-discovery.js";
 import { recordFactsAndRelationshipsStage } from "./trajectory-stages.js";
 import { detachPostDeliverySideEffect } from "./turn-session.js";
 
@@ -203,7 +216,9 @@ export async function runV5MessageRuntimeStage1(
 	}
 	const senderRole =
 		getTrajectoryContext()?.userRole ??
-		(await resolveStage1SenderRole(args.runtime, args.message));
+		(await timeInferenceSpan("message:stage1:sender-role", () =>
+			resolveStage1SenderRole(args.runtime, args.message),
+		));
 	const availableContexts = listAvailableContextsForRole(
 		args.runtime.contexts,
 		senderRole,
@@ -243,7 +258,12 @@ export async function runV5MessageRuntimeStage1(
 	const context = await timeInferenceSpan("message:stage1:context", () =>
 		createV5MessageContextObject({
 			...args,
-			includeActionDiscovery: true,
+			includeActionDiscovery:
+				directMessageChannel &&
+				args.message.content?.channelType !== ChannelType.VOICE_DM &&
+				!args.codingMode
+					? "index"
+					: true,
 			userRoles: [senderRole],
 			availableContexts,
 			ambientTurn,
@@ -333,6 +353,9 @@ export async function runV5MessageRuntimeStage1(
 			inferenceMessageText,
 			parsedResponseHandlerReply,
 			messageHandlerEndedAt,
+			providerDiscoveryEnabled,
+			loadedContextProviders,
+			contextCatalogRead,
 		} = await generateStage1Decision(
 			args,
 			{
@@ -378,6 +401,9 @@ export async function runV5MessageRuntimeStage1(
 			}
 		}
 
+		// First-party background reducers validate the canonical source in their
+		// shared durable model batch. Keep the parallel legacy validator only
+		// when those reducers cannot own the work.
 		// Kick off the FACTS_AND_RELATIONSHIPS stage in parallel with whichever
 		// Stage 2 path runs (simple reply or planner). This stage is purely a
 		// side-effect: it dedups + persists user-stated facts/relationships
@@ -390,29 +416,36 @@ export async function runV5MessageRuntimeStage1(
 			((messageHandler.extract.facts?.length ?? 0) > 0 ||
 				(messageHandler.extract.relationships?.length ?? 0) > 0)
 		) {
-			const startedAt = Date.now();
-			factsTask = runFactsAndRelationshipsStage({
-				runtime: args.runtime,
-				message: args.message,
-				state: args.state,
-				extract: messageHandler.extract,
-			})
-				.then((result) => ({ startedAt, endedAt: Date.now(), result }))
-				.catch((error) => {
-					// error-policy:J7 Facts persistence is detached from reply delivery;
-					// its explicit failed outcome is recorded in the trajectory below.
-					args.runtime.reportError(
-						"MessageService.factsAndRelationships",
-						error,
-						{ roomId: args.message.roomId },
-					);
-					return { startedAt, endedAt: Date.now(), result: null, error };
+			const memoryWorker =
+				args.runtime.getService<EvaluatorService>("evaluator");
+			// The ordinary post-delivery boundary persists this work only after
+			// canonical assistant-history settlement. A failed settlement must
+			// not freeze or acknowledge a partial conversation snapshot.
+			if (!memoryWorker?.ownsDeferredFacts?.(args.message)) {
+				const startedAt = Date.now();
+				factsTask = runFactsAndRelationshipsStage({
+					runtime: args.runtime,
+					message: args.message,
+					state: args.state,
+					extract: messageHandler.extract,
 				})
-				.then((outcome) => {
-					settledFactsOutcome = outcome;
-					return outcome;
-				});
-			args.runTerminalOwner?.adopt("facts-and-relationships", factsTask);
+					.then((result) => ({ startedAt, endedAt: Date.now(), result }))
+					.catch((error) => {
+						// error-policy:J7 Facts persistence is detached from reply delivery;
+						// its explicit failed outcome is recorded in the trajectory below.
+						args.runtime.reportError(
+							"MessageService.factsAndRelationships",
+							error,
+							{ roomId: args.message.roomId },
+						);
+						return { startedAt, endedAt: Date.now(), result: null, error };
+					})
+					.then((outcome) => {
+						settledFactsOutcome = outcome;
+						return outcome;
+					});
+				args.runTerminalOwner?.adopt("facts-and-relationships", factsTask);
+			}
 		}
 
 		// Persist `addressedTo` as relationship edges from the speaker to each
@@ -639,6 +672,8 @@ export async function runV5MessageRuntimeStage1(
 		}
 		const route = routeMessageHandlerOutput(messageHandler, {
 			addressedToOtherParticipant,
+			candidateActionsClearedByEvaluators:
+				responseHandlerEvaluation.candidateActionsClearedByEvaluators,
 			messageText: getUserMessageText(args.message) ?? "",
 		});
 		if (args.stage1DecisionOnly) {
@@ -1028,10 +1063,87 @@ export async function runV5MessageRuntimeStage1(
 					deterministicPlanSelection.name,
 				)
 			: undefined;
+		// Stage 1 has already interpreted the request. Load its exact operations
+		// (or complete families for parent-only hints), keeping other operations explicitly
+		// discoverable. An entirely unresolved selection starts with discovery;
+		// an unknown hint must not discard or broaden the known families. A reply
+		// sent to planning only to verify an applied claim, with no action hints,
+		// starts with discovery instead of loading every domain schema. Grounding
+		// and full-context restoration still run through the normal planner.
+		const stageOneCandidates =
+			getMessageHandlerCandidateActions(messageHandler);
+		const verifyReplyWithoutActionHints =
+			prePatchStageOneReplyIsUngroundedAppliedClaim &&
+			stageOneCandidates.length === 0;
+		const selectedActionFamilies =
+			args.codingMode === true || deterministicPlanSelection
+				? []
+				: collectBudgetedStageOneCandidateActions({
+						actions: plannerCandidateActions,
+						candidateActions: stageOneCandidates,
+						contexts: selectedContexts,
+						deferUnselectedContexts: true,
+						deferParentHints: true,
+					});
+		// Discovery is planner protocol, registered below rather than in
+		// runtime.actions. An explicit request must keep it even when no domain
+		// hint resolved, or when every admitted domain action was selected.
+		const requestsToolDiscovery = stageOneCandidates.some(
+			(name) =>
+				normalizeActionIdentifier(name) ===
+				normalizeActionIdentifier(DISCOVER_TOOLS_NAME),
+		);
+		const progressiveActions =
+			args.codingMode !== true &&
+			!deterministicPlanSelection &&
+			(requestsToolDiscovery ||
+				stageOneCandidates.length > 0 ||
+				verifyReplyWithoutActionHints) &&
+			(requestsToolDiscovery ||
+				selectedActionFamilies.length < plannerCandidateActions.length)
+				? selectedActionFamilies
+				: undefined;
+		if (progressiveActions) {
+			progressiveActions.push(
+				createPlannerToolDiscoveryAction(
+					plannerCandidateActions,
+					(discoveredActions) => {
+						const existingNames = new Set(
+							exposedPlannerActions.map((action) => action.name),
+						);
+						for (const action of discoveredActions) {
+							if (!existingNames.has(action.name)) {
+								exposedPlannerActions.push(action);
+								existingNames.add(action.name);
+							}
+						}
+						// The planner loop holds this array for the lifetime of the turn.
+						// Update it in place so the next model call sees the loaded schemas.
+						appendDiscoveredPlannerTools(
+							plannerContextWithDecision,
+							plannerTools,
+							discoveredActions,
+						);
+					},
+					(names) =>
+						collectV5PlannerCandidateActions({
+							runtime: args.runtime,
+							message: args.message,
+							state: plannerState,
+							selectedContexts,
+							candidateActions:
+								names.length > 0
+									? names
+									: args.runtime.actions.map((action) => action.name),
+							userRoles: [senderRole],
+						}),
+				),
+			);
+		}
 		const actionSurface = buildV5PlannerActionSurface({
 			actions: deterministicSurfaceAction
 				? [deterministicSurfaceAction]
-				: plannerCandidateActions,
+				: (progressiveActions ?? plannerCandidateActions),
 			forceFullSurface: args.codingMode === true,
 			codingActionProfile,
 			message: args.message,
@@ -1046,7 +1158,14 @@ export async function runV5MessageRuntimeStage1(
 			reportError: args.runtime.reportError.bind(args.runtime),
 			localizedExamples: localizedExamples ?? undefined,
 		});
-		const exposedPlannerActions = plannerCandidateActions.filter((action) =>
+		if (progressiveActions) {
+			actionSurface.summary.discoverableActionCount =
+				plannerCandidateActions.length;
+			actionSurface.summary.discoveryToolName = "DISCOVER_TOOLS";
+		}
+		const exposedPlannerActions = (
+			progressiveActions ?? plannerCandidateActions
+		).filter((action) =>
 			actionSurface.exposedActionNames.has(
 				normalizeActionIdentifier(action.name),
 			),
@@ -1060,6 +1179,7 @@ export async function runV5MessageRuntimeStage1(
 		);
 		const plannerContext = await createV5MessageContextObject({
 			...args,
+			includeContextCatalog: contextCatalogRead,
 			state: plannerState,
 			selectedContexts,
 			includeTools: true,
@@ -1076,6 +1196,20 @@ export async function runV5MessageRuntimeStage1(
 		const responseHandlerContextSlices = stringArrayProperty(
 			(messageHandler.plan as { contextSlices?: unknown }).contextSlices,
 		);
+		const originalResponseHandlerDraft =
+			fieldRunResult?.parsed.replyText ?? parsedResponseHandlerReply;
+		plannerContext.metadata = {
+			...plannerContext.metadata,
+			providerDiscoveryEnabled,
+			historyReferenceEncoding: providerDiscoveryEnabled,
+			loadedContextProviders,
+		};
+		if (messageHandler.plan.completionContext) {
+			plannerContext.metadata = {
+				...plannerContext.metadata,
+				completionContext: { ...messageHandler.plan.completionContext },
+			};
+		}
 		const plannerDecisionEvent: ContextEvent = {
 			id: `message-handler:${messageHandlerEndedAt}`,
 			type: "message_handler",
@@ -1086,18 +1220,32 @@ export async function runV5MessageRuntimeStage1(
 				: {}),
 			metadata: {
 				processMessage: messageHandler.processMessage,
+				// Routing may withhold a draft from delivery, but its conditions
+				// remain evidence for planning. Do not erase them with the reply.
+				...(!earlyReplySent &&
+				originalResponseHandlerDraft &&
+				originalResponseHandlerDraft !== messageHandler.plan.reply
+					? {
+							undeliveredDraft: {
+								replyText: originalResponseHandlerDraft,
+								instruction:
+									"This Stage-1 draft was not delivered and proves neither permission nor execution. Preserve its applicable conditions and confirmation requirements before any action; routing candidates are not authorization. Resolve conflicts against the original user evidence.",
+							},
+						}
+					: {}),
 				plan: {
 					contexts: messageHandler.plan.contexts,
-					replyEffectStatus: messageHandler.plan.replyEffectStatus ?? "none",
+					...(messageHandler.plan.replyEffectStatus !== undefined
+						? { replyEffectStatus: messageHandler.plan.replyEffectStatus }
+						: {}),
 					intents: messageHandler.plan.intents ?? [],
 					...(messageHandler.plan.requiresTool !== undefined
 						? { requiresTool: messageHandler.plan.requiresTool }
 						: {}),
 					candidateActions: getMessageHandlerCandidateActions(messageHandler),
 					parentActionHints: getMessageHandlerParentActionHints(messageHandler),
-					...(responseHandlerContextSlices.length > 0
-						? { contextSlices: responseHandlerContextSlices }
-						: {}),
+					// The complete slices already live in this event's content.
+					// Repeating them in metadata doubles the planner/evaluator input.
 					...(messageHandler.plan.reply !== undefined
 						? { reply: messageHandler.plan.reply }
 						: {}),
@@ -1124,6 +1272,43 @@ export async function runV5MessageRuntimeStage1(
 			getService?: (service: string) => unknown;
 		};
 		const plannerRuntime: PlannerRuntime = {
+			restoreProviderContext: async (original) => {
+				getStreamingContext()?.abortSignal?.throwIfAborted();
+				const freshState = await args.runtime.composeState(
+					args.message,
+					plannerProviderNames,
+					true,
+					false,
+				);
+				const fresh = await createV5MessageContextObject({
+					...args,
+					includeContextCatalog: contextCatalogRead,
+					state: freshState,
+					selectedContexts,
+					userRoles: [senderRole],
+					availableContexts,
+					extraProviderExclusions: ambientTurnProviderExclusions(
+						args.runtime,
+						args.message,
+					),
+				});
+				getStreamingContext()?.abortSignal?.throwIfAborted();
+				// Preserve dialogue, patches and settled receipts. Replace every old
+				// composed provider, including ones now absent after a permission change.
+				return {
+					...original,
+					events: [
+						...original.events.filter(
+							(event) =>
+								!(event.type === "provider" && event.source === "composeState"),
+						),
+						...fresh.events.filter(
+							(event) =>
+								event.type === "provider" && event.source === "composeState",
+						),
+					],
+				};
+			},
 			getService: (service) =>
 				typeof runtimeWithOptionalServices.getService === "function"
 					? runtimeWithOptionalServices.getService(service)
@@ -1136,7 +1321,7 @@ export async function runV5MessageRuntimeStage1(
 				),
 			logger: args.runtime.logger as PlannerRuntime["logger"],
 		};
-		const plannerTools = collectPlannerTools(
+		let plannerTools = collectPlannerTools(
 			plannerContextWithDecision,
 			undefined,
 			{
@@ -1144,8 +1329,111 @@ export async function runV5MessageRuntimeStage1(
 				candidateActions: getMessageHandlerCandidateActions(messageHandler),
 			},
 		);
-		const budgetedPlannerContextWithDecision = plannerContextWithDecision;
+		let budgetedPlannerContextWithDecision = plannerContextWithDecision;
 		const plannerProviderAttributionState = plannerState;
+		const preflightConfig = {
+			...args.plannerLoopConfig,
+			contextWindowTokens:
+				args.plannerLoopConfig?.contextWindowTokens ??
+				args.runtime
+					.getModelRegistrations?.()
+					.find(
+						(registration) =>
+							registration.modelType === ModelType.ACTION_PLANNER &&
+							typeof registration.metadata?.contextWindowTokens === "number",
+					)?.metadata?.contextWindowTokens ??
+				DEFAULT_CONTEXT_WINDOW_TOKENS,
+		};
+		const initialBudget = buildInitialPlannerModelInputBudget({
+			runtime: plannerRuntime,
+			context: plannerContextWithDecision,
+			config: preflightConfig,
+			tools: plannerTools,
+			codingMode: args.codingMode === true,
+		});
+		if (
+			args.codingMode !== true &&
+			initialBudget.estimatedInputTokens > initialBudget.dispatchThresholdTokens
+		) {
+			// Preserve every authorized parent and every explicit model candidate.
+			// The existing sub-planner exposes the selected parent's children with
+			// their full schemas. Do not expand those same schemas globally too.
+			const parentNames = new Set(
+				actionSurface.summary.tierAParents.map(normalizeActionIdentifier),
+			);
+			const actionLookup = buildRuntimeActionLookup({
+				actions: exposedPlannerActions,
+			});
+			for (const name of getMessageHandlerCandidateActions(messageHandler)) {
+				const action = resolveRuntimeAction(actionLookup, name);
+				if (action) parentNames.add(normalizeActionIdentifier(action.name));
+			}
+			const umbrellaActions = exposedPlannerActions.filter((action) =>
+				parentNames.has(normalizeActionIdentifier(action.name)),
+			);
+			if (
+				umbrellaActions.length > 0 &&
+				umbrellaActions.length < exposedPlannerActions.length
+			) {
+				const umbrellaContext = await createV5MessageContextObject({
+					...args,
+					includeContextCatalog: contextCatalogRead,
+					state: plannerState,
+					selectedContexts,
+					includeTools: true,
+					userRoles: [senderRole],
+					availableContexts,
+					preselectedActions: umbrellaActions,
+					actionSurface: {
+						exposedActionNames: parentNames,
+						summary: {
+							...actionSurface.summary,
+							exposedActionCount: umbrellaActions.length,
+							fallback: "umbrella-parent-budget",
+						},
+					},
+					ambientTurn,
+					extraProviderExclusions: ambientTurnProviderExclusions(
+						args.runtime,
+						args.message,
+					),
+				});
+				umbrellaContext.metadata = {
+					...umbrellaContext.metadata,
+					providerDiscoveryEnabled,
+					historyReferenceEncoding: providerDiscoveryEnabled,
+					loadedContextProviders,
+				};
+				if (messageHandler.plan.completionContext) {
+					umbrellaContext.metadata = {
+						...umbrellaContext.metadata,
+						completionContext: { ...messageHandler.plan.completionContext },
+					};
+				}
+				const context = appendContextEvent(
+					umbrellaContext,
+					plannerDecisionEvent,
+				);
+				const tools = collectPlannerTools(context, umbrellaActions, {
+					expandSubActions: false,
+				});
+				const budget = buildInitialPlannerModelInputBudget({
+					runtime: plannerRuntime,
+					context,
+					config: preflightConfig,
+					tools,
+				});
+				if (
+					decideUmbrellaPlannerBudget({
+						umbrella: budget,
+						current: initialBudget,
+					}) !== "not-smaller"
+				) {
+					budgetedPlannerContextWithDecision = context;
+					plannerTools = tools;
+				}
+			}
+		}
 		const benchmarkForcingToolCall = isBenchmarkForcingToolCall(args.message);
 		// Only HARD-enforce a non-terminal tool when Stage 1 both flagged the turn
 		// tool-required AND named at least one candidate action. A bare
@@ -1219,10 +1507,15 @@ export async function runV5MessageRuntimeStage1(
 						? "Benchmark harness mode: every turn must invoke a structured tool from the exposed action surface. " +
 							"Do not answer with REPLY/RESPOND prose — the harness scores tool calls, not conversation. " +
 							"Pick the single best non-terminal action (e.g. MESSAGE, CALENDAR, TODO) that can attempt the request and call it now."
-						: "The Stage 1 router marked this current turn as requiring a tool. " +
-							"prior_dialogue_policy: " +
-							"Do not answer directly from memory, chat history, prior attachments, or prior tool output. " +
-							"Call at least one exposed non-terminal tool that can attempt the current request.",
+						: args.codingMode !== true &&
+								messageHandler.plan.intents?.some((intent) => intent.trim())
+							? "Stage 1 named candidate tools for the current request. " +
+								"Candidate names are not authorization. Honor the complete request and its constraints. " +
+								"If only a preview, confirmation question, or terminal answer is appropriate, propose REPLY without executing an effect; completion evaluation will check outstanding intents."
+							: "The Stage 1 router marked this current turn as requiring a tool. " +
+								"prior_dialogue_policy: " +
+								"Do not answer directly from memory, chat history, prior attachments, or prior tool output. " +
+								"Call at least one exposed non-terminal tool that can attempt the current request.",
 				})
 			: budgetedPlannerContextWithDecision;
 		const plannerContextAfterEarlyReply = earlyReplySent
@@ -1431,12 +1724,34 @@ export async function runV5MessageRuntimeStage1(
 					result.modelReplyRequired === true
 				) {
 					// Stage 1 already wrote this turn in the agent's voice. Hold that prose
-					// until the deterministic action returns an accepted effect receipt, then
+					// until the deterministic action returns a confirming effect receipt, then
 					// release it without a second inference. The normal reply-egress guard
 					// below still rejects unrelated mutation claims. Missing prose keeps the
 					// post-tool synthesis path so an internal receipt never becomes canned UI.
-					const acceptedEffect = structuredEffectFromToolResult(result);
-					const groundedModelReply = prePatchStageOneReply?.trim();
+					const effectReceipt = structuredEffectFromToolResult(result);
+					// A navigation draft can correctly be marked pending before dispatch.
+					// Only this confirmed navigation branch may reuse it; ordinary pending
+					// work remains excluded from the planner's answer-rescue fallbacks.
+					let groundedModelReply = prePatchStageOneReply?.trim();
+					if (effectReceipt?.effect === "view_navigation") {
+						let draft = parsedResponseHandlerReply;
+						const registeredReplyDraft = fieldRunResult?.parsed.replyText;
+						if (
+							!draft &&
+							effectReceipt.status === "delivered" &&
+							prePatchStageOneReplyEffectStatus === "pending" &&
+							typeof registeredReplyDraft === "string"
+						) {
+							draft = registeredReplyDraft;
+						}
+						const visibleDraft = sanitizeUserVisibleModelOutput(draft);
+						groundedModelReply =
+							visibleDraft.kind === "text" &&
+							prePatchStageOneReplyEffectStatus !== "non_applied" &&
+							effectReceipt.label?.trim()
+								? visibleDraft.text
+								: undefined;
+					}
 					const groundedModelReplyEgress = groundedModelReply
 						? evaluatePlannedReplyEgress({
 								providers: plannerState.data.providers,
@@ -1447,11 +1762,13 @@ export async function runV5MessageRuntimeStage1(
 							})
 						: undefined;
 					if (
-						acceptedEffect?.status === "accepted" &&
+						(effectReceipt?.status === "accepted" ||
+							(effectReceipt?.effect === "view_navigation" &&
+								effectReceipt.status === "delivered")) &&
 						groundedModelReply &&
 						replyNamesStructuredEffectDestination(
 							groundedModelReply,
-							acceptedEffect,
+							effectReceipt,
 						) &&
 						groundedModelReplyEgress?.verdict === "allow"
 					) {
@@ -1618,6 +1935,7 @@ export async function runV5MessageRuntimeStage1(
 										plannerContext: loopContext,
 										executorCtx: buildV5ExecutorContext({
 											message: args.message,
+											replyOwner: "planner",
 											state: plannerState,
 											selectedContexts,
 											senderRole,
@@ -1810,6 +2128,20 @@ export async function runV5MessageRuntimeStage1(
 			// outcome and surface the unavailable system status separately; none of
 			// the answerless/egress/context-after fallbacks may call another model
 			// or execute another action after this presentation failure.
+			let replyRecovery: MessageReplyRecoveryContext | undefined;
+			try {
+				replyRecovery = capturePlannerReplyRecovery(
+					args.runtime,
+					args.message,
+					plannerResult.trajectory,
+				);
+			} catch {
+				// error-policy:J4 Unserializable evidence disables later recovery, but must never
+				// erase the authoritative failure/results or replay a saved effect.
+				args.runtime.logger.warn(
+					"Reply-only recovery unavailable: complete context could not be captured",
+				);
+			}
 			return {
 				kind: "planned_reply",
 				messageHandler,
@@ -1824,6 +2156,7 @@ export async function runV5MessageRuntimeStage1(
 					mode: "none",
 					terminalFailure: plannerResult.terminalFailure,
 					actionResults: egressActionResults,
+					...(replyRecovery ? { replyRecovery } : {}),
 				},
 			};
 		}
@@ -1871,6 +2204,11 @@ export async function runV5MessageRuntimeStage1(
 				reply: plannerResult.finalMessage ?? "",
 				actionResults: egressActionResults,
 				evaluator: plannerResult.evaluator,
+				recovery: capturePlannerReplyRecovery(
+					args.runtime,
+					args.message,
+					plannerResult.trajectory,
+				),
 			});
 			plannerResult = {
 				...plannerResult,

@@ -495,7 +495,7 @@ describe("post-turn evaluation detachment", () => {
 					await new Promise<void>((resolve) => {
 						releaseEvaluator = resolve;
 					});
-					return { run: vi.fn(async () => ({ results: [] })) };
+					return { enqueue: vi.fn(async () => ({ results: [] })) };
 				},
 			);
 		});
@@ -571,7 +571,7 @@ describe("post-turn evaluation detachment", () => {
 		});
 		(runtime.getServiceLoadPromise as ReturnType<typeof vi.fn>) = vi.fn(
 			async () => ({
-				run: vi.fn(async () => {
+				enqueue: vi.fn(async () => {
 					const evaluatorContext = getTrajectoryContext();
 					expect(evaluatorContext).toMatchObject({
 						trajectoryId: "trajectory-1",
@@ -587,6 +587,7 @@ describe("post-turn evaluation detachment", () => {
 			}),
 		);
 		const input = userMessage("remember this evaluator ordering");
+		runtime.getParticipantsForRoom = vi.fn(async () => [USER_ID, AGENT_ID]);
 		input.metadata = {
 			type: "message",
 			trajectoryId: "trajectory-1",
@@ -602,6 +603,7 @@ describe("post-turn evaluation detachment", () => {
 		await drainPostDeliveryTasks(runtime);
 
 		expect(trajectoryLogger.startStep).toHaveBeenCalledOnce();
+		expect(runtime.reportError).not.toHaveBeenCalled();
 		expect(trajectoryLogger.logLlmCall).toHaveBeenCalledWith({
 			stepId: "post-turn-child",
 		});

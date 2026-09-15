@@ -177,6 +177,35 @@ describe("commitment_extraction evaluator", () => {
   });
 
   describe("shouldRun", () => {
+    it.each([
+      'Create a note titled "Context QA" with body "Test". Then open Notes so I can see it.',
+      "Show my calendar so that I can choose a time.",
+      "Open the document so\nthat I can read it.",
+    ])("skips purpose clauses without a promise: %s", async (text) => {
+      await expect(
+        commitmentExtractionEvaluator.shouldRun({
+          runtime: makeRuntime(),
+          message: makeMessage(text),
+          options: {},
+        }),
+      ).resolves.toBe(false);
+      expect(mocks.hasOwnerAccess).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      "I can send the deck Friday.",
+      "Open Notes so I can see it. I'll send the deck Friday.",
+      "I'll send the deck Friday so I can finish the handoff.",
+    ])("preserves offers and independent promises: %s", async (text) => {
+      await expect(
+        commitmentExtractionEvaluator.shouldRun({
+          runtime: makeRuntime(),
+          message: makeMessage(text),
+          options: {},
+        }),
+      ).resolves.toBe(true);
+    });
+
     it("skips the agent's own messages", async () => {
       const runtime = makeRuntime();
       const message = makeMessage(

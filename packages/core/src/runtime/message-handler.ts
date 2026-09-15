@@ -14,7 +14,9 @@ import type { AgentContext } from "../types/contexts";
 import {
 	normalizeReplyEffectStatus,
 	normalizeTopics,
+	readCompleteStringHints,
 } from "./builtin-field-evaluators";
+import { parseCompletionContextSelection } from "./completion-context";
 import { parseJsonObject, stripJsonStructuralJunkReply } from "./json-output";
 import {
 	looksLikeRawFieldTranscript,
@@ -103,6 +105,9 @@ export function parseMessageHandlerOutput(
 	const normalizedPlan: V5MessageHandlerOutput["plan"] = {
 		contexts,
 		reply: replyRaw,
+		completionContext: parseCompletionContextSelection(
+			parsed.completionContext,
+		),
 		...(typeof parsed.replyEffectStatus === "string" &&
 		parsed.replyEffectStatus.trim().toLowerCase() === replyEffectStatus
 			? { replyEffectStatus }
@@ -195,14 +200,6 @@ function parseMessageHandlerFieldTranscript(
 	};
 }
 
-function readCompleteStringHints(raw: unknown): string[] | null {
-	if (raw === undefined || raw === null) return [];
-	if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) {
-		return null;
-	}
-	return [...raw];
-}
-
 function parseExtract(raw: unknown): MessageHandlerExtract | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 		return undefined;
@@ -274,7 +271,7 @@ const EXPLICIT_MEDIA_GENERATION_REQUEST_RE =
 const CAPABILITY_DENIAL_REPLY_RE =
 	/\b(?:can'?t|cannot|unable to|no|don'?t have|lack)\b[^.!?]{0,80}\b(?:tool|generat|capabilit|action|model|service|setup|environment)|private surface|owner'?s private info|(?:limited|only available) to (?:the owner|them)|don'?t have access to that/i;
 
-/** Explicit reminder/alarm request shape — as unambiguous as an ask gets. */
+/** Reminder wording supports scheduling votes and denial recovery, not intent on its own. */
 const EXPLICIT_REMINDER_REQUEST_RE =
 	/\bremind me\b|\bset (?:a |an )?(?:reminder|alarm)\b/i;
 
@@ -296,6 +293,9 @@ export function routeMessageHandlerOutput(
 	output: V5MessageHandlerOutput,
 	options?: {
 		addressedToOtherParticipant?: boolean;
+		/** A runtime evaluator replaced the candidate set from richer evidence.
+		 * Text-only fallback must not undo it; semantic sibling routing remains. */
+		candidateActionsClearedByEvaluators?: boolean;
 		/** The user's own message text; enables request-shape promotions the
 		 * stage-1 output alone cannot justify. Optional for compatibility —
 		 * absent, the request-shape promotions simply do not run. */
@@ -339,18 +339,35 @@ export function routeMessageHandlerOutput(
 	// genuinely gated for this surface, the gate-rejection short-circuit
 	// still answers honestly — the layers compose.
 	const messageTextForRouting = options?.messageText ?? "";
-	const isExplicitMediaAsk = EXPLICIT_MEDIA_GENERATION_REQUEST_RE.test(
-		messageTextForRouting,
-	);
+	const allowTextOnlyFallback =
+		options?.candidateActionsClearedByEvaluators !== true;
+	const isExplicitMediaAsk =
+		allowTextOnlyFallback &&
+		EXPLICIT_MEDIA_GENERATION_REQUEST_RE.test(messageTextForRouting);
 	// Seeding is applied ONLY on routes that enter the planner: a simple-path
 	// clarify ("a picture of what exactly?") must stay a final reply, so the
 	// seed never by itself converts a simple turn into planning.
-	const isExplicitReminderAsk = EXPLICIT_REMINDER_REQUEST_RE.test(
-		messageTextForRouting,
-	);
-	const isExplicitTaskStatusAsk = EXPLICIT_TASK_STATUS_REQUEST_RE.test(
-		messageTextForRouting,
-	);
+	// "Remind me" also introduces ordinary recall. Do not turn an unrelated
+	// navigation/read plan into scheduling solely because that phrase occurs.
+	// Keep the existing owner/group sibling fallback for a scheduling vote or
+	// a capability denial that needs to be checked against the real surface.
+	const hasReminderPlanningVote =
+		allContexts.some((context) =>
+			["tasks", "todos", "automation"].includes(context),
+		) ||
+		(output.plan.candidateActions ?? []).some((name) =>
+			/^(?:OWNER_REMINDERS|TRIGGER)(?:_|$)/u.test(
+				String(name).trim().toUpperCase(),
+			),
+		);
+	const isExplicitReminderAsk =
+		EXPLICIT_REMINDER_REQUEST_RE.test(messageTextForRouting) &&
+		(hasReminderPlanningVote ||
+			(allowTextOnlyFallback &&
+				CAPABILITY_DENIAL_REPLY_RE.test(getMessageHandlerReply(output))));
+	const isExplicitTaskStatusAsk =
+		allowTextOnlyFallback &&
+		EXPLICIT_TASK_STATUS_REQUEST_RE.test(messageTextForRouting);
 	const seedCandidate = (name: string): void => {
 		if (
 			(output.plan.candidateActions ?? []).some(

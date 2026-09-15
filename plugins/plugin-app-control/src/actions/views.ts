@@ -451,6 +451,15 @@ function inferMode(
 		readStringOption(options, "action") ?? readStringOption(options, "mode");
 	const trimmed = viewRequestText(text).trim();
 	const normalizedExplicit = explicit?.trim().toLowerCase().replace(/-/g, "_");
+	// A planner read must stay a read even when the user asks to keep a split,
+	// window, or pinned surface visible while querying its current state.
+	if (
+		normalizedExplicit === "list" ||
+		normalizedExplicit === "current" ||
+		normalizedExplicit === "search"
+	) {
+		return normalizedExplicit;
+	}
 	// The planner owns explicit navigation. Incidental words such as "right
 	// now" must not turn a show call into a split layout or another operation.
 	if (normalizedExplicit === "show" || normalizedExplicit === "open") {
@@ -1098,10 +1107,9 @@ function resolveViewCapability({
 		);
 		if (currentExact) return currentExact;
 		if (exactCandidates.length === 1) return exactCandidates[0];
-		// An explicit capability without an explicit view may resolve only by its
-		// declared id. Letting fuzzy scoring reinterpret an unknown capability on
-		// the foreground view can turn a Calendar request into a Notes mutation.
-		if (!requestedView) return null;
+		// Explicit planner choices resolve by declared id only. Message-text
+		// scoring must never turn an unknown UI interaction into a record write.
+		return null;
 	}
 
 	const sourceText = [actionToken ?? text, explicitCapability]
@@ -1204,6 +1212,10 @@ function correctCapabilityOperationFamily(
 		};
 	}
 
+	// A selected read must never become a write or UI mutation because a
+	// prerequisite, prohibition or later step contains another operation verb.
+	if (selectedFamily === "read") return { kind: "capability", capability };
+
 	// Preserve the planner's explicit selection when its family has any
 	// token support in the request. This prevents rewriting an explicit
 	// delete-note to get-note just because the request also contained
@@ -1218,14 +1230,13 @@ function correctCapabilityOperationFamily(
 
 	// The selected capability's family has NO token support in the
 	// request — a potential mismatch. Before correcting, enforce the
-	// asymmetric-risk rule: never lexically escalate read→delete.
-	// Silently upgrading a read into a destructive action destroys data;
-	// a missed correction on a non-destructive family is at worst a
-	// retryable action.
+	// asymmetric-risk rule: never lexically escalate into delete.
+	// Surrounding tokens cannot authorize destructive escalation; the
+	// planner must select that operation itself.
 	const requestedFamily = [...requestedFamilies][0];
 	const correctedIsDestructive = requestedFamily === "delete";
 	if (correctedIsDestructive && !selectedIsDestructive) {
-		// Read→delete (or create/update/select→delete) escalation is
+		// Create/update/select→delete escalation is
 		// prohibited. Return the original capability unchanged rather
 		// than guessing destructive intent from lexical tokens.
 		return { kind: "capability", capability };
@@ -1879,9 +1890,13 @@ function normalizeLooseTerm(value: string): string {
 		.trim();
 }
 
-function textMentionsTerm(normalizedText: string, term: string): boolean {
+function textMentionsTerm(
+	normalizedText: string,
+	term: string,
+	minimumLength = 3,
+): boolean {
 	const normalizedTerm = normalizeLooseTerm(term);
-	if (normalizedTerm.length < 3) return false;
+	if (normalizedTerm.length < minimumLength) return false;
 	const re = new RegExp(`(?:^|\\W)${escapeRegExp(normalizedTerm)}(?:\\W|$)`);
 	return re.test(normalizedText);
 }
@@ -1980,32 +1995,55 @@ function resolveLayoutTargets(
 	}
 
 	const requestText = viewRequestText(text);
-	const lower = requestText.toLowerCase();
 	const normalizedText = normalizeLooseTerm(requestText);
-	const textResolved: ViewSummary[] = [];
+	const identityResolved: ViewSummary[] = [];
+	const tagResolved: ViewSummary[] = [];
 	for (const view of views) {
-		const id = view.id.toLowerCase();
-		const label = view.label.toLowerCase();
-		const normalizedLabel = normalizeLooseTerm(label);
+		const normalizedLabel = normalizeLooseTerm(view.label);
 		const labelIsGenericSurface = VIEW_SURFACE_TOKENS.has(normalizedLabel);
-		const terms = [
-			id,
-			...(labelIsGenericSurface ? [] : [label]),
-			...(view.tags ?? []).filter(
-				(tag) => !VIEW_SURFACE_TOKENS.has(normalizeLooseTerm(tag)),
-			),
-		];
 		if (
-			lower.includes(id) ||
-			(!labelIsGenericSurface && label.length >= 3 && lower.includes(label)) ||
-			terms.some((term) => textMentionsTerm(normalizedText, term))
+			textMentionsTerm(normalizedText, view.id, 1) ||
+			(!labelIsGenericSurface && textMentionsTerm(normalizedText, view.label))
 		) {
-			textResolved.push(view);
+			identityResolved.push(view);
+		} else if (
+			(view.tags ?? []).some(
+				(tag) =>
+					!VIEW_SURFACE_TOKENS.has(normalizeLooseTerm(tag)) &&
+					textMentionsTerm(normalizedText, tag),
+			)
+		) {
+			tagResolved.push(view);
 		}
 	}
 
 	const explicitUnique = uniqueByViewId(explicitResolved);
-	const textUnique = uniqueByViewId(textResolved);
+	const identityUnique = uniqueByViewId(identityResolved);
+	const identityIds = new Set(identityUnique.map((view) => view.id));
+	const declaredIdentities = explicitUnique.filter((view) =>
+		identityIds.has(view.id),
+	);
+	// A complete declared subset belongs to this step. Other named views may
+	// be excluded by the user or belong to a later step; their mere occurrence
+	// must not expand the action. Likewise, trim unmentioned names from polluted
+	// planner options when the user supplies a complete exact pair.
+	if (declaredIdentities.length >= 2) return declaredIdentities;
+	// A complete step can name its targets only in structured arguments. Other
+	// prose identities may be exclusions, so do not union or substitute them.
+	if (explicitUnique.length >= 2) return explicitUnique;
+	// A named pair owns its layout membership even when the planner supplied
+	// extra targets. Broad tags in another clause (including a data restriction
+	// such as "leave reminders unchanged") must not add unrelated panes.
+	if (identityUnique.length >= 2) return identityUnique;
+	// Preserve legacy tag/alias resolution only when neither the user nor the
+	// structured step identifies a complete layout, e.g. "notes and calender".
+	const mentionedIds = new Set([
+		...identityIds,
+		...tagResolved.map((view) => view.id),
+	]);
+	const textUnique = uniqueByViewId(
+		views.filter((view) => mentionedIds.has(view.id)),
+	);
 	return textUnique.length >= 2
 		? textUnique
 		: textUnique.length === 1 && explicitUnique.length <= 1
@@ -2313,7 +2351,7 @@ async function runViewsClose({
 async function runViewsLayout({
 	client,
 	message,
-	mode,
+	mode: requestedMode,
 	options,
 	viewType,
 	callback,
@@ -2328,6 +2366,12 @@ async function runViewsLayout({
 	// Security-unwrapped user words — never the raw (possibly enveloped)
 	// content.text; the envelope's warning contains verbs the extractors match.
 	const text = userRequestMessageText(message);
+	// The shell renders tile mode as a grid. An explicit row/column request
+	// must carry split mode as well as its orientation to reach that renderer.
+	const mode =
+		requestedMode === "tile" && readLayoutValue("", options) !== "grid"
+			? "split"
+			: requestedMode;
 	const views = await client.listViews({ viewType });
 	const placement =
 		mode === "split" ? readPlacementValue(text, options) : undefined;
@@ -2468,12 +2512,12 @@ function asViewInteractionDataValue(
 }
 
 const VIEWS_ROUTING_HINT = [
-	"UI view/window/panel/app navigation and layout -> VIEWS.",
-	"Eliza's home screen is the chat view: return home with action=show view=chat. The views-manager is the app list, not home. App navigation never requires turning the user's words into a website URL.",
+	"Opening one known app view -> VIEWS_SHOW with view and navigationStepId. UI layouts, catalog discovery and other operations -> VIEWS.",
+	"Eliza's home screen is the chat view: return home with VIEWS_SHOW view=chat when available, otherwise VIEWS action=show view=chat. The views-manager is the app list, not home. App navigation never requires turning the user's words into a website URL.",
 	"UI Context identifies the open view and its capabilities, not its displayed contents. Answer identity-only questions from that context. To describe visible text, balances, settings, or selections, first inspect the view with get-text or list-elements, or use its domain read action. Configuration diagnostics are not evidence of what the screen displays.",
-	"View switching is a common proactive response in app chat: use action=show when the user asks to open, show, switch to, or pull up a matching surface, including a bare surface name in any language.",
-	"Use VIEWS for navigation, close/hide, the view manager, split/tile/window/pin layouts, and explicit capabilities that the selected view declares when no dedicated domain action owns the data.",
-	"Opening the Calendar surface uses VIEWS action=show; reading or changing calendar events uses CALENDAR. Opening Calendar does not select the requested date. To show a particular day's agenda, open Calendar, then invoke its declared VIEW_CALENDAR_SELECT_VISIBLE_DAY tool directly with date, never as an interact capability. If that tool is not exposed, inspect the view's declared scoped-action steps and execute them with VIEWS interact (agent-click uses params.id); navigate the month first if needed. An event read does not prove UI selection. Verify the displayed selection before saying that day is open.",
+	"For a request to open, show, switch to, or pull up one known surface, including a bare surface name in any language, prefer VIEWS_SHOW when available; VIEWS action=show is the fallback.",
+	"Use VIEWS for close/hide, the view manager, split/tile/window/pin layouts, and explicit capabilities that the selected view declares when no dedicated domain action owns the data.",
+	"Opening the Calendar surface uses VIEWS_SHOW when available, otherwise VIEWS action=show; reading or changing calendar events uses CALENDAR. Opening Calendar does not select the requested date. To show a particular day's agenda, open Calendar, then invoke its declared VIEW_CALENDAR_SELECT_VISIBLE_DAY tool directly with date, never as an interact capability. If that tool is not exposed, inspect the view's declared scoped-action steps and execute them with VIEWS interact (agent-click uses params.id); navigate the month first if needed. An event read does not prove UI selection. Verify the displayed selection before saying that day is open.",
 	"Reading, searching, creating, updating, or deleting note records uses NOTES, not VIEWS. Pass the complete user-authored note in the single content field; never invent a separate title or body. Do not route Notes to documents or Knowledge.",
 	"Phone flashlight requests use action=interact view=device-control capability=set-flashlight with params={enabled:true|false}; never claim success before the capability returns success.",
 	"For declared domain capabilities, use action=interact with an explicit view and capability. Semantic record capabilities are required; agent-fill and agent-click are only for an explicitly requested form-control interaction. Pass parameters in params rather than dotted keys.",
@@ -2490,6 +2534,7 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 
 	return {
 		name: "VIEWS",
+		subActions: ["VIEWS_SHOW"],
 		contexts: [...VIEW_ACTION_CONTEXTS],
 		// `browser` stays out of `contexts` so browser/web retrieval cannot make
 		// VIEWS hijack live-information turns. It is allowed at execution time,
@@ -2647,7 +2692,7 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 			"torch",
 		],
 		description:
-			"Manage and navigate Eliza UI views. Return to the home/main chat screen with action=show view=chat. List available views, report the current view, open or close a view, search views, show the view manager (app list, not home), arrange layouts, and invoke explicit capabilities that a view declares when no dedicated domain action owns the data, including native device controls. Notes records belong to NOTES and calendar events belong to CALENDAR; VIEWS opens those surfaces. action=interact invokes a capability without opening its view. An explicit open-and-edit request requires show/open navigation as well as the data operation.",
+			"Manage Eliza UI views. For opening one known view, prefer the registered VIEWS_SHOW child; this parent covers layouts, catalog discovery and other operations. Home is view=chat. List available views, report the current view, open or close a view, search views, show the view manager (app list, not home), arrange layouts, and invoke explicit capabilities that a view declares when no dedicated domain action owns the data, including native device controls. Notes records belong to NOTES and calendar events belong to CALENDAR; VIEWS opens those surfaces. action=interact invokes a capability without opening its view. An explicit open-and-edit request requires show/open navigation as well as the data operation.",
 		descriptionCompressed:
 			"show/open navigates UI; interact invokes capabilities without navigation; Notes data uses NOTES, Calendar data uses CALENDAR; open-and-edit requires both operations",
 		routingHint: VIEWS_ROUTING_HINT,
@@ -2688,14 +2733,14 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 			{
 				name: "navigationIntent",
 				description:
-					"Use planner-step for an explicit target within a contextual or compound plan. The per-step target takes precedence over unrelated original-message clauses.",
+					"Use planner-step for an explicit target within a contextual or compound plan; include both view and navigationStepId. The per-step target takes precedence over unrelated original-message clauses.",
 				required: false,
 				schema: { type: "string", enum: ["planner-step"] },
 			},
 			{
 				name: "navigationStepId",
 				description:
-					"Unique plan-step identity for separately tracking navigation and domain receipts.",
+					"Required with navigationIntent=planner-step. Supply a unique nonempty step identity, such as open-notes-1, to track navigation separately from domain receipts.",
 				required: false,
 				schema: { type: "string" },
 			},
@@ -2790,7 +2835,7 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 			{
 				name: "capability",
 				description:
-					"Declared capability to invoke on the view (interact mode), e.g. 'create-note', 'get-notes', 'set-flashlight', 'click-button', 'get-state', 'refresh', or 'focus-element'. Use semantic capabilities for domain record mutations and native device controls; agent-fill/agent-click are only for deliberate form-control interaction, not record creation, updates, or deletion.",
+					"Exact capability id declared by the target view (interact mode), or a standard agent-surface operation such as agent-click with params.id from the view's controls/scoped steps. Never invent a capability name. Use semantic capabilities for domain record mutations and native device controls; agent-fill/agent-click are only for deliberate form-control interaction, not record creation, updates, or deletion.",
 				required: false,
 				schema: { type: "string" },
 			},
@@ -3038,8 +3083,10 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 				const roomId =
 					typeof message.roomId === "string" ? message.roomId : runtime.agentId;
 
-				// Multi-turn follow-up: choice reply for an in-progress create flow.
-				if (isChoiceReply(text)) {
+				const mode = inferMode(text, actionOptions);
+				// A pending flow cannot change the operation explicitly selected by
+				// the planner, especially the navigation-only VIEWS_SHOW child.
+				if ((!mode || mode === "create") && isChoiceReply(text)) {
 					if (await hasPendingViewsCreateIntent(runtime, roomId)) {
 						if (!(await ownerCheck(runtime, message))) {
 							return ownerRequiredViewMutation("create");
@@ -3058,8 +3105,9 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 
 				// Multi-turn follow-up: structured confirmation for a pending delete.
 				if (
-					isDeleteConfirmation(actionOptions) ||
-					isDeleteCancellation(actionOptions)
+					(!mode || mode === "delete") &&
+					(isDeleteConfirmation(actionOptions) ||
+						isDeleteCancellation(actionOptions))
 				) {
 					if (await hasPendingDeleteConfirm(runtime, roomId)) {
 						if (!(await ownerCheck(runtime, message))) {
@@ -3077,7 +3125,6 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 					}
 				}
 
-				const mode = inferMode(text, actionOptions);
 				const viewType = readViewTypeOption(text, actionOptions);
 				if (!mode) {
 					const reply =
@@ -3372,24 +3419,6 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 										},
 									};
 								}
-								// Generated action labels may be a unique semantic alias for
-								// a declared catalog capability. Keep the view target fixed so
-								// this cannot dispatch across an unrelated surface.
-								const alias = resolveViewCapability({
-									views,
-									text: `${capability} ${text}`,
-									options: {
-										...actionOptions,
-										capability: undefined,
-										view: viewId,
-									},
-									viewType,
-									currentViewId: viewId,
-								});
-								if (alias?.view.id === resolvedView.id) {
-									resolvedCapability = alias;
-									capability = alias.capability.id;
-								}
 							}
 						}
 						if (!resolvedCapability && !standardCapability) {
@@ -3447,8 +3476,13 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 							// interaction failure below).
 							return {
 								success: false,
-								text: `Cannot invoke capability "${capability}" on view "${viewId}": the view catalog does not declare that capability.`,
+								text: `Cannot invoke capability "${capability}" on view "${viewId}": the view catalog does not declare that capability. No interaction was dispatched. Choose a declared capability or use the exact agent-surface steps from a scoped action; step.kind is the capability and step.target is params.id.`,
 								transcriptVisibility: "internal",
+								data: {
+									viewId,
+									capabilities: resolvedView?.capabilities ?? [],
+									scopedActions: resolvedView?.scopedActions ?? [],
+								},
 							};
 						}
 						if (!resolvedCapability && standardCapability)
@@ -3964,6 +3998,50 @@ export function createViewsAction(deps: ViewsActionDeps = {}): Action {
 	};
 }
 
+/** Single-destination navigation with a complete planner-step contract. The
+ * parent remains discoverable for layouts, catalog reads and interactions. */
+export function createShowViewAction(deps: ViewsActionDeps = {}): Action {
+	const parent = createViewsAction(deps);
+	const navigationOptions = (options?: Record<string, unknown>) => {
+		const params = normalizeActionOptions(options);
+		return {
+			action: "show",
+			navigationIntent: "planner-step",
+			view: readStringOption(params, "view"),
+			navigationStepId: readStringOption(params, "navigationStepId"),
+		};
+	};
+	return {
+		...parent,
+		name: "VIEWS_SHOW",
+		subActions: undefined,
+		similes: [],
+		examples: [],
+		description:
+			"Open one authorized app view in the originating user's app. Supply the catalog view ID (Home is chat) and a unique navigation step ID. This only navigates: it never reads or changes records, selects a calendar date, or proves domain work complete. For another operation, compound layout or unknown destination, discover VIEWS. Respect the full request's navigation and destination restrictions; use the delivery receipt to report the outcome.",
+		descriptionCompressed: "Open one authorized app view; navigation only.",
+		routingHint:
+			"Opening one known app view -> VIEWS_SHOW with view and navigationStepId. Layouts, catalog discovery and interactions -> VIEWS. Domain records still use their owning tools.",
+		parameters: parent.parameters
+			?.filter(({ name }) => name === "view" || name === "navigationStepId")
+			.map((parameter) => ({ ...parameter, required: true })),
+		allowAdditionalParameters: false,
+		// This closed child has only required arguments; the polymorphic
+		// parent's opt-out would disable strictness for the entire planner call.
+		toolSchemaStrict: true,
+		validate: (runtime, message, state, options) =>
+			parent.validate(runtime, message, state, navigationOptions(options)),
+		handler: (runtime, message, state, options, callback) =>
+			parent.handler(
+				runtime,
+				message,
+				state,
+				navigationOptions(options),
+				callback,
+			),
+	};
+}
+
 export function createViewsAliasAction(
 	name: "CLOSE_VIEW" | "CLOSE_ALL_VIEWS",
 	deps: ViewsActionDeps = {},
@@ -4001,6 +4079,7 @@ export function createViewsAliasAction(
 	return {
 		...action,
 		name,
+		subActions: undefined,
 		parameters: targetParameters,
 		allowAdditionalParameters: false,
 		tags: closeAll
@@ -4423,5 +4502,6 @@ async function broadcastViewEvent(
 
 export const viewsAction: Action = createViewsAction();
 export const closeViewAction: Action = createViewsAliasAction("CLOSE_VIEW");
+export const showViewAction: Action = createShowViewAction();
 export const closeAllViewsAction: Action =
 	createViewsAliasAction("CLOSE_ALL_VIEWS");

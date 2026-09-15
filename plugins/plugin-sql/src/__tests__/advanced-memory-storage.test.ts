@@ -15,6 +15,106 @@ describe("AdvancedMemoryStorageService.updateLongTermMemory", () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
+  it("keeps one durable supplied-ID record through replay, concurrent delivery, and service restart", async () => {
+    const agentId = uuidv4() as UUID;
+    const entityId = uuidv4() as UUID;
+    const id = uuidv4() as UUID;
+    const { runtime, cleanup } = await createTestDatabase(agentId);
+    cleanups.push(cleanup);
+    await runtime.createEntities([
+      { id: entityId, agentId, names: ["Test Entity"], metadata: {} } as Entity,
+    ]);
+    const service = new AdvancedMemoryStorageService();
+    await service.initialize(runtime);
+    const input = {
+      id,
+      agentId,
+      entityId,
+      category: "semantic" as const,
+      content: "Original durable memory",
+      metadata: {
+        extractionEvidenceId: "batch-1",
+        sourceMessageRevisions: { source: "revision-1" },
+      },
+    };
+    const results = await Promise.all([
+      service.storeLongTermMemory(input),
+      service.storeLongTermMemory(input),
+    ]);
+    expect(results.map((memory) => memory.id)).toEqual([id, id]);
+    expect(await service.getLongTermMemories(agentId, entityId)).toHaveLength(1);
+    const restarted = new AdvancedMemoryStorageService();
+    await restarted.initialize(runtime);
+    const createMemory = vi.spyOn(runtime, "createMemory");
+    const replay = await restarted.storeLongTermMemory({ ...input, content: "Do not overwrite" });
+    expect(replay).toMatchObject({ id, content: input.content, metadata: input.metadata });
+    expect(createMemory).not.toHaveBeenCalled();
+  });
+
+  it("recovers supplied-ID writes after commit acknowledgement failure", async () => {
+    const agentId = uuidv4() as UUID;
+    const entityId = uuidv4() as UUID;
+    const id = uuidv4() as UUID;
+    const { runtime, cleanup } = await createTestDatabase(agentId);
+    cleanups.push(cleanup);
+    await runtime.createEntities([
+      { id: entityId, agentId, names: ["Test Entity"], metadata: {} } as Entity,
+    ]);
+    const service = new AdvancedMemoryStorageService();
+    await service.initialize(runtime);
+    const originalCreate = runtime.createMemory.bind(runtime);
+    const failure = new Error("write acknowledgement lost");
+    const createMemory = vi
+      .spyOn(runtime, "createMemory")
+      .mockImplementationOnce(async (...args) => {
+        await originalCreate(...args);
+        throw failure;
+      });
+    const input = {
+      id,
+      agentId,
+      entityId,
+      category: "semantic" as const,
+      content: "Committed memory",
+    };
+    await expect(service.storeLongTermMemory(input)).rejects.toBe(failure);
+    await expect(service.storeLongTermMemory(input)).resolves.toMatchObject({
+      id,
+      content: input.content,
+    });
+    expect(createMemory).toHaveBeenCalledTimes(1);
+    expect(await service.getLongTermMemories(agentId, entityId)).toHaveLength(1);
+  });
+
+  it("does not return or replace another entity's supplied-ID memory", async () => {
+    const agentId = uuidv4() as UUID;
+    const entityId = uuidv4() as UUID;
+    const otherEntityId = uuidv4() as UUID;
+    const id = uuidv4() as UUID;
+    const { runtime, cleanup } = await createTestDatabase(agentId);
+    cleanups.push(cleanup);
+    await runtime.createEntities(
+      [entityId, otherEntityId].map(
+        (entity) => ({ id: entity, agentId, names: ["Test Entity"], metadata: {} }) as Entity
+      )
+    );
+    const service = new AdvancedMemoryStorageService();
+    await service.initialize(runtime);
+    const input = {
+      id,
+      agentId,
+      entityId,
+      category: "semantic" as const,
+      content: "Private memory",
+    };
+    await service.storeLongTermMemory(input);
+    await expect(
+      service.storeLongTermMemory({ ...input, entityId: otherEntityId })
+    ).rejects.toMatchObject({ code: "LONG_TERM_MEMORY_ID_CONFLICT" });
+    expect(await service.getLongTermMemories(agentId, otherEntityId)).toEqual([]);
+    expect(await service.getLongTermMemories(agentId, entityId)).toHaveLength(1);
+  });
+
   it("retains the persisted access timestamp when an unrelated field is updated", async () => {
     const agentId = uuidv4() as UUID;
     const entityId = uuidv4() as UUID;

@@ -261,12 +261,17 @@ function hasRecoverableContentLocator(value: unknown): boolean {
 
 /**
  * Produce the sole model-bound shape for a tool result. `promptData` is
- * supplemental metadata and never replaces `data`; final request preparation
- * rejects unsupported sizes instead of deleting fields.
+ * supplemental by default. Only an explicit producer-declared replace-data
+ * contract substitutes it for runtime data. Never infer a projection from size
+ * or field names; text, receipts, failures and the original result stay intact.
  */
 export function projectToolResultForModel(
 	result: PlannerToolResult,
 ): PlannerToolResult {
+	if (result.promptDataMode === "replace-data" && result.promptData) {
+		const { data: _data, promptData, promptDataMode: _mode, ...rest } = result;
+		return { ...rest, data: promptData };
+	}
 	return { ...result };
 }
 

@@ -13,12 +13,19 @@
  * auto-record confidence threshold.
  */
 
+import { ElizaError } from "../../../../errors.ts";
 import { logger } from "../../../../logger.ts";
-import { stringifyForDiagnostics } from "../../../../runtime/json-output.ts";
 import { renderStoredEnvelopesForPrompt } from "../../../../security/external-content";
 import { EvaluatorPriority } from "../../../../services/evaluator-priorities.ts";
+import { assertExtractionSourcesUnchanged } from "../../../../services/evaluator-progress.ts";
+import {
+	getRoomTranscript,
+	recentMessagesSection,
+} from "../../../../services/evaluator-transcript.ts";
 import type {
 	Evaluator,
+	EvaluatorEvidenceReconciliation,
+	EvaluatorRunContext,
 	IAgentRuntime,
 	JSONSchema,
 	Memory,
@@ -27,6 +34,7 @@ import type {
 import { isSyntheticConversationArtifactMemory } from "../../../../utils/synthetic-conversation-artifact.ts";
 import { isObjectRecord as isRecord } from "../../../../utils/type-guards.ts";
 import { toWellFormedUnicode } from "../../../../utils/well-formed.ts";
+import { stringToUuid } from "../../../../utils.ts";
 import type { ExperienceService } from "../service.ts";
 import { type Experience, ExperienceType, OutcomeType } from "../types.ts";
 
@@ -105,6 +113,8 @@ interface ExperiencePrepared {
 	experienceService: ExperienceService;
 	recentMessages: Memory[];
 	conversationContext: string;
+	/** Complete experience-only bodies absent from the shared dialogue transcript. */
+	unsharedConversationContext: string;
 	signalSummary: string;
 	existingExperiences: Experience[];
 	provenance: Pick<
@@ -250,12 +260,6 @@ function normalizeLearningKey(text: string): string {
 		.trim();
 }
 
-function safeText(value: unknown): string {
-	if (typeof value === "string") return value;
-	if (value === null || value === undefined) return "";
-	return stringifyForDiagnostics(value);
-}
-
 function isSyntheticMemory(memory: Memory): boolean {
 	return isSyntheticConversationArtifactMemory(memory);
 }
@@ -268,6 +272,40 @@ function hasExplicitExperienceRequest(text: string): boolean {
 	return /\b(?:remember|store|learn|note)\s+(?:this|that|this lesson|this pattern|for next time|going forward)\b/i.test(
 		text,
 	);
+}
+
+/** Outcome metadata alone is not a lesson. Inspect values for failure or
+ * learning evidence without treating JSON keys such as success/error as prose. */
+function hasActionExperienceSignal(result: unknown): boolean {
+	const pending = [result];
+	const seen = new Set<object>();
+	while (pending.length > 0) {
+		const value = pending.pop();
+		if (typeof value === "string") {
+			if (
+				/\b(?:error|failed|failure|exception|timeout|blocked|fixed|verified|validated|root cause|lesson learned|workaround|regression|postmortem|correction|discovered|unexpected)\b/i.test(
+					value,
+				)
+			)
+				return true;
+			continue;
+		}
+		if (value instanceof Error) return true;
+		if (typeof value !== "object" || value === null || seen.has(value))
+			continue;
+		seen.add(value);
+		if (Array.isArray(value)) {
+			for (const entry of value) pending.push(entry);
+		} else if (isRecord(value)) {
+			if (
+				value.success === false ||
+				(typeof value.error === "string" && value.error.trim() !== "")
+			)
+				return true;
+			for (const entry of Object.values(value)) pending.push(entry);
+		}
+	}
+	return false;
 }
 
 function scoreExperienceSignals(input: {
@@ -325,12 +363,7 @@ function scoreExperienceSignals(input: {
 	}
 
 	for (const result of input.actionResults ?? []) {
-		const text = safeText(result).toLowerCase();
-		if (
-			/\b(?:error|failed|failure|exception|timeout|blocked|success|completed|fixed|verified|validated)\b/.test(
-				text,
-			)
-		) {
+		if (hasActionExperienceSignal(result)) {
 			reasons.add("action result outcome");
 			break;
 		}
@@ -358,7 +391,60 @@ function sanitizeConversationText(
 	runtime: IAgentRuntime,
 	text: string,
 ): string {
-	return runtime.redactSecrets(text).replace(/\s+\n/g, "\n").trim();
+	return runtime
+		.redactSecrets(renderStoredEnvelopesForPrompt(text))
+		.replace(/\s+\n/g, "\n")
+		.trim();
+}
+
+async function reconcileExperienceEvidence({
+	runtime,
+	message,
+	reconciliation,
+}: EvaluatorRunContext & {
+	reconciliation: EvaluatorEvidenceReconciliation;
+}): Promise<{ reprocessSourceIds: string[] }> {
+	const service = runtime.getService<ExperienceService>("EXPERIENCE");
+	if (!service)
+		throw new ElizaError(
+			"Experience service unavailable during reconciliation",
+			{ code: "EVALUATOR_RECONCILIATION_UNAVAILABLE" },
+		);
+	const reprocess = new Set<string>();
+	for (const experience of await service.listExperiences({
+		includeInactive: true,
+	})) {
+		if (
+			experience.agentId !== runtime.agentId ||
+			experience.sourceRoomId !== message.roomId ||
+			experience.extractionMethod !== "experience_evaluator"
+		)
+			continue;
+		const revisions = experience.sourceMessageRevisions ?? {};
+		const changed = Object.keys(revisions).some(
+			(id) =>
+				reconciliation.changedMessageIds.includes(id) ||
+				reconciliation.removedMessageIds.includes(id),
+		);
+		const pending =
+			reconciliation.pendingEvidenceId !== undefined &&
+			experience.extractionEvidenceId === reconciliation.pendingEvidenceId;
+		if (!pending && !changed) continue;
+		for (const id of Object.keys(revisions))
+			if (reconciliation.currentSourceRevisions[id] !== undefined)
+				reprocess.add(id);
+		if (experience.extractionStatus === "source_invalidated") continue;
+		if (
+			!(await service.updateExperience(experience.id, {
+				extractionStatus: "source_invalidated",
+				extractionReconciliationId: reconciliation.id,
+			}))
+		)
+			throw new ElizaError("Experience retirement failed", {
+				code: "EVALUATOR_RECONCILIATION_WRITE_FAILED",
+			});
+	}
+	return { reprocessSourceIds: [...reprocess] };
 }
 
 export const experiencePatternEvaluator: Evaluator<
@@ -366,17 +452,37 @@ export const experiencePatternEvaluator: Evaluator<
 	ExperiencePrepared
 > = {
 	name: "experiencePatterns",
+	reconcileEvidence: reconcileExperienceEvidence,
+	incremental: true,
+	background: true,
 	description:
 		"Extracts reusable agent lessons from validated conversation events.",
 	priority: EvaluatorPriority.EXPERIENCE,
 	schema: experienceSchema,
 	async shouldRun({ runtime, message, state, options }) {
+		assertExtractionSourcesUnchanged(options.extraction);
 		if (!message.roomId || !message.content.text) return false;
 		if (isSyntheticMemory(message)) return false;
 		const experienceService = runtime.getService(
 			"EXPERIENCE",
 		) as ExperienceService | null;
 		if (!experienceService) return false;
+		if (options.extraction) {
+			// The incremental journal retains skipped evidence; cadence must not
+			// acknowledge a batch before its processors have persisted it.
+			return (
+				options.extraction.isBackfill ||
+				(options.extraction.remainingSourceCount ?? 0) > 0 ||
+				scoreExperienceSignals({
+					latestText: getMessageText(message),
+					responseTexts: (options.responses ?? []).map(getMessageText),
+					actionResults: actionResultsFromState(state),
+					recentTexts: options.extraction.messages
+						.filter((memory) => !isSyntheticMemory(memory))
+						.map(getMessageText),
+				}).score > 0
+			);
+		}
 
 		const cacheKey = `experience-extraction:${message.roomId}:message-count`;
 		const lastRunKey = `experience-extraction:${message.roomId}:last-run-count`;
@@ -445,28 +551,46 @@ export const experiencePatternEvaluator: Evaluator<
 		return true;
 	},
 	async prepare({ runtime, message, state, options }) {
+		assertExtractionSourcesUnchanged(options.extraction);
 		const experienceService = runtime.getService(
 			"EXPERIENCE",
 		) as ExperienceService | null;
 		if (!experienceService) throw new Error("Experience service not available");
-		const rawRecentMessages = await runtime.getMemories({
-			tableName: "messages",
-			roomId: message.roomId,
-			unique: false,
-		});
+		const rawRecentMessages =
+			options.extraction?.messages ??
+			(await runtime.getMemories({
+				tableName: "messages",
+				roomId: message.roomId,
+				unique: false,
+			}));
 		const recentMessages = rawRecentMessages.filter(
 			(memory) => !isSyntheticMemory(memory),
 		);
-		const conversationContext = recentMessages
-			.map((memory) =>
-				typeof memory.content.text === "string"
-					? renderStoredEnvelopesForPrompt(memory.content.text)
-					: memory.content.text,
-			)
-			.filter(
-				(text): text is string => typeof text === "string" && text.length > 0,
-			)
-			.map((text) => sanitizeConversationText(runtime, text))
+		const conversationTexts = recentMessages
+			.map(getMessageText)
+			.filter(Boolean)
+			.map((text) => sanitizeConversationText(runtime, text));
+		const conversationContext = conversationTexts.join("\n");
+		const sharedTranscript =
+			options.extraction?.messages ??
+			(await getRoomTranscript(runtime, message).catch((error: unknown) => {
+				// error-policy:J7 shared-context deduplication is optional. Preserve
+				// every sanitized body if the canonical transcript read fails.
+				runtime.reportError("experiencePatterns.sharedTranscript", error, {
+					roomId: message.roomId,
+				});
+				return [];
+			}));
+		const sharedTexts = new Set(
+			sharedTranscript.map((memory) =>
+				sanitizeConversationText(runtime, getMessageText(memory)),
+			),
+		);
+		// The shared dialogue applies hygiene and delivery-echo deduplication.
+		// Retain any experience-only body instead of assuming those projections
+		// contain identical rows. Stored records and provenance stay untouched.
+		const unsharedConversationContext = conversationTexts
+			.filter((text) => !sharedTexts.has(text))
 			.join("\n");
 		const signalSummary = summarizeExperienceSignals(
 			scoreExperienceSignals({
@@ -484,12 +608,20 @@ export const experiencePatternEvaluator: Evaluator<
 			experienceService,
 			recentMessages,
 			conversationContext,
+			unsharedConversationContext,
 			signalSummary,
 			existingExperiences,
 			provenance: buildExperienceProvenance(message, recentMessages),
 		};
 	},
-	prompt({ prepared }) {
+	prompt({ prepared, shared }) {
+		const conversation = shared?.roomTranscriptRendered
+			? `${recentMessagesSection(shared, [])}${
+					prepared.unsharedConversationContext
+						? `\nAdditional experience records not in that transcript:\n${prepared.unsharedConversationContext}`
+						: ""
+				}`
+			: prepared.conversationContext || "(none)";
 		return `Extract reusable lessons from recent conversation.
 
 Emit only lessons useful for future behavior: success, failure, correction, discovery, validation, warning, hypothesis.
@@ -507,7 +639,7 @@ Detected extraction signal:
 ${prepared.signalSummary}
 
 Recent conversation:
-${prepared.conversationContext || "(none)"}
+${conversation}
 
 Existing similar experiences:
 ${formatExistingExperiences(prepared.existingExperiences)}`;
@@ -516,7 +648,8 @@ ${formatExistingExperiences(prepared.existingExperiences)}`;
 	processors: [
 		{
 			name: "recordExperiences",
-			async process({ runtime, prepared, output }) {
+			async process({ runtime, prepared, output, options }) {
+				assertExtractionSourcesUnchanged(options.extraction);
 				const threshold = getNumberSetting(
 					runtime,
 					"AUTO_RECORD_THRESHOLD",
@@ -530,7 +663,7 @@ ${formatExistingExperiences(prepared.existingExperiences)}`;
 					),
 				);
 				const seenLearning = new Set<string>();
-				for (const exp of output.experiences) {
+				for (const [index, exp] of output.experiences.entries()) {
 					if (exp.confidence < threshold) continue;
 					const learning = normalizeStoredText(runtime, exp.learning);
 					const learningKey = normalizeLearningKey(learning);
@@ -545,6 +678,18 @@ ${formatExistingExperiences(prepared.existingExperiences)}`;
 					}
 					seenLearning.add(learningKey);
 					await prepared.experienceService.recordExperience({
+						...(options.extraction
+							? {
+									id: stringToUuid(
+										`${runtime.agentId}:experiencePatterns:${options.extraction.evidenceId}:${index}`,
+									),
+									extractionEvidenceId: options.extraction.evidenceId,
+									sourceMessageRevisions: {
+										...options.extraction.referenceRevisions,
+										...options.extraction.sourceRevisions,
+									},
+								}
+							: {}),
 						type: exp.type,
 						outcome: exp.outcome,
 						context: normalizeStoredText(runtime, exp.context),

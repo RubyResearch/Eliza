@@ -66,6 +66,8 @@ export interface ShellMessage {
   failureKind?: ChatFailureKind;
   /** Complete typed terminal failure used for truthful transient retry state. */
   terminalFailure?: ChatTerminalFailure;
+  /** Server confirms durable evidence supports regenerating only this reply. */
+  replyRecoveryAvailable?: boolean;
   /** Agent reasoning/thought for this turn, rendered as a collapsed block. */
   reasoning?: string;
   /** Inline tool-call rows for this turn, streamed live from the chat SSE `tool`

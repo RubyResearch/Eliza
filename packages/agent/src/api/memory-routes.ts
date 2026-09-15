@@ -18,12 +18,14 @@ import {
   ChannelType,
   compareMemoryIds,
   composePrompt,
+  composeToolDiagnosticRedactor,
   createMessageMemory,
   ElizaError,
   MESSAGE_SOURCE_CLIENT_CHAT,
   type Memory,
   ModelType,
   memoryContextQaTemplate,
+  projectCompleteToolValueForModel,
   stringToUuid,
   type UUID,
 } from "@elizaos/core";
@@ -1365,56 +1367,84 @@ export async function handleMemoryRoutes(
       return true;
     }
 
-    if (method === "DELETE") {
-      await runtime.deleteMemory(memoryId);
-      invalidateMemorySearchCache(runtime, existing.roomId);
-      json(res, { deleted: true, id: memoryId });
-      return true;
+    let patchedText: string | undefined;
+    if (method === "PATCH") {
+      const rawPat = await readJsonBody<Record<string, unknown>>(req, res);
+      if (rawPat === null) return true;
+      const parsedPat = PatchMemoryRequestSchema.safeParse(rawPat);
+      if (!parsedPat.success) {
+        error(
+          res,
+          parsedPat.error.issues[0]?.message ?? "text is required",
+          400,
+        );
+        return true;
+      }
+      patchedText = parsedPat.data.text;
     }
 
-    // PATCH — update text, regenerate embedding, then atomically persist
-    // both via runtime.updateMemory (the SQL adapter writes content +
-    // embedding in a single transaction). If embedding generation fails we
-    // return 500 *before* touching the database, so there is nothing to roll
-    // back.
-    const rawPat = await readJsonBody<Record<string, unknown>>(req, res);
-    if (rawPat === null) return true;
-    const parsedPat = PatchMemoryRequestSchema.safeParse(rawPat);
-    if (!parsedPat.success) {
-      error(res, parsedPat.error.issues[0]?.message ?? "text is required", 400);
-      return true;
-    }
-    const text = parsedPat.data.text;
+    // Share the conversational persistence boundary with reply recovery and
+    // normal turns. Re-read after acquiring it so a queued edit never restores
+    // old content or a row deleted by the turn that held the lease before us.
+    return runtime.roomHandlerQueue.withLease(existing.roomId, async () => {
+      const current = await runtime.getMemoryById(memoryId);
+      if (!current) {
+        error(res, "Memory not found.", 404);
+        return true;
+      }
+      if (current.roomId !== existing.roomId) {
+        error(res, "Memory room changed. Reload and try again.", 409);
+        return true;
+      }
+      if (method === "DELETE") {
+        await runtime.deleteMemory(memoryId);
+        invalidateMemorySearchCache(runtime, current.roomId);
+        json(res, { deleted: true, id: memoryId });
+        return true;
+      }
 
-    const existingContent =
-      (existing.content as Record<string, unknown> | undefined) ?? {};
-    const nextContent = { ...existingContent, text };
+      // PATCH updates content and its embedding atomically. Generate first so
+      // an embedding failure leaves the stored memory unchanged.
+      const text = patchedText as string;
+      const existingContent =
+        (current.content as Record<string, unknown> | undefined) ?? {};
+      const nextContent = { ...existingContent, text };
 
-    let embedding: number[];
-    try {
-      embedding = await runtime.useModel(ModelType.TEXT_EMBEDDING, {
-        text,
+      let embedding: number[];
+      try {
+        embedding = await runtime.useModel(ModelType.TEXT_EMBEDDING, {
+          text,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        error(res, `Failed to regenerate embedding: ${detail}`, 500);
+        return true;
+      }
+      if (!Array.isArray(embedding) || embedding.length === 0) {
+        error(res, "Embedding model returned no vector.", 500);
+        return true;
+      }
+
+      await runtime.updateMemory({
+        id: memoryId,
+        content: nextContent,
+        embedding,
       });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      error(res, `Failed to regenerate embedding: ${detail}`, 500);
-      return true;
-    }
-    if (!Array.isArray(embedding) || embedding.length === 0) {
-      error(res, "Embedding model returned no vector.", 500);
-      return true;
-    }
+      invalidateMemorySearchCache(runtime, current.roomId);
 
-    await runtime.updateMemory({
-      id: memoryId,
-      content: nextContent,
-      embedding,
+      const updated = await runtime.getMemoryById(memoryId);
+      json(res, {
+        updated: true,
+        id: memoryId,
+        // Recovery evidence and credentials stay server-local even when an
+        // operator edits the text of their owning memory through the dashboard.
+        memory: projectCompleteToolValueForModel(
+          updated,
+          composeToolDiagnosticRedactor(runtime),
+        ),
+      });
+      return true;
     });
-    invalidateMemorySearchCache(runtime, existing.roomId);
-
-    const updated = await runtime.getMemoryById(memoryId);
-    json(res, { updated: true, id: memoryId, memory: updated });
-    return true;
   }
 
   if (method === "GET" && pathname === "/api/memories/stats") {

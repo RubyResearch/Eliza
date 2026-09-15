@@ -36,9 +36,14 @@ export function formatExperienceForPrompt(
 	const tags = experience.tags.length > 0 ? experience.tags.join(", ") : "none";
 	const keywords =
 		experience.keywords.length > 0 ? experience.keywords.join(", ") : tags;
+	// Repeated extraction fields can be byte-identical. Use an explicit local
+	// reference instead of sending the same learning twice; distinct reasons
+	// and all other provenance remain complete.
+	const reason =
+		experience.result || experience.extractionReason || "past experience";
 	return `${prefix}DO: ${experience.learning}
 WHEN: ${experience.context || experience.action || "similar situation"}
-WHY: ${experience.result || experience.extractionReason || "past experience"}
+WHY: ${reason === experience.learning ? "Same text as DO above." : reason}
 META: id=${experience.id}; domain=${experience.domain}; confidence=${Math.round(
 		experience.confidence * 100,
 	)}%; importance=${Math.round(experience.importance * 100)}%; keywords=${keywords}`;

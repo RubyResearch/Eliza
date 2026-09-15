@@ -35,6 +35,16 @@ export interface ConversationMessagesValue {
    * identity.
    */
   setConversationMessages: Dispatch<SetStateAction<ConversationMessage[]>>;
+  /** Synchronous rows only when this conversation owns the visible content. */
+  getConversationMessagesSnapshot?: (
+    conversationId: string,
+  ) => ConversationMessage[] | undefined;
+  /** Apply a same-authority stream using the canonical history overlay registry. */
+  applyConversationMessageStream?: (
+    conversationId: string,
+    changed: ConversationMessage[],
+    removed: string[],
+  ) => void;
   /**
    * Prepend an older page in front of the transcript for infinite upward
    * scroll (#13532). Dedupes by id and caps the retained count; stable identity.

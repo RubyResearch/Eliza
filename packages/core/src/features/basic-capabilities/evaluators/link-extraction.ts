@@ -350,6 +350,12 @@ export const linkExtractionEvaluator: Evaluator<
 		return `Runtime captured/persisted ${prepared.links.length} http(s) URL(s). Return {"processed":true}.`;
 	},
 
+	// prepare already fetched, summarized and durably captured the links. A
+	// second model call over the entire room cannot add evidence to this result.
+	resolveOutput() {
+		return { processed: true };
+	},
+
 	parse(output) {
 		if (output && typeof output === "object" && !Array.isArray(output)) {
 			const record = output as Record<string, unknown>;

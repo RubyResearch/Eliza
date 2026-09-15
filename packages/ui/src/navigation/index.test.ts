@@ -4,16 +4,19 @@
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAppShellPage } from "../app-shell-registry";
 import { resetUiRegistryHostForTests } from "../registry-host";
 import {
   ALL_TAB_GROUPS,
   BUILTIN_ROUTE_IDS,
+  getWindowNavigationPath,
+  isDeveloperWorkspaceRoute,
   LEGACY_PREFIX_TAB_ALIASES,
   pathForTab,
   resolveBuiltinRouteDescriptor,
   resolveLegacyBuiltinRoute,
+  shouldUseHashNavigation,
   TAB_PATHS,
   tabFromPath,
   titleForTab,
@@ -25,6 +28,50 @@ beforeEach(() => {
 
 afterEach(() => {
   resetUiRegistryHostForTests();
+  vi.unstubAllEnvs();
+});
+
+describe("local developer shell routing", () => {
+  const location = {
+    protocol: "http:",
+    hostname: "localhost",
+    pathname: "/dev",
+    search: "",
+    hash: "",
+  };
+  it("starts at chat and reads inner app routes without leaving /dev", () => {
+    expect(isDeveloperWorkspaceRoute(location)).toBe(true);
+    expect(shouldUseHashNavigation(location)).toBe(true);
+    expect(getWindowNavigationPath(location)).toBe("/chat");
+    expect(getWindowNavigationPath({ ...location, hash: "#/notes" })).toBe(
+      "/notes",
+    );
+    expect(isDeveloperWorkspaceRoute({ ...location, pathname: "/dev/" })).toBe(
+      true,
+    );
+  });
+  it.each(["/chat", "/notes", "/calendar", "/developer"])(
+    "leaves normal route %s alone, including legacy opt-in URLs",
+    (pathname) => {
+      const normal = {
+        ...location,
+        pathname,
+        search: "?devtools=1",
+        hash: "#/settings",
+      };
+      expect(isDeveloperWorkspaceRoute(normal)).toBe(false);
+      expect(shouldUseHashNavigation(normal)).toBe(false);
+      expect(getWindowNavigationPath(normal)).toBe(pathname);
+    },
+  );
+  it("does not enable the developer shell on remote hosts or production builds", () => {
+    expect(
+      isDeveloperWorkspaceRoute({ ...location, hostname: "eliza.example" }),
+    ).toBe(false);
+    vi.stubEnv("DEV", false);
+    expect(isDeveloperWorkspaceRoute(location)).toBe(false);
+    expect(shouldUseHashNavigation(location)).toBe(false);
+  });
 });
 
 describe("navigation tabFromPath", () => {

@@ -9,6 +9,7 @@
 import { logger } from "@elizaos/logger";
 import { getNativePlugin } from "../bridge/native-plugins";
 import type {
+  NativePageRead,
   NativeSurfaceCreateRequest,
   NativeSurfaceShell,
   SurfaceBounds,
@@ -64,6 +65,14 @@ export interface ElizaSurfaceManagerPlugin {
   reloadSurface(
     options: SurfaceIdentityOptions & { id: string },
   ): Promise<void>;
+  goBack(options: SurfaceIdentityOptions & { id: string }): Promise<void>;
+  readPage(
+    options: SurfaceIdentityOptions & { id: string; selector?: string },
+  ): Promise<unknown>;
+  addListener(
+    eventName: "navigationChanged",
+    listener: (event: unknown) => void,
+  ): Promise<{ remove(): Promise<void> }>;
   destroySurface(
     options: SurfaceIdentityOptions & { id: string },
   ): Promise<void>;
@@ -242,6 +251,129 @@ export class CapacitorNativeSurfaceShell implements NativeSurfaceShell {
           .then(() => true),
       () => false,
     );
+  }
+
+  async back(id: string): Promise<void> {
+    const entry = this.surfaces.get(id);
+    if (!entry?.desired) return missingDesiredState(id, "goBack");
+    const generation = entry.desired.generation;
+    await this.requestReconcile(entry);
+    if (entry.desired?.generation !== generation)
+      return missingDesiredState(id, "goBack");
+    // A history step is not idempotent: a lost acknowledgement must not cause
+    // the reconciler to navigate a second page back automatically.
+    await this.getNativeManager().goBack({ ...this.identity, id });
+  }
+
+  async readPage(id: string, selector?: string): Promise<NativePageRead> {
+    const entry = this.surfaces.get(id);
+    if (!entry?.desired) return missingDesiredState(id, "readPage");
+    const generation = entry.desired.generation;
+    await this.requestReconcile(entry);
+    if (entry.desired?.generation !== generation)
+      return missingDesiredState(id, "readPage");
+    const result = await this.getNativeManager().readPage({
+      ...this.identity,
+      id,
+      ...(selector === undefined ? {} : { selector }),
+    });
+    if (entry.desired?.generation !== generation)
+      return missingDesiredState(id, "readPage");
+    if (
+      !isRecord(result) ||
+      typeof result.url !== "string" ||
+      typeof result.title !== "string" ||
+      typeof result.text !== "string" ||
+      result.truncated !== false
+    ) {
+      throw new Error("Native Browser returned an invalid page read.");
+    }
+    return {
+      url: result.url,
+      title: result.title,
+      text: result.text,
+      truncated: result.truncated,
+    };
+  }
+
+  async subscribeNavigation(
+    listener: (event: {
+      id: string;
+      url: string;
+      previousUrl: string | undefined;
+    }) => void,
+    onError: (error: unknown) => void,
+  ): Promise<() => Promise<void>> {
+    let active = true;
+    const observations = new WeakMap<SurfaceCommandState, number>();
+    const observe = async (value: unknown): Promise<void> => {
+      if (!active || !isRecord(value) || typeof value.id !== "string") return;
+      if (
+        value.owner !== this.identity.owner ||
+        value.session !== this.identity.session ||
+        value.epoch !== this.identity.epoch
+      )
+        return;
+      const entry = this.surfaces.get(value.id);
+      if (!entry?.desired) return;
+      const observation = (observations.get(entry) ?? 0) + 1;
+      observations.set(entry, observation);
+      if (entry.running) {
+        await new Promise<void>((resolve, reject) => {
+          entry.waiters.push({ revision: entry.revision, resolve, reject });
+        });
+      }
+      const revision = entry.revision;
+      const previousUrl = entry.desired?.request.url;
+      // The event is only an invalidation, not a trusted URL snapshot. Read
+      // after queued native commands and discard results superseded locally.
+      const observed = await this.readStateOnce(entry.id);
+      if (
+        !active ||
+        !entry.desired ||
+        entry.revision !== revision ||
+        observations.get(entry) !== observation
+      )
+        return;
+      if (!observed.ok) throw observed.error;
+      if (
+        !observed.state.exists ||
+        !ownerMatches(observed.state, this.identity)
+      )
+        return;
+      const url = observed.state.currentUrl;
+      if (!url) return;
+      entry.desired = {
+        ...entry.desired,
+        request: { ...entry.desired.request, url },
+      };
+      this.recordActual(entry, observed.state);
+      listener({ id: entry.id, url, previousUrl });
+    };
+    const handle = await this.getNativeManager().addListener(
+      "navigationChanged",
+      (value) => {
+        // error-policy:J1 the owning React hook renders native observation errors.
+        void observe(value).catch(onError);
+      },
+    );
+    try {
+      await Promise.all(
+        [...this.surfaces.keys()].map((id) =>
+          observe({ ...this.identity, id }),
+        ),
+      );
+    } catch (error) {
+      // error-policy:J2 failed subscription setup releases its listener before
+      // propagating the state-read failure to the caller's retry boundary.
+      active = false;
+      await handle.remove();
+      throw error;
+    }
+    return async () => {
+      active = false;
+      await handle.remove();
+    };
   }
 
   presentSurface(id: string | null): Promise<void> {

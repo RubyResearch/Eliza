@@ -20,7 +20,7 @@ import {
 } from "@elizaos/core";
 import {
   collectKeywordTermMatches,
-  collectPreparedKeywordTermMatches,
+  hasPreparedKeywordTermMatch,
   normalizeCharacterLanguage,
   type PreparedKeywordTerm,
   prepareKeywordTerms,
@@ -132,23 +132,7 @@ function hasPreparedContextSignalSync(
     messageText(message).trim(),
   ].filter((t) => t.length > 0);
 
-  if (texts.length === 0) return false;
-
-  if (
-    terms.strong.length > 0 &&
-    collectPreparedKeywordTermMatches(texts, terms.strong).size > 0
-  ) {
-    return true;
-  }
-
-  if (
-    terms.weak.length > 0 &&
-    collectPreparedKeywordTermMatches(texts, terms.weak).size > 0
-  ) {
-    return true;
-  }
-
-  return false;
+  return hasPreparedKeywordTermMatch(texts, [...terms.strong, ...terms.weak]);
 }
 
 export function hasContextSignalSyncForKey(

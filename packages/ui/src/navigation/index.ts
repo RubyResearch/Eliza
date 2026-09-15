@@ -29,6 +29,7 @@ import {
 import { resolveBuiltinTabIdForPathAlias } from "../builtin-tab-registry";
 import { userAgentHasElizaOSMarker } from "../platform/aosp-user-agent";
 import { type BuiltinTab, mapBuiltinRoutes } from "./builtin-route-descriptors";
+import { isDeveloperWorkspaceRoute } from "./developer-route";
 import { resolveDefaultLandingTab } from "./main-tab";
 
 export {
@@ -41,6 +42,7 @@ export {
   type ResolvedBuiltinRouteDescriptor,
   resolveBuiltinRouteDescriptor,
 } from "./builtin-route-descriptors";
+export { isDeveloperWorkspaceRoute } from "./developer-route";
 
 type RuntimeImportMeta = ImportMeta & {
   env?: Record<string, unknown>;
@@ -208,6 +210,7 @@ export const LAUNCHER_AOSP_ONLY_VIEW_IDS = [
 
 interface WindowNavigationLocation {
   protocol: string;
+  hostname?: string;
   search: string;
   hash: string;
   pathname: string;
@@ -233,11 +236,16 @@ export function isAppWindowRoute(
 
 export function shouldUseHashNavigation(
   location:
-    | Pick<WindowNavigationLocation, "protocol" | "search">
+    | (Pick<WindowNavigationLocation, "protocol" | "search"> &
+        Partial<Pick<WindowNavigationLocation, "hostname" | "pathname">>)
     | undefined = getWindowNavigationLocation(),
 ): boolean {
   if (!location) return false;
-  return location.protocol === "file:" || isAppWindowRoute(location);
+  return (
+    location.protocol === "file:" ||
+    isAppWindowRoute(location) ||
+    isDeveloperWorkspaceRoute(location)
+  );
 }
 
 export function getWindowNavigationPath(
@@ -247,7 +255,8 @@ export function getWindowNavigationPath(
 ): string {
   if (!location) return "/";
   return shouldUseHashNavigation(location)
-    ? location.hash.replace(/^#/, "") || "/"
+    ? location.hash.replace(/^#/, "") ||
+        (isDeveloperWorkspaceRoute(location) ? "/chat" : "/")
     : location.pathname;
 }
 

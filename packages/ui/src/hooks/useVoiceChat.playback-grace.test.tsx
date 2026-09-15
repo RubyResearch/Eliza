@@ -54,7 +54,8 @@ class FakeAudioWorkletNode {
   }
 }
 
-class FakeAudioContext {
+class FakeAudioContext extends EventTarget {
+  currentTime = 0;
   state = "running";
   destination = {};
   audioWorklet = { addModule };

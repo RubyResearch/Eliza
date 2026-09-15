@@ -789,7 +789,7 @@ const REALTIME_COMPOSER_LABEL: Record<RealtimeVoiceStatus, string> = {
   listening: "Listening…",
   transcribing: "Hearing you…",
   thinking: "Thinking…",
-  speaking: "Speaking…",
+  speaking: "Speaking · mic paused",
   interrupting: "Stopping…",
 };
 
@@ -856,6 +856,7 @@ function ComposerRealtimeVoiceActivity({
   needsAudioUnlock,
   onUnlockAudio,
   paused,
+  microphoneMuted,
   reduceMotion,
   status,
   transcript,
@@ -865,6 +866,7 @@ function ComposerRealtimeVoiceActivity({
   needsAudioUnlock: boolean;
   onUnlockAudio: () => void;
   paused: boolean;
+  microphoneMuted: boolean;
   reduceMotion: boolean;
   status: RealtimeVoiceStatus;
   transcript: string;
@@ -875,12 +877,23 @@ function ComposerRealtimeVoiceActivity({
       ? "Voice paused"
       : connecting
         ? "Connecting…"
-        : REALTIME_COMPOSER_LABEL[status];
+        : microphoneMuted &&
+            (status === "listening" || status === "transcribing")
+          ? "Microphone muted"
+          : REALTIME_COMPOSER_LABEL[status];
   const liveTranscript =
-    !error && !paused && !connecting ? transcript.trim() : "";
+    !error &&
+    !paused &&
+    !connecting &&
+    !microphoneMuted &&
+    (status === "listening" || status === "transcribing")
+      ? transcript.trim()
+      : "";
   const visualPhase: RealtimeVoiceVisualPhase = error
     ? "error"
-    : paused
+    : paused ||
+        (microphoneMuted &&
+          (status === "listening" || status === "transcribing"))
       ? "paused"
       : connecting
         ? "connecting"
@@ -1447,12 +1460,14 @@ export function ChatOverlay({
   // handlers.
   const {
     handleChatEdit,
+    handleChatRetry,
     handleSelectConversation,
     loadConversationMessagesAround,
   } = useAppSelectorShallow((s) => ({
     // Editing a persisted turn must truncate and replace the original branch;
     // sending the corrected text as a fresh turn leaves the typo in history.
     handleChatEdit: s.handleChatEdit,
+    handleChatRetry: s.handleChatRetry,
     // Search-jump (#14279): select the hit's conversation, then (if the hit is
     // older than the loaded recent window) load a window centered on it before
     // scrolling. Inert no-ops in stories/tests with no AppContext.
@@ -1530,12 +1545,9 @@ export function ChatOverlay({
     [handleChatEdit, stopSpeaking],
   );
 
-  // Retry a failed/interrupted assistant turn by re-sending its preceding user
-  // turn — the SAME send() path the edit-resend action uses. (The ShellController
-  // exposes no handleChatRetry, so the overlay owns the walk-back locally; a
-  // truncating in-place retry would require a controller method we don't have.)
-  // Reads the live message list through a ref so the callback keeps a stable
-  // identity and the memoized ThreadLine isn't re-rendered on every tick.
+  // Durable reply recovery uses the same handler as the panel chat surface.
+  // Other failure kinds retain their existing resend contract. Read the live
+  // list through a ref to keep memoized transcript rows stable during streaming.
   const messagesRef = React.useRef(messages);
   messagesRef.current = messages;
   const handleRetry = React.useCallback(
@@ -1545,6 +1557,9 @@ export function ChatOverlay({
         (m) => m.id === assistantId && m.role === "assistant",
       );
       if (assistantIdx < 0) return;
+      if (list[assistantIdx].replyRecoveryAvailable === true) {
+        return handleChatRetry(assistantId);
+      }
       for (let i = assistantIdx - 1; i >= 0; i -= 1) {
         if (list[i].role === "user") {
           const retryText = list[i].content.trim();
@@ -1553,7 +1568,7 @@ export function ChatOverlay({
         }
       }
     },
-    [send],
+    [send, handleChatRetry],
   );
 
   // Proactive suggestions (#8792) — same semantics as the composite ChatView:
@@ -6827,6 +6842,7 @@ export function ChatOverlay({
                         needsAudioUnlock={needsAudioUnlock}
                         onUnlockAudio={unlockAudio}
                         paused={realtimeVoice.paused}
+                        microphoneMuted={realtimeVoice.microphoneMuted}
                         reduceMotion={reduce}
                         status={realtimeVoice.status}
                         transcript={transcript}
@@ -6973,12 +6989,20 @@ export function ChatOverlay({
                           }
                         >
                           <SoftButton
-                            icon={realtimeVoice.microphoneMuted ? MicOff : Mic}
-                            label={
-                              realtimeVoice.microphoneMuted
-                                ? "unmute microphone"
-                                : "mute microphone"
+                            icon={
+                              realtimeVoice.microphoneMuted ||
+                              realtimeVoice.status === "speaking"
+                                ? MicOff
+                                : Mic
                             }
+                            label={
+                              realtimeVoice.status === "speaking"
+                                ? "Microphone paused while speaking"
+                                : realtimeVoice.microphoneMuted
+                                  ? "unmute microphone"
+                                  : "mute microphone"
+                            }
+                            disabled={realtimeVoice.status === "speaking"}
                             active={realtimeVoice.microphoneMuted}
                             pressed={realtimeVoice.microphoneMuted}
                             onClick={realtimeVoice.toggleMicrophoneMute}

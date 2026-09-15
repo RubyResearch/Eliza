@@ -379,4 +379,35 @@ describe("toolMessageContent", () => {
 		expect(projected.promptData).toEqual({ safe: "model" });
 		expect(result.data).toEqual({ complete: "runtime" });
 	});
+
+	it("honors only explicit producer projection and retains text, failure and receipts", () => {
+		const result = {
+			success: false,
+			text: "Navigation was not confirmed.",
+			error: "transport unavailable",
+			data: { currentSchema: "full callable schema" },
+			promptData: { capability: "select-day", read: "VIEWS action=list" },
+			promptDataMode: "replace-data" as const,
+			turnComplete: false,
+		};
+		const rendered = JSON.parse(toolMessageContent(result));
+		expect(rendered).toEqual({
+			success: false,
+			text: result.text,
+			error: result.error,
+			data: result.promptData,
+			turnComplete: false,
+		});
+		expect(result.data.currentSchema).toBe("full callable schema");
+		expect(
+			projectToolResultForModel({ ...result, promptData: undefined }).data,
+		).toEqual(result.data);
+		const steps = [{ ...stepWithResult(1, result.text), result }];
+		expect(
+			JSON.parse(getRenderedResultValue(trajectoryStepsToMessages(steps))),
+		).toEqual(rendered);
+		expect(renderActionResultsForModel([result]).text).not.toContain(
+			"full callable schema",
+		);
+	});
 });

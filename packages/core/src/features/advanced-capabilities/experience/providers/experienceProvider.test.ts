@@ -1,7 +1,7 @@
 /**
  * Deterministic unit coverage for the experience context provider. The suite
  * drives the real provider with an in-memory EXPERIENCE service boundary and
- * verifies its retrieval contract, merge semantics, rendering, and fail-soft
+ * verifies its retrieval contract, result deduplication, rendering, and fail-soft
  * behavior without invoking a model or database.
  */
 import { describe, expect, it } from "vitest";
@@ -117,7 +117,34 @@ describe("experienceProvider", () => {
 		},
 	);
 
-	it("returns empty output when both retrieval sources are empty", async () => {
+	it("queries only the authored request, excluding host language instructions", async () => {
+		const { runtime, queryCalls } = makeRuntime();
+		await experienceProvider.get(
+			runtime,
+			makeMessage(
+				"retrieve prior learnings\n\n[Language instruction: Reply in natural English unless the user explicitly requests another language.]",
+			),
+		);
+		expect(queryCalls[0]).toMatchObject({ query: "retrieve prior learnings" });
+	});
+
+	it("references identical reason text without losing distinct reasons or provenance", async () => {
+		const repeated = makeExperience("same", "Exact\n  full learning!?");
+		repeated.result = repeated.learning;
+		const distinct = makeExperience("different", "A different learning");
+		const { runtime } = makeRuntime({ semantic: [repeated, distinct] });
+		const result = await experienceProvider.get(
+			runtime,
+			makeMessage("retrieve prior learnings"),
+		);
+		expect(result.text?.split(repeated.learning)).toHaveLength(2);
+		expect(result.text).toContain("WHY: Same text as DO above.");
+		expect(result.text).toContain("WHY: result-different");
+		expect(result.text).toContain("WHEN: context-same");
+		expect(result.data?.experiences).toEqual([repeated, distinct]);
+	});
+
+	it("returns empty output when no experiences match the query", async () => {
 		const { runtime, queryCalls, listCalls } = makeRuntime();
 
 		await expect(
@@ -131,7 +158,7 @@ describe("experienceProvider", () => {
 				includeRelated: true,
 			},
 		]);
-		expect(listCalls).toEqual([{ minConfidence: 0.7, minImportance: 0.7 }]);
+		expect(listCalls).toEqual([]);
 	});
 
 	it("renders every relevant experience beyond the former default limits", async () => {
@@ -141,7 +168,7 @@ describe("experienceProvider", () => {
 		const top = Array.from({ length: 8 }, (_, index) =>
 			makeExperience(`top-${index}`),
 		);
-		const { runtime } = makeRuntime({ semantic, top });
+		const { runtime, listCalls } = makeRuntime({ semantic, top });
 
 		const result = await experienceProvider.get(
 			runtime,
@@ -149,13 +176,18 @@ describe("experienceProvider", () => {
 		);
 
 		expect(result.data).toMatchObject({
-			count: 20,
-			experiences: [...semantic, ...top],
+			count: 12,
+			experiences: semantic,
 		});
-		expect(result.text).toContain("20. DO: learning-top-7");
+		expect(result.text).toContain("12. DO: learning-semantic-11");
+		expect(result.text).not.toContain("learning-top-");
+		expect(result.discoveryText).toContain("semantic-11");
+		expect(result.discoveryText).toContain("context-semantic-11");
+		expect(result.discoveryText).not.toContain("learning-semantic-");
+		expect(listCalls).toEqual([]);
 	});
 
-	it("preserves source order, keeps the later duplicate value, and renders every unique result", async () => {
+	it("keeps every query match without adding high-quality unrelated experiences", async () => {
 		const semanticFirst = makeExperience("shared", "semantic version wins");
 		const semanticSecond = makeExperience("semantic-second");
 		const topDuplicate = makeExperience("shared", "top version loses");
@@ -171,15 +203,15 @@ describe("experienceProvider", () => {
 		);
 
 		expect(result.data).toEqual({
-			experiences: [topDuplicate, semanticSecond, topOnly],
-			count: 3,
+			experiences: [semanticFirst, semanticSecond],
+			count: 2,
 		});
-		expect(result.values).toEqual({ experienceCount: "3" });
+		expect(result.values).toEqual({ experienceCount: "2" });
 		expect(result.text).toContain("[RELEVANT EXPERIENCES]");
-		expect(result.text).toContain("1. DO: top version loses");
+		expect(result.text).toContain("1. DO: semantic version wins");
 		expect(result.text).toContain("2. DO: learning-semantic-second");
-		expect(result.text).toContain("3. DO: learning-top-only");
-		expect(result.text).not.toContain("semantic version wins");
+		expect(result.text).not.toContain("learning-top-only");
+		expect(result.text).not.toContain("top version loses");
 		expect(result.text).toMatch(/\[\/RELEVANT EXPERIENCES\]$/);
 	});
 
@@ -189,7 +221,6 @@ describe("experienceProvider", () => {
 			{ queryError: new Error("query unavailable") },
 			"query unavailable",
 		],
-		["top list", { listError: "list unavailable" }, "list unavailable"],
 	] as const)(
 		"reports a %s failure and returns an explicit unavailable result",
 		async (_source, options, expectedError) => {

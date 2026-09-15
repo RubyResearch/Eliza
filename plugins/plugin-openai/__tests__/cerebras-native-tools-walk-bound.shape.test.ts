@@ -34,6 +34,7 @@ import {
 vi.mock("ai", () => ({
   generateText: aiMocks.generateText,
   streamText: aiMocks.streamText,
+  RetryError: { isInstance: () => false },
   jsonSchema: (schema: unknown) => {
     const wrapper: Record<PropertyKey, unknown> = {
       _type: undefined,

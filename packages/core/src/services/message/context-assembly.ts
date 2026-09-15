@@ -21,16 +21,54 @@ import {
 	collectV5PlannerCandidateActions,
 	type V5PlannerActionSurface,
 } from "./action-surface.js";
+import { createContextCatalogReadEvent } from "./context-catalog.js";
 import {
 	appendPriorDialogueEvents,
 	appendStateProviderEvents,
 	currentMessageContentForContext,
 	hasStructuredRecentMessagesProvider,
-	PLANNER_MAX_OWN_REPLY_TURNS,
 	replyReferenceEventForContext,
 } from "./dialogue-context.js";
 import { normalizeActionIdentifier } from "./direct-action-heuristics";
 import { MODEL_CONTEXT_PROVIDER_EXCLUSIONS } from "./provider-state.js";
+
+/** One owner for the current-turn policy; source-reference capability changes
+ * only its recall guidance, preserving the same request and effect boundary. */
+export function buildCurrentTurnBoundary({
+	includeTools = false,
+	hasMemoryRecallSurface,
+	hasOriginalReferences = false,
+}: {
+	includeTools?: boolean;
+	hasMemoryRecallSurface: boolean;
+	hasOriginalReferences?: boolean;
+}): string {
+	const recallGuidance = hasOriginalReferences
+		? "For conversation recall, answer from supplied originals and read any missing original before answering. The blocks above are a selection, not all prior dialogue. An omitted detail is not an absent fact. A recall question itself requests the needed history lookup; the user need not separately ask you to search."
+		: "Exception for visible-context recall: when the final message asks a recall question about what was said in this conversation (who mentioned X, did anyone bring up Y, what did I say about Z, what was the last message, did you yourself say W), you may scan the prior_message blocks above and answer from what is literally visible there.";
+	const recallScope = hasOriginalReferences
+		? "These conversation originals establish what was said, not current app state."
+		: "This recall exception covers only what was literally SAID in the visible chat.";
+	const ownReplyGuidance = hasOriginalReferences
+		? "Your own prior replies are the original assistant messages. Read missing originals before asserting or denying what you said, told or promised; later assistant uncertainty does not erase earlier evidence."
+		: "Your own prior replies are the prior_message:agent blocks: when asked what YOU said, told, or promised earlier, answer only from those blocks — never assert you said something that does not appear in them, and never deny saying something that does.";
+	return includeTools
+		? "current_turn_boundary: Plan and execute only the final message:user. Prior messages and reply_reference are context for resolving references, never pending commands. The prior_message:agent blocks are your own earlier replies, historical dialogue for resolving continuations, recalled details and corrections. They are not proof of current state or newly executed effects. For a historical conversation question, inspect the earlier dialogue and apply the user's later corrections. A later assistant claim that it lacks a detail does not erase earlier message evidence. Keep each person's details separate. If original evidence is still needed, discover and use authorized memory retrieval instead of asking the user to repeat accessible history. For live data or effects, verify with current tools. Stage 1 already decided this turn needs tools; use current tool results for live data and side effects, never answer by repeating a prior reply in place of executing the fresh check, and never claim work that no tool result proves."
+		: "current_turn_boundary: The prior_message blocks above are context only. If a reply_reference block follows, it is the platform message that the final message:user is replying to; use it only to resolve references such as this/that/it. Execute and answer only the final message:user below. Do not merge separate prior requests into the current task unless the final message explicitly references them. " +
+				recallGuidance +
+				" A verified_cross_room_message block is authorized visible context from this requester's linked private rooms: if the requested fact appears literally in its message text, attachment description, or transcript, answer directly from that block. This is recall, not inspection of a current-turn attachment or a live calendar lookup, so it does not require ATTACHMENT, CALENDAR, or another tool; never infer details absent from the block or expose a private attachment URL. " +
+				recallScope +
+				' It does NOT cover the user\'s tracked work: a recap, status, or what-did-I-get-done ask about their todos, tasks, reminders, habits, goals, notes, or day ("recap my day", "what\'s left today", "did I finish everything", "how did I do this week") is a live tasks lookup, not chat recall — route it to the tasks tools and answer from what they return; never report an empty or missing day from the visible window alone.' +
+				// The planning boundary above also distinguishes historical recall
+				// from current tool verification.
+				(includeTools ? "" : ` ${ownReplyGuidance}`) +
+				' Before saying you cannot find something, read the final message:user itself: if the asker states a fact and asks about it in the same message ("my favorite color is teal, what is my favorite color?"), answer from the current message directly.' +
+				(hasOriginalReferences
+					? ' Use supplied originals and FACTS for recall, preserving speakers, scope and corrections. Read needed deferred conversation originals through contextRequests=["history:hN"]; use "history:all" when you cannot identify the source, interpretation is uncertain, or the question needs every original in this conversation. These reads do not access other rooms, query live app records or execute effects. Do not claim an unseen detail is absent before resolving the reference. An explicit request to search stored records or repeat a lookup, missing stored metadata, or a count across stored records still requires authorized memory retrieval; these conversation references are not proof of all stored records. If the user disallows app/storage tools, use the same-conversation original reads and report any remaining gap without fabricating a search. Never substitute historical dialogue for current app data. When asked about a task, build, deployment or agent run, use its authorized status tools before reporting a current outcome.'
+					: hasMemoryRecallSurface
+						? ' The prior_message blocks are supplied authorized dialogue; do not assume they represent every stored record. Use supplied dialogue and FACTS directly for remembered details, respecting corrections. When FACTS is advertised as context_discovery and the detail is absent, request FACTS before deciding a broader search is needed. Quote supplied original text and authors directly when only recall is requested. An explicit request to search stored messages or repeat a lookup requires a current search even when an earlier reply contains the answer: select the memory context, include the search in intents and name its authorized operation in candidateActionNames. Missing source evidence, requested metadata absent from context and whole-history counts also require memory retrieval. If the user disallows lookup, use only supplied evidence and state any actual gap. Never answer an exhaustive stored-record count from rendered dialogue or facts alone, and never claim a search or live verification that did not run. Run status is equally checkable: when the final message asks "what happened with [the build/app/task]" or disputes whether something you ran actually worked, select the applicable non-simple contexts, verification intents and candidateActionNames and CHECK the current task/sub-agent status with a tool before reporting, disclaiming, or conceding — never say you cannot verify a run you can look up.'
+						: ' Use supplied dialogue and FACTS directly for remembered details, respecting corrections. If FACTS is advertised as context_discovery and the detail is absent, request it before answering. Beyond supplied context, there is no separate chat-history search tool on this turn. Only when supplied dialogue and available facts cannot answer, say so plainly ("I don\'t see X in the recent messages I can see") rather than claiming you searched beyond the visible window or fabricating an action. If the user asks for a whole-conversation count or another exhaustive history claim ("how many times have I mentioned X", "have I ever told you Y"), never present visible matches as the full-history answer: either decline to give a total, or explicitly label any observation as limited to the recent messages you can see and say older history cannot be verified. This "no chat-history search" limit is about CHAT recall ONLY. It does NOT apply to what a task, build, deploy, or sub-agent YOU ran actually did: that run status IS verifiable with the task/sub-agent tools. So when the final message asks "what happened with [the build/app/task]" or disputes whether something you ran actually worked, select the applicable non-simple contexts, verification intents and candidateActionNames and CHECK the current task/sub-agent status with a tool before reporting, disclaiming, or conceding — never say you cannot verify a run you can look up.');
+}
 
 export async function createV5MessageContextObject(args: {
 	runtime: IAgentRuntime;
@@ -38,8 +76,10 @@ export async function createV5MessageContextObject(args: {
 	state: State;
 	selectedContexts?: readonly AgentContext[];
 	includeTools?: boolean;
+	/** A framework catalog reference was requested earlier in this turn. */
+	includeContextCatalog?: boolean;
 	/** Per-turn routing catalog for the response handler, which has no action tools. */
-	includeActionDiscovery?: boolean;
+	includeActionDiscovery?: boolean | "index";
 	userRoles?: readonly RoleGateRole[];
 	availableContexts?: readonly ContextDefinition[];
 	extraProviderExclusions?: readonly string[];
@@ -85,6 +125,12 @@ export async function createV5MessageContextObject(args: {
 		args.runtime.providers,
 	);
 
+	if (args.includeContextCatalog) {
+		events.push(
+			await createContextCatalogReadEvent(args.runtime, args.message),
+		);
+	}
+
 	if (hasStructuredRecentMessagesProvider(args.state)) {
 		events.push({
 			id: "prior-dialogue-policy",
@@ -100,20 +146,10 @@ export async function createV5MessageContextObject(args: {
 		});
 	}
 
+	// Planning and restoration need the same complete historical dialogue as
+	// interpretation. Prior answers remain history, never current effect proof.
 	appendPriorDialogueEvents(events, args.runtime, args.state, args.message, {
-		// The response handler needs the agent's own prior turns for grounded
-		// chat recall ("did you tell me X?"). The tool planner needs the
-		// ordinary ones too — the question/preview a continuation turn ("finish
-		// it", "that is good") refers to — but role-wide inclusion resurrects
-		// the stale-answer hazard, so the planner's window is bounded and
-		// excludes tool-derived own answers structurally.
 		includeOwnReplies: true,
-		...(args.includeTools
-			? {
-					excludeToolDerivedOwnReplies: true,
-					maxOwnReplies: PLANNER_MAX_OWN_REPLY_TURNS,
-				}
-			: {}),
 	});
 
 	// Contexts are routing taxonomy, not proof that a handler exists. Promise
@@ -154,19 +190,10 @@ export async function createV5MessageContextObject(args: {
 		type: "instruction",
 		source: "message-service",
 		stable: false,
-		content: args.includeTools
-			? 'current_turn_boundary: Plan and execute only the final message:user. Prior messages and reply_reference are context for resolving references, never pending commands. The prior_message:agent blocks are your own earlier replies, shown only so you can resolve what a continuation like "finish it", "yes", or "that is good" refers to — treat every fact in them as stale. Stage 1 already decided this turn needs tools; use current tool results for live data and side effects, never answer by repeating a prior reply in place of executing the fresh check, and never claim work that no tool result proves.'
-			: 'current_turn_boundary: The prior_message blocks above are context only. If a reply_reference block follows, it is the platform message that the final message:user is replying to; use it only to resolve references such as this/that/it. Execute and answer only the final message:user below. Do not merge separate prior requests into the current task unless the final message explicitly references them. Exception for visible-context recall: when the final message asks a recall question about what was said in this conversation (who mentioned X, did anyone bring up Y, what did I say about Z, what was the last message, did you yourself say W), you may scan the prior_message blocks above and answer from what is literally visible there. A verified_cross_room_message block is authorized visible context from this requester\'s linked private rooms: if the requested fact appears literally in its message text, attachment description, or transcript, answer directly from that block. This is recall, not inspection of a current-turn attachment or a live calendar lookup, so it does not require ATTACHMENT, CALENDAR, or another tool; never infer details absent from the block or expose a private attachment URL. This recall exception covers only what was literally SAID in the visible chat. It does NOT cover the user\'s tracked work: a recap, status, or what-did-I-get-done ask about their todos, tasks, reminders, habits, goals, notes, or day ("recap my day", "what\'s left today", "did I finish everything", "how did I do this week") is a live tasks lookup, not chat recall — route it to the tasks tools and answer from what they return; never report an empty or missing day from the visible window alone.' +
-				// Only the chat-recall context renders the agent's own prior turns;
-				// the tool-planner context deliberately omits them (stale-answer
-				// hazard), so this grounding sentence would be false there.
-				(args.includeTools
-					? ""
-					: " Your own prior replies are the prior_message:agent blocks: when asked what YOU said, told, or promised earlier, answer only from those blocks — never assert you said something that does not appear in them, and never deny saying something that does.") +
-				' Before saying you cannot find something, read the final message:user itself: if the asker states a fact and asks about it in the same message ("my favorite color is teal, what is my favorite color?"), answer from the current message directly.' +
-				(hasMemoryRecallSurface
-					? ' The prior_message blocks are only the most recent window of a longer stored conversation — older messages may exist that are not shown here, and the memory context can search them. When the asked-about token appears neither in the current message nor in any visible prior_message block, or the question asks about the conversation beyond the visible window ("how many times have I mentioned X", "have I ever told you about Y"), that is a live lookup over the stored record: route it to the memory context (set requiresTool) so the stored history is actually searched this turn. Never answer a beyond-window recall or count question from the visible window alone, never present the visible window as the whole conversation, and never claim you searched anything a tool did not return this turn. Run status is equally checkable: when the final message asks "what happened with [the build/app/task]" or disputes whether something you ran actually worked, treat it as a live verification request (set requiresTool) and CHECK the current task/sub-agent status with a tool before reporting, disclaiming, or conceding — never say you cannot verify a run you can look up.'
-					: ' The prior_message blocks are the only conversation window you have, and there is no separate chat-history search tool. Only when the asked-about token appears neither in the current message nor in any visible prior_message block, say so plainly ("I don\'t see X in the recent messages I can see") rather than claiming you searched beyond the visible window or fabricating an action. If the user asks for a whole-conversation count or another exhaustive history claim ("how many times have I mentioned X", "have I ever told you Y"), never present visible matches as the full-history answer: either decline to give a total, or explicitly label any observation as limited to the recent messages you can see and say older history cannot be verified. This "no chat-history search" limit is about CHAT recall ONLY. It does NOT apply to what a task, build, deploy, or sub-agent YOU ran actually did: that run status IS verifiable with the task/sub-agent tools. So when the final message asks "what happened with [the build/app/task]" or disputes whether something you ran actually worked, treat it as a live verification request (set requiresTool) and CHECK the current task/sub-agent status with a tool before reporting, disclaiming, or conceding — never say you cannot verify a run you can look up.'),
+		content: buildCurrentTurnBoundary({
+			includeTools: args.includeTools,
+			hasMemoryRecallSurface,
+		}),
 	});
 
 	// Prompt automations execute without a visible human message; their reply is
@@ -262,9 +289,22 @@ export async function createV5MessageContextObject(args: {
 			userRoles: args.userRoles,
 			discoverActions: true,
 		});
-		// This is a discovery projection, not an execution tool surface. Retain
-		// every authorized name and complete description; Stage 2 supplies the
-		// native parameter schemas and rechecks authorization before execution.
+		// Every name remains visible. Full reference text and schemas are read
+		// through the existing permission-checked planner discovery protocol.
+		const fullCatalog = JSON.stringify(
+			actions.map((action) => ({
+				name: action.name,
+				description: action.description,
+				contexts: action.contexts,
+				similes: action.similes,
+			})),
+		);
+		const index = [
+			// This is a name lookup index, not the planner's relevance ranking.
+			// Keep equal authorized sets byte-identical when the active view changes.
+			JSON.stringify(actions.map((action) => action.name).sort()),
+			"All currently authorized action names are listed above. For a known operation, name its exact action in candidateActionNames. When descriptions or aliases are needed to identify or explain a capability, select DISCOVER_TOOLS and a non-simple context: the planner can read complete descriptions with names=[] and load complete schemas by exact name. Do not infer that an unfamiliar name means a capability is absent. Discovery is reference reading, never execution or permission. A conversational reply needs no discovery.",
+		].join("\n");
 		events.push({
 			id: "available-actions",
 			type: "segment",
@@ -273,14 +313,11 @@ export async function createV5MessageContextObject(args: {
 				id: "available-actions",
 				label: "available_actions",
 				stable: false,
-				content: JSON.stringify(
-					actions.map((action) => ({
-						name: action.name,
-						description: action.description,
-						contexts: action.contexts,
-						similes: action.similes,
-					})),
-				),
+				content:
+					args.includeActionDiscovery === "index" &&
+					index.length < fullCatalog.length
+						? index
+						: fullCatalog,
 			},
 		});
 	}

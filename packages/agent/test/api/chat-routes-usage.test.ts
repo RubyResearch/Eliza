@@ -4,6 +4,7 @@ import {
   ChannelType,
   createMessageMemory,
   EventType,
+  getInferenceTimer,
   ModelType,
   RoomHandlerQueue,
   stringToUuid,
@@ -77,6 +78,88 @@ function actionResult(actionName: string, success = true, text?: string) {
 }
 
 describe("generateChatResponse usage reporting", () => {
+  it("shares each request trace with ingress consumers before generation", async () => {
+    const ingress: Array<{
+      text: string;
+      traceId: unknown;
+      timerTraceId: string | undefined;
+    }> = [];
+    const runtime = createRuntime({
+      emitEvent: async (event, payload) => {
+        if (event !== EventType.MESSAGE_RECEIVED) return;
+        const { message } = payload as {
+          message: ReturnType<typeof createChatMessage>;
+        };
+        ingress.push({
+          text: message.content.text ?? "",
+          traceId: message.metadata?.traceId,
+          timerTraceId: getInferenceTimer()?.traceId,
+        });
+      },
+      messageService: {
+        handleMessage: async () => ({
+          didRespond: true,
+          responseContent: { text: "Reply" },
+          responseMessages: [],
+        }),
+      } as NonNullable<AgentRuntime["messageService"]>,
+    });
+    await Promise.all([
+      generateChatResponse(
+        runtime,
+        createChatMessage("explicit trace"),
+        "Chat Agent",
+        {
+          traceId: "0123456789abcdef0123456789abcdef",
+        },
+      ),
+      generateChatResponse(
+        runtime,
+        createChatMessage("generated trace"),
+        "Chat Agent",
+      ),
+    ]);
+    expect(ingress).toHaveLength(2);
+    for (const receipt of ingress) {
+      expect(receipt.traceId).toMatch(/^[0-9a-f]{32}$/);
+      expect(receipt.traceId).toBe(receipt.timerTraceId);
+    }
+    expect(
+      ingress.find((receipt) => receipt.text === "explicit trace")?.traceId,
+    ).toBe("0123456789abcdef0123456789abcdef");
+    expect(ingress[0].traceId).not.toBe(ingress[1].traceId);
+  });
+
+  it("retains an originating trace and metadata when forwarding a message", async () => {
+    const message = createChatMessage("forwarded trace");
+    message.metadata = { type: "message", source: "forwarded" };
+    Object.assign(message.metadata, { traceId: "originating-turn" });
+    const runtime = createRuntime({
+      emitEvent: async (event, payload) => {
+        if (event !== EventType.MESSAGE_RECEIVED) return;
+        expect(
+          (payload as { message: typeof message }).message.metadata,
+        ).toEqual({
+          type: "message",
+          source: "forwarded",
+          traceId: "originating-turn",
+        });
+      },
+      messageService: {
+        handleMessage: async () => ({
+          didRespond: true,
+          responseContent: { text: "Reply" },
+          responseMessages: [],
+        }),
+      } as NonNullable<AgentRuntime["messageService"]>,
+    });
+    await generateChatResponse(runtime, message, "Chat Agent");
+    expect(message.metadata).toMatchObject({
+      traceId: "originating-turn",
+      source: "forwarded",
+    });
+  });
+
   it("returns actual provider usage when a provider event is emitted", async () => {
     let runtime: AgentRuntime;
     runtime = createRuntime({

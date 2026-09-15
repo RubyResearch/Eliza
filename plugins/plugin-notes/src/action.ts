@@ -27,7 +27,7 @@ import {
 import { getNotesService } from "./service.js";
 import { parseNoteContent } from "./validation.js";
 
-const NOTES_OPS = ["create", "list", "update", "delete"] as const;
+const NOTES_OPS = ["create", "list", "get", "update", "delete"] as const;
 type NotesOp = (typeof NOTES_OPS)[number];
 
 function readParams(options?: HandlerOptions): Record<string, unknown> {
@@ -66,7 +66,7 @@ function readOp(params: Record<string, unknown>): NotesOpParse | undefined {
 function failure(
   text: string,
   code: string,
-  missingParameter?: "content" | "body",
+  missingParameter?: "content" | "replacementContent",
 ): ActionResult {
   return {
     success: false,
@@ -160,11 +160,11 @@ export const notesAction: Action = {
     "UPDATE_NOTE",
   ],
   description:
-    "Durable notes the user can write and read back. action=create writes a note from one content field; action=list reads them, narrowed by content when supplied; action=update replaces the complete note found by its text; action=delete removes one found by its text. The first line is the note's label and later lines are its body. For a partial edit, preserve the other content, including the existing label, in the replacement. NOTES changes data, not the visible view: an explicit request to also open Notes needs VIEWS navigation.",
+    "Durable notes the user can write and read back. action=create writes a note from one content field; action=get reads one exact noteId; action=list reads/searches note text; action=update applies a literal textEdit or replaces the complete note; action=delete removes one found by its text. The first line is the note's label and later lines are its body. Prefer textEdit for an exact substitution: the service preserves every other character without needing the model to read and rewrite the note. NOTES changes data, not the visible view: an explicit request to also open Notes needs its own navigation action (prefer VIEWS_SHOW when available).",
   descriptionCompressed:
-    "notes: create, list/search, update full content (preserve unedited label/body), delete; opening the Notes view separately needs VIEWS",
+    "notes: create, list/search, update by exact textEdit or complete replacementContent, delete; opening the Notes view separately uses VIEWS_SHOW when available, otherwise VIEWS",
   routingHint:
-    "writing something down for later with no time attached ('make a note', 'note to self', 'write down that …', 'jot this down', 'remember that …') -> NOTES_CREATE with content. ANY read over the user's notes -> NOTES_LIST. For a specific topic ('search my notes for X', 'find my note about X', 'do i have a note on X', 'what did my note say about X'), pass content=X so unrelated personal notes are not exposed; omit content when the owner asks for all notes, counts, or a recency comparison without a topic. Recency is determined from returned createdAt/updatedAt fields, never by searching for words such as 'latest' or 'most recently updated'. A notes search is NEVER a document search: never route it to SEARCH_DOCUMENTS, DOCUMENT, FILES or DATABASE, which do not index notes and will answer 'nothing found' for a note that exists. REMOVING one ('delete the note about X', 'forget the note about X', 'remove my note on X') -> NOTES_DELETE with content=the identifying text. CHANGING one ('change the note about X to Y', 'update my note about X') -> NOTES_UPDATE with content=the existing text and body=the replacement. Deleting and updating are NOT reads: never answer a removal or change request with NOTES_LIST. RECALLING A FACT the user once asked you to note ('who is alex again', 'what did i say about X') is answered from the SAVED_NOTES context block, which is the same store; when that block reports notes it did not show, call NOTES_LIST before answering. A memory search that returns nothing is not evidence a note does not exist — MEMORY does not index notes. A note is NOT a todo and NOT a calendar event: anything with a date or time block -> CALENDAR, anything that should ping the user at a time -> TRIGGER. Never hand-write SQL through DATABASE to store or read a note.",
+    "writing something down for later with no time attached ('make a note', 'note to self', 'write down that …', 'jot this down', 'remember that …') -> NOTES_CREATE with content. ANY read over the user's notes -> NOTES_LIST. For an exact note ID use NOTES_GET with noteId and omit content; content searches titles/bodies, not IDs. For a specific topic ('search my notes for X', 'find my note about X', 'do i have a note on X', 'what did my note say about X'), pass content=X so unrelated personal notes are not exposed; omit content when the owner asks for all notes, counts, or a recency comparison without a topic. Recency is determined from returned createdAt/updatedAt fields, never by searching for words such as 'latest' or 'most recently updated'. A notes search is NEVER a document search: never route it to SEARCH_DOCUMENTS, DOCUMENT, FILES or DATABASE, which do not index notes and will answer 'nothing found' for a note that exists. REMOVING one ('delete the note about X', 'forget the note about X', 'remove my note on X') -> NOTES_DELETE with content=the identifying text. CHANGING one -> NOTES_UPDATE with content identifying the existing note. For a literal substitution use textEdit with field, oldText and newText; no full-note read or rewrite is needed. For a general rewrite use replacementContent with the complete updated note, preserving the existing first-line label and all unedited lines. Deleting and updating are NOT reads: never answer a removal or change request with NOTES_LIST. RECALLING A FACT the user once asked you to note ('who is alex again', 'what did i say about X') is answered from the SAVED_NOTES context block, which is the same store; when that block reports notes it did not show, call NOTES_LIST before answering. A memory search that returns nothing is not evidence a note does not exist — MEMORY does not index notes. A note is NOT a todo and NOT a calendar event: anything with a date or time block -> CALENDAR, anything that should ping the user at a time -> TRIGGER. Never hand-write SQL through DATABASE to store or read a note.",
   // Notes are stored per agent rather than per sender. Only the owner may see
   // or mutate that personal store, including through direct tool execution.
   roleGate: { minRole: "OWNER" },
@@ -182,33 +182,47 @@ export const notesAction: Action = {
       // error-policy:J3 an unrecognised operation is untrusted planner input;
       // it becomes an explicit invalid result, never a fake-valid default.
       return failure(
-        `I can create, list, update, or delete a note — I don't have a "${parsed.requested}" one.`,
+        `I can create, get, list, update, or delete a note — I don't have a "${parsed.requested}" one.`,
         "NOTES_UNKNOWN_OP",
       );
     }
     const op: NotesOp = parsed?.op ?? "list";
     const service = getNotesService(runtime);
 
-    if (op === "list") {
-      const notes = service.listNotes();
+    if (op === "list" || op === "get") {
+      const noteId = readString(params.noteId);
       const topic =
         readString(params.content) ??
         readString(params.query) ??
         readString(params.text);
+      if ((op === "get" || params.noteId !== undefined) && !noteId) {
+        return failure("Supply a nonempty exact note ID.", "NOTES_INVALID_ID");
+      }
+      if (noteId && topic) {
+        return failure(
+          "Use noteId for an exact ID lookup or content for a text search, not both.",
+          "NOTES_CONFLICTING_LOOKUP",
+        );
+      }
+      const notes = service.listNotes();
       const normalizedTopic = topic?.toLocaleLowerCase();
-      const matches = normalizedTopic
-        ? notes.filter((note) =>
-            `${note.title}\n${note.body}`
-              .toLocaleLowerCase()
-              .includes(normalizedTopic),
-          )
-        : notes;
+      const matches = noteId
+        ? notes.filter((note) => note.id === noteId)
+        : normalizedTopic
+          ? notes.filter((note) =>
+              `${note.title}\n${note.body}`
+                .toLocaleLowerCase()
+                .includes(normalizedTopic),
+            )
+          : notes;
       return committed({
         op,
         readOnlyOperation: true,
         count: matches.length,
         total: notes.length,
-        filterApplied: topic !== undefined,
+        filterApplied: noteId !== undefined || topic !== undefined,
+        lookupMode: noteId ? "exact_id" : topic ? "text" : "all",
+        ...(noteId ? { requestedNoteId: noteId } : {}),
         ...(topic ? { topic } : {}),
         notes: matches,
       });
@@ -268,18 +282,31 @@ export const notesAction: Action = {
       });
     }
 
-    const replacement = readString(params.body) ?? readString(params.newText);
-    if (!replacement) {
+    const replacement =
+      readString(params.replacementContent) ??
+      readString(params.body) ??
+      readString(params.newText);
+    const hasTextEdit =
+      params.textEdit !== undefined && params.textEdit !== null;
+    if (hasTextEdit && replacement) {
       return failure(
-        "Tell me what the note should say after the change.",
+        "Pass either textEdit or replacementContent, not both. Nothing changed.",
+        "NOTES_CONFLICTING_PATCH",
+      );
+    }
+    if (!hasTextEdit && !replacement) {
+      return failure(
+        "Pass textEdit for an exact substitution, or replacementContent for the complete updated note.",
         "NOTES_MISSING_PATCH",
-        "body",
+        "replacementContent",
       );
     }
     const updated = await service.updateNoteByLookupWithCommit(
       "query",
       content,
-      parseNoteContent(replacement),
+      hasTextEdit
+        ? { textEdit: params.textEdit }
+        : parseNoteContent(replacement),
     );
     return committed({
       op,
@@ -298,8 +325,9 @@ export const notesAction: Action = {
     {
       name: "content",
       description:
-        "For create, the complete new note: title on the first line and body on subsequent lines. Copy an explicit user title byte-for-byte, including spaces, capitalization, punctuation, and alphanumeric codes, even when the body is recalled from earlier conversation or generated. Do not reformat the title or substitute the spelling or spacing of a similar prior note. Preserve an explicitly supplied body exactly. Put a newline between title and body; do not join them with a dash into one title. Prefer this single field and omit body. Alternatively, pass only the exact title in content and the requested body in body. For update/delete, this identifies the EXISTING note, not its replacement. On list, pass only a requested topic to filter note text. Omit it for all notes, counts, or recency questions without a topic; use the returned createdAt/updatedAt timestamps to compare recency, not a text filter such as 'most recently updated'.",
+        "For list, pass a title or topic to search note text; use noteId instead for an exact ID. Omit only for all notes, unfiltered counts, or recency comparisons without a title/topic; compare returned createdAt/updatedAt timestamps, never search for 'latest' or 'most recently updated'. For update/delete, identify the EXISTING note, not its replacement. For create, supply the exact title, newline, and body.",
       required: false,
+      subactions: ["create", "list", "update", "delete"],
       requiredForSubactions: ["create", "update", "delete"],
       // Strict providers may serialize an omitted optional string as "". The
       // empty string is never valid note content (minLength is 1), so normalize
@@ -310,12 +338,50 @@ export const notesAction: Action = {
       schema: { type: "string", minLength: 1 },
     },
     {
+      name: "noteId",
+      description:
+        "Read one note by its exact, case-sensitive ID. Required for get; optional instead of content for list. A text search cannot establish whether an ID exists.",
+      subactions: ["list", "get"],
+      required: false,
+      requiredForSubactions: ["get"],
+      modelOmissionSentinels: [""],
+      schema: { type: "string", minLength: 1 },
+    },
+    {
       name: "body",
       description:
-        "For update, COMPLETE replacement note content: first line is the label, remaining lines are the body. To edit only the body, include the unchanged label followed by a newline and the new body. Preserve unedited content; list the matching note first if unknown. For create, OMIT this field when content already holds the full note. If content holds ONLY a title, body may contain ONLY the requested body, never repeat the title.",
+        "For create only: optional body when content contains only the title. Prefer the complete note in content: title on the first line and body on subsequent lines, omitting body. Alternatively, pass only the exact title in content and the requested body here. Copy an explicit user title byte-for-byte, including spaces, capitalization, punctuation, and alphanumeric codes, even when the body is recalled from earlier conversation or generated. Do not reformat the title or substitute the spelling or spacing of a similar prior note. Preserve an explicitly supplied body exactly. Put a newline between title and body; do not join them with a dash into one title. For update use replacementContent, not body.",
+      subactions: ["create"],
       required: false,
-      requiredForSubactions: ["update"],
       schema: { type: "string" },
+    },
+    {
+      name: "replacementContent",
+      description:
+        "For full rewrites only: the COMPLETE updated note, including its first-line label and every unedited line. Read the note first if its full content is unknown. For an exact substitution use textEdit instead; omit replacementContent. Supply exactly one of these two update forms.",
+      subactions: ["update"],
+      required: false,
+      // Old callers used body/newText for the complete replacement. Keep
+      // their wire contract while exposing an unambiguous name to planners.
+      aliases: ["body", "newText"],
+      schema: { type: "string" },
+    },
+    {
+      name: "textEdit",
+      description:
+        "For an exact substitution, prefer this instead of reading and rewriting the full note. content identifies the existing note; field selects title or body; oldText and newText are the exact user-requested strings, with no grammar correction or added context. The service replaces one unique literal match atomically and preserves every other character and field. A missing or repeated match fails without changes; read the note and use a unique surrounding phrase if needed. Omit replacementContent.",
+      subactions: ["update"],
+      required: false,
+      schema: {
+        type: "object",
+        properties: {
+          field: { type: "string", enum: ["title", "body"] },
+          oldText: { type: "string", minLength: 1 },
+          newText: { type: "string" },
+        },
+        required: ["field", "oldText", "newText"],
+        additionalProperties: false,
+      },
     },
   ],
   examples: [],

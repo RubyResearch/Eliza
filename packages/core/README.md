@@ -32,6 +32,13 @@ These controls do not publish documents to the internet.
 - **Plugin system:** `Plugin` objects contribute actions/providers/evaluators/services to the runtime.
 - **Built-in bundle:** Foundational capabilities ship as `basicCapabilities` (and `basicActions` / `basicProviders` / `basicEvaluators` / `basicServices`); there is no `corePlugin` singleton.
 
+For the default direct-text message handler, routing context discovery can show
+every authorized context name while deferring its complete description. The
+handler requests `CONTEXT_CATALOG` through `contextRequests` when it needs those
+descriptions; the runtime refreshes the authorized catalog before processing any
+reply or action. This can add a model call, so compare whole-turn usage. It does
+not trim conversation history or grant access to tools or private data.
+
 `resolveActionArgs` treats a required empty array as missing unless its
 `SubactionSpec.allowEmptyArrays` names that parameter. This opt-in preserves
 an explicitly supplied or extracted `[]` through argument resolution; it never
@@ -228,6 +235,65 @@ Some deterministic/offline backends may return **plain text** instead. In that c
 
 ### Post-turn evaluator prompt prefixes
 
+Managed post-turn extraction supports a revision-based input contract. An
+evaluator opts in with `incremental: true` only when its preparation consumes
+`options.extraction` and every processor can safely replay the same evidence.
+An opt-in predicate may require adapter capabilities; the long-term-memory lane
+requires durable idempotent writes and otherwise keeps its legacy behavior.
+The first run backfills the retained room; later runs receive complete new or
+changed evidence, not a token-capped transcript. Full messages remain stored for
+conversation rendering and authorized recall. Already processed provider prose
+is not copied wholesale into the extraction prompt; declared providers, existing
+facts, delivered action results and the pending evidence remain available.
+
+Within one room-lease batch, incremental extractors share one complete cloned
+and fingerprinted source snapshot. Each keeps independent progress, output and
+reconciliation data; staging and commit still recheck authoritative sources.
+The snapshot is never reused across batches or room scopes.
+
+Evidence byte budgets exclude `content.chatIdempotency`, the recovery transport
+carrier already omitted from shared transcripts and authored-source revisions.
+Batch selection, historical pages and shared batches use that accounting.
+Historical reference prompts also omit this transport carrier; their cumulative
+byte guard measures the exact serialized evidence array supplied to the model.
+Stored messages and recovery snapshots remain complete. Authored evidence still
+must fit the configured resource boundary without clipping.
+
+The background worker yields to the event loop between jobs, including failed
+staged-output replays. Cached database work can otherwise keep an entire task
+batch in promise continuations and delay incoming network requests before they
+reach the foreground room queue. The existing foreground and worker ownership
+gates still apply; yielding does not acknowledge evidence or discard pending work.
+
+When smaller, incremental shared transcripts name each speaker ID once and use
+explicit top-level `entityRef` fields. Message IDs and nested content remain
+literal; replacing references from the supplied dictionary reconstructs every
+original record. Small inputs or a colliding source field keep the full format.
+
+Progress is isolated by agent, room, speaker and evaluator. Validated output is
+durably staged before effects and reused after failure; the checkpoint advances
+only after all processors succeed. Personal facts, preferences and long-term
+memories must cite selected messages from the correct speaker. Initial backfill
+does not award existing facts another confidence increase merely for rereading
+old evidence. Transport acknowledgements and topic/embedding bookkeeping do not
+count as authored edits.
+The managed wire schema requires declared source-message citations; parsing also
+checks their actual authorship before journaling. Connector delivery settlement
+precedes extraction, so final text and delivered action receipts are included.
+
+This is at-least-once processing with replay-safe reducers, not a distributed
+exactly-once transaction. The existing room ordering remains required. Edits or
+deletions of processed sources are explicit reconciliation holds; they never
+silently delete reviewed facts or acknowledge unreconciled evidence. Pending
+work resumes on a later eligible text turn. Voice/mobile reflection exclusions
+and third-party evaluators' full-context contracts remain unchanged. Moving
+model work outside the room lease requires a separate durable scheduling and
+source-reconciliation design.
+
+`parse(output, context)` can validate evidence before staging; the optional
+second argument preserves existing plugins. `processedEvaluators` lists only
+evaluators whose processors and progress commits succeeded, not attempted ones.
+
 Evaluators retain the complete `prompt(context): string` API. They may also
 provide `promptSegments(context)` whose concatenated content equals that exact
 prompt. Only instructions independent of the turn belong in stable segments;
@@ -350,6 +416,14 @@ The **task system** is the single place for *when* scheduled work runs. Only tas
 
 The implementation lives in `src/services/task.ts` and `src/services/task-scheduler.ts`.
 
+Repeat-task failures may carry an `ElizaError.retryAt` epoch-millisecond deadline.
+The existing scheduler persists the later of that deadline and its normal backoff,
+including early-run tolerance, then restores the base cadence on success. Failure
+counts and operator pause policies still apply. Background evaluators preserve
+structural temporary-provider retry timing through their result errors; malformed
+hints and explicit credit exhaustion keep the ordinary failure policy. A provider
+cooldown must not spend all memory-job retries before the provider window resets.
+
 ### Autonomy
 
 The autonomy service lets the agent "think" and act on a schedule without user messages. It uses the **prompt batcher** with the **task system** for scheduling: when `enableAutonomy` is true, a recurring section is registered with `think("autonomy", ...)`. A BATCHER_DRAIN task for the autonomy affinity determines when the section drains; results are delivered to `onResult`, which runs the same post-LLM steps as the message pipeline (actions, memory, evaluators) via an execution facade.
@@ -374,10 +448,17 @@ Actions define specific tasks or capabilities the agent can perform. Each action
 Actions enable the agent to respond intelligently and perform operations based on user input or internal triggers.
 
 Before routing, the response handler receives an `available_actions` discovery
-catalog containing every eligible action's name, complete description, contexts,
-and aliases. Discovery checks the current actor, delivery audience, connector
+catalog containing every eligible action's name. Direct-text turns use a complete
+name index when smaller; the planner reads full descriptions, contexts and aliases
+through `DISCOVER_TOOLS names=[]`, and loads schemas by exact name. Voice, group
+and coding paths retain the complete inline reference. Discovery checks the current actor, delivery audience, connector
 policy, and action validation under the action's declared routing contexts. This
-catalog is rebuilt for each turn and is not part of the shared prompt cache.
+catalog is rebuilt for each turn. Direct text places its complete current content
+before changing history and provider text so an identical authorized catalog can
+reuse the model's prefix cache. It remains a dynamic segment, outside the system
+prefix; role, availability and registration changes still rebuild it normally.
+The names-only index sorts complete names consistently; the planner's ranked
+action list and complete reference retain their original order.
 The planner then receives native tools with parameter schemas and checks
 authorization again before executing; discovering an action does not execute it.
 
@@ -388,6 +469,25 @@ analytics page through all shared messages before returning every distinct
 topic, and channel-topic search returns every matching room. Large inventories
 must use an explicit, lossless page or reference contract when they cannot be
 returned in one result.
+
+Initial progressive tool loading treats Stage-1 names as discovery hints. When
+both a parent family and its registered child are named, the child's complete
+schema loads first and the parent remains available through `DISCOVER_TOOLS`.
+A parent-only hint or explicit discovery request still loads the complete
+family. This avoids redundant polymorphic schemas without changing action
+arguments or permission checks. Coding, deterministic execution, and legacy
+callers without discovery keep their existing surfaces.
+Successful catalog and schema reads are internal read-only results. When the
+planner explicitly declares more work pending, the existing settled-read gate
+returns their complete result to planning without an intermediate completion
+model call. Failures, pauses, final completion and execution checks remain on
+their normal paths.
+
+`promoteSubactionsToActions` accepts an authored `parameters` override for each
+operation. Promotion still pins its discriminator and delegates through the
+parent's handler and gates; the parent and other operations retain their
+original contracts. Use this for operation-specific nested schemas whose
+fields cannot be described by top-level parameter applicability alone.
 
 **Private actions.** Set `private: true` on an action to reserve it for the agent's own autonomous loop. A private action is never exposed to the planner — and is rejected by the executor as a defense-in-depth backstop — on user-driven turns; it can only be selected and run when the triggering message is an autonomous self-prompt (`content.metadata.isAutonomous === true`, the marker the autonomy service stamps). Use this for self-initiated capabilities the agent should decide to invoke on its own — e.g. minting a coin or opening a position — rather than ones a user can trigger on demand. The gate lives in `src/runtime/private-action-gate.ts`.
 
@@ -487,3 +587,58 @@ content. Equal retries deduplicate; different text does not reuse a document
 merely because trimming or guessed decoding would produce the same value.
 Existing source records are not rewritten. Previously normalized or misdecoded
 records require source-backed review before any recovery or migration.
+
+Experience retrieval orders candidates by semantic similarity, then quality for equal scores; confidence cannot promote a weaker match above a stronger one. The complete candidate set and embedding-failure fallback remain available. Incremental background extractors share provenance instructions once while retaining independent source sets and edited/deleted evidence contracts.
+
+Foreground history uses compact source labels and exact-repeat references without discarding stored or model-readable conversation evidence. Settled-result reply-only rounds use a smaller default instruction set, preserve original-context restoration, and cannot execute tools again. Custom prompt policies and ordinary planning remain intact.
+
+A bare "Got it." is an acknowledgement, not evidence that work remains.
+Withheld Stage-1 reply drafts remain in planner context as undelivered evidence,
+including any conditions or confirmation requirements. They prove neither
+permission nor execution. A non-coding planner's nonempty terminal proposal can
+reach the existing completion evaluator before a required tool runs; a CONTINUE
+verdict still requires outstanding work. A textless REPLY can propose that
+same saved draft for evaluation; without a draft it remains rejected. This does
+not add evaluation before ordinary action planning or change coding routing.
+
+Stage-1 routing still honors explicit pending effects, required tools, selected
+actions and intents. Genuine progress promises retain their existing checks;
+the acknowledgement alone must not reopen a completed conversational turn.
+
+Reply-only recovery captures reuse the same exact-repeat encoding when the
+original context enables it. Every dialogue occurrence remains recoverable;
+current instructions, providers, tool results and pending work stay complete.
+The persisted recovery string includes its reference anchors and legend, so a
+later retry does not depend on an in-memory lookup. Legacy captures remain valid.
+
+Reply grounding repair supplies the complete wallet provider observations admitted
+by its holdings validator, rather than serializing the entire runtime provider
+store again. Saved recovery context, constraints, settled results and receipt
+validation remain unchanged; this does not cap or summarize their contents.
+Structured repair payloads are JSON-encoded once on the model wire. Exact saved
+context strings and nested evidence retain their original values; ordinary
+action callback text keeps its string encoding. Durable recovery records do not
+change format.
+
+The optional `historyRetention` evaluator reviews original dialogue through the existing background memory worker. Its committed source-bound checkpoint lets direct text chat keep standing constraints, unfinished work, new messages and the current exchange in the first request, while other originals remain available through `history:hN` and `history:all` context reads. Reads complete before a reply or action is processed; changed sources or authorization restore full current context. Stored messages remain unchanged. The advanced-memory plugin registers this evaluator when the existing advancedMemory feature is enabled; it remains excluded from the basic bundle. Group and voice sources do not schedule history review. A missing or invalid index keeps complete authorized history while the existing worker builds a committed checkpoint. Initial review consumes model quota separately from foreground replies; measure that cost when enabling advanced memory.
+
+While reviewed history is projected, Stage 1 selects supplied originals with `relevant_prior_dialogue` and requests more history through `contextRequests`, including `history:all`. Incomplete selections and legacy full-mode outputs still restore originals safely. A contradictory simple/none reply with pending intents may first receive one response-contract repair when its incomplete selection matches the current source set, selects only supplied originals and requests no additional context. The model must resolve the selection itself; an incomplete retry restores full history. Explicit reads and malformed, stale or deferred-source selections retain restoration before field processing. Full restoration reinstates the normal model schema and history policy; no read decision executes a draft or effect.
+
+When an original's source ID is unknown, `contextRequests=["history:search:literal phrase"]` searches the same authorized conversation by case-insensitive literal substring. Queries in one read return the union of all complete matching originals, without a result cap or summary. A first literal miss returns a source-bound zero-match result with the complete scanned-source count. It proves only exact substring absence, never that a fact or topic was not discussed. Semantic uncertainty and an incomplete decision still restore all originals; a subsequent no-progress read also restores them instead of looping. Search uses the same fresh source and authorization checks before any draft processing or effect, and is available only while the optional history projection is active.
+
+An explicit DISCOVER_TOOLS names=[] read refreshes the complete registered catalog through canonical candidate admission, including each candidate's declared contexts, instead of treating Stage 1 routing as a permanent discovery boundary. Role, privacy, context, account-policy and availability checks remain active. This read returns authorized descriptions and child names without loading schemas or executing domain work; exact-name requests still load only their selected operations.
+
+Action discovery records aggregate count, elapsed time, maximum time and thrown
+checks for connector-policy and availability validation in one timing span.
+Default metadata stays constant in cardinality as the catalog grows. Set
+`ELIZA_INFERENCE_TIMING=1` to include every per-action check while debugging;
+these opt-in records can be large. Neither form is model context. Stage-1
+sender-role lookup and context construction have separate spans; nested spans
+overlap and must not be added together as independent latency.
+
+When original conversation history is available through source references, a
+recall question itself calls for reading a missing dependency. Omission from
+the supplied selection does not establish absence. The current-turn boundary
+uses that retrieval policy instead of limiting answers to initially visible
+chat; full-context and tool-planning boundaries remain unchanged. Original
+speaker/correction evidence and current app-record verification stay distinct.

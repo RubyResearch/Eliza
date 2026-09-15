@@ -11,6 +11,7 @@ import { handleResponseHandler, handleTextSmall } from "../models/text";
 let server: Server;
 let baseUrl: string;
 let requests = 0;
+let permanent = false;
 
 beforeAll(async () => {
   server = createServer((request, response) => {
@@ -21,7 +22,14 @@ beforeAll(async () => {
         "content-type": "application/json",
         "retry-after": "60",
       });
-      response.end(JSON.stringify({ error: { message: "Tokens per minute limit exceeded" } }));
+      response.end(
+        JSON.stringify({
+          error: {
+            message: "Tokens per minute limit exceeded",
+            ...(permanent ? { code: "insufficient_quota" } : {}),
+          },
+        })
+      );
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -38,6 +46,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   requests = 0;
+  permanent = false;
   vi.stubEnv("ELIZA_PROVIDER", "cerebras");
   vi.stubEnv("OPENAI_BASE_URL", baseUrl);
   vi.stubEnv("OPENAI_API_KEY", "loopback-only-key");
@@ -71,6 +80,41 @@ async function consume(request: ReturnType<typeof handleTextSmall>): Promise<voi
 }
 
 describe("rate-limit cooldown at the HTTP boundary", () => {
+  it("does not turn permanent credit exhaustion into a temporary cooldown", async () => {
+    permanent = true;
+    const agent = runtime();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(
+        handleTextSmall(agent, { prompt: "Probe", model: "qwen-3.8-27b", stream: false })
+      ).rejects.toMatchObject({ statusCode: 429 });
+      expect(requests).toBe(attempt + 1);
+    }
+  });
+
+  it("preserves each credential's hold when A/B calls share an endpoint and model", async () => {
+    const agent = runtime();
+    const invoke = (credential: string) => {
+      vi.stubEnv("OPENAI_API_KEY", credential);
+      return handleTextSmall(agent, {
+        prompt: "Complete shared-endpoint credential isolation probe",
+        model: "qwen-3.8-27b",
+        stream: false,
+      });
+    };
+    await expect(invoke("credential-A-fixture")).rejects.toMatchObject({ statusCode: 429 });
+    await expect(invoke("credential-B-fixture")).rejects.toMatchObject({ statusCode: 429 });
+    expect(requests).toBe(2);
+    await expect(invoke("credential-A-fixture")).rejects.toMatchObject({
+      name: "ProviderRateLimitCooldownError",
+      statusCode: 429,
+    });
+    await expect(invoke("credential-B-fixture")).rejects.toMatchObject({
+      name: "ProviderRateLimitCooldownError",
+      statusCode: 429,
+    });
+    expect(requests).toBe(2);
+  });
+
   it.each([
     { firstStream: true, nextStream: true },
     { firstStream: true, nextStream: false },

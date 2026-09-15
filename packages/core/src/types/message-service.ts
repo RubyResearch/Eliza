@@ -16,7 +16,13 @@ import type {
 import type { Room } from "./environment";
 import type { Memory } from "./memory";
 import type { ModelType } from "./model";
-import type { Content, Media, MentionContext, UUID } from "./primitives";
+import type {
+	Content,
+	JsonValue,
+	Media,
+	MentionContext,
+	UUID,
+} from "./primitives";
 import type { IAgentRuntime } from "./runtime";
 import type { State } from "./state";
 
@@ -93,6 +99,14 @@ export interface MessageTerminalFailure {
 	message: string;
 }
 
+/** Server-only evidence for regenerating prose without executing a turn again. */
+export interface MessageReplyRecoveryContext {
+	context: string;
+	pendingToolCalls: JsonValue[];
+	evaluatorOutputs: JsonValue[];
+	ownerExclusiveDisclosureUsed: boolean;
+}
+
 export interface MessageProcessingResult {
 	didRespond: boolean;
 	responseContent?: Content | null;
@@ -117,6 +131,8 @@ export interface MessageProcessingResult {
 	persistedResponseMessageIds?: UUID[];
 	/** Results executed during this turn, preserved across planner/cache cleanup. */
 	actionResults?: ActionResult[];
+	/** Complete original context; never expose this on public chat DTOs. */
+	replyRecovery?: MessageReplyRecoveryContext;
 	state?: State;
 	mode?: MessageProcessingMode;
 	skipEvaluation?: boolean;

@@ -128,6 +128,8 @@ export interface ChatMessageData {
   failureKind?: ChatFailureKind;
   /** Authoritative typed failure details, including transient retry policy. */
   terminalFailure?: ChatTerminalFailure;
+  /** Server confirms durable evidence supports regenerating only this reply. */
+  replyRecoveryAvailable?: boolean;
   /** Media attached to this turn — read by body renderers and the in-flight
    * (empty assistant) detection; the row itself renders no attachment chrome. */
   attachments?: MessageAttachment[];

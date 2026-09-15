@@ -6,6 +6,8 @@
  * providers must keep disjoint firing intents (uiGenerative only on
  * dashboard/table/visualization keywords). Deterministic; no live model.
  */
+
+import type { ProviderResult } from "@elizaos/core";
 import {
   ChannelType,
   type IAgentRuntime,
@@ -13,6 +15,7 @@ import {
   type State,
 } from "@elizaos/core";
 import { describe, expect, it } from "vitest";
+import { projectDeferredProviders } from "../../../core/src/runtime/provider-context.ts";
 
 import {
   UI_WIDGETS_GUIDE,
@@ -22,6 +25,23 @@ import {
 
 const runtime = {} as unknown as IAgentRuntime;
 const state = {} as unknown as State;
+function wire(result: ProviderResult) {
+  return JSON.stringify(
+    projectDeferredProviders({
+      id: "turn",
+      metadata: { providerDiscoveryEnabled: true },
+      events: [
+        {
+          id: "provider:guide",
+          type: "provider",
+          name: "guide",
+          text: result.text,
+          discoveryText: result.discoveryText,
+        },
+      ],
+    }).context.events.map((event) => ("text" in event ? event.text : "")),
+  );
+}
 
 describe("uiWidgets — size budget (#14324)", () => {
   it("stays within the 60-line / 1200-token ceiling", () => {
@@ -70,7 +90,7 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
     expect(result.text).not.toContain("[/CHECKLIST]");
   });
 
-  it("emits only on generative intent — enforced in get(), not just metadata", async () => {
+  it("defers generative syntax while keeping it fully retrievable", async () => {
     const generative = await uiGenerativeProvider.get(
       runtime,
       {
@@ -90,7 +110,8 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
       } as unknown as Memory,
       state,
     );
-    expect(setup.text).toBe("");
+    expect(wire(setup)).not.toContain('{"op":"add"');
+    expect(setup.discoveryText).toContain("context_discovery");
 
     // The cheap widgets guide still serves the setup turn.
     const widgets = await uiWidgetsProvider.get(
@@ -121,7 +142,7 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
     }
   });
 
-  it("matches whole words only — prose containing keyword substrings stays quiet", async () => {
+  it("does not load full syntax for prose containing keyword substrings", async () => {
     const result = await uiGenerativeProvider.get(
       runtime,
       {
@@ -134,10 +155,10 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
       } as unknown as Memory,
       state,
     );
-    expect(result.text).toBe("");
+    expect(wire(result)).not.toContain("Generative UI — inline JSONL patches");
   });
 
-  it("fires on intent in RECENT HISTORY, and keeps firing mid-iteration via JSONL patches", async () => {
+  it("retains complete syntax for visual follow-ups while initially sending only its notice", async () => {
     const neutral = {
       content: {
         text: "make the second column green",
@@ -156,9 +177,9 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
       }) as unknown as State;
 
     // Bare neutral turn: silent.
-    expect((await uiGenerativeProvider.get(runtime, neutral, state)).text).toBe(
-      "",
-    );
+    expect(
+      wire(await uiGenerativeProvider.get(runtime, neutral, state)),
+    ).not.toContain("Generative UI — inline JSONL patches");
     // Keyword in history: fires.
     expect(
       (
@@ -207,8 +228,8 @@ describe("uiGenerative — catalog isolation (#14324)", () => {
       // by-name request path); deleting one dies silently otherwise.
       expect(provider.description?.length ?? 0).toBeGreaterThan(20);
     }
-    // The cheap marker guide must be available to normal chat response turns.
-    expect(uiWidgetsProvider.alwaysInResponseState).toBe(true);
+    // The full marker guide is selected for planning; Stage 1 gets a discovery hint.
+    expect(uiWidgetsProvider.alwaysInResponseState).toBeUndefined();
     expect(uiWidgetsProvider.roleGate).toBeUndefined();
     // The expensive custom-UI catalog stays admin-only.
     expect(uiGenerativeProvider.roleGate).toEqual({ minRole: "ADMIN" });

@@ -352,7 +352,7 @@ export class SurfaceRealmScope {
     navigate: (path: string) => void,
     memberViewIds: readonly string[] = [viewId],
   ) {
-    this.memberViewIds = new Set(memberViewIds);
+    this.memberViewIds = new Set([viewId, ...memberViewIds]);
     this.storage = brokerSurfaceStorage(manifest, backing, viewId);
     this.navigate = brokerSurfaceNavigate(manifest, viewId, navigate);
     if (typeof document === "undefined") {

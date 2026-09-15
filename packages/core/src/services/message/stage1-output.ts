@@ -1,12 +1,17 @@
 /** Normalizes native and structured message-handler output and validates candidate action decisions. */
 
-import { HANDLE_RESPONSE_TOOL_NAME } from "../../actions/to-tool";
+import {
+	DISCOVER_TOOLS_NAME,
+	HANDLE_RESPONSE_TOOL_NAME,
+} from "../../actions/to-tool";
 import { ElizaError } from "../../errors";
 import {
 	normalizeReplyEffectStatus,
 	normalizeTopics,
+	readCompleteStringHints,
 } from "../../runtime/builtin-field-evaluators";
 import type { CandidateActionBackstopRule } from "../../runtime/candidate-action-backstop";
+import { parseCompletionContextSelection } from "../../runtime/completion-context";
 import {
 	parseJsonObject,
 	stripJsonStructuralJunkReply,
@@ -27,7 +32,6 @@ import { canonicalPlannerControlActionName } from "./action-identifiers.js";
 import {
 	getMessageHandlerCandidateActions,
 	messageHandlerStageOneReplyContexts,
-	stringArrayProperty,
 } from "./action-surface.js";
 import {
 	looksLikeCodingWorkRequest,
@@ -170,6 +174,12 @@ export function normalizeRawParsedForFieldRegistry(
 	if (normalized.intents === undefined) {
 		normalized.intents = Array.isArray(plan?.intents) ? plan.intents : [];
 	}
+	if (
+		normalized.completionContext === undefined &&
+		plan?.completionContext !== undefined
+	) {
+		normalized.completionContext = plan.completionContext;
+	}
 	if (normalized.requiresTool === undefined && plan?.requiresTool === true) {
 		normalized.requiresTool = true;
 	}
@@ -194,7 +204,23 @@ export function normalizeRawParsedForFieldRegistry(
 	if (normalized.topics === undefined) {
 		normalized.topics = Array.isArray(extract?.topics) ? extract.topics : [];
 	}
+	// Reject malformed scope before any plugin field can perform work.
+	normalized.intents = requireCompleteIntents(normalized.intents);
 	return normalized;
+}
+
+function requireCompleteIntents(value: unknown): string[] {
+	const intents = readCompleteStringHints(value);
+	if (intents === null) {
+		throw new ElizaError(
+			"HANDLE_RESPONSE intents must be an array of strings",
+			{
+				code: "INVALID_MESSAGE_HANDLER_INTENTS",
+				context: { field: "intents" },
+			},
+		);
+	}
+	return intents;
 }
 
 /**
@@ -310,14 +336,26 @@ export function messageHandlerFromFieldResult(
 	const replyEffectStatus = normalizeReplyEffectStatus(
 		result.replyEffectStatus,
 	);
-	const declaredIntents = stringArrayProperty(result.intents);
+	const declaredIntents = requireCompleteIntents(result.intents);
+	const actionableIntents = declaredIntents.filter(
+		(intent) => intent.trim().length > 0,
+	);
 	const modelRequiresTool = result.requiresTool === true;
 	const hasRunnableCandidateAction = candidateActionsContainRunnableAction(
 		candidateActions,
 		runtimeContext,
 	);
+	// Discovery is registered for the planner after Stage 1. Its absence from
+	// runtime.actions here is not a missing/invalid model hint and must not
+	// trigger text inference that invents domain work or negated navigation.
+	const hasDiscoveryCandidate = candidateActions.some(
+		(name) =>
+			normalizeActionIdentifier(name) ===
+			normalizeActionIdentifier(DISCOVER_TOOLS_NAME),
+	);
 	const inferredAckCandidateActions =
 		!subAgentCompletionRelay &&
+		!hasDiscoveryCandidate &&
 		!hasRunnableCandidateAction &&
 		hasAckOnlyActionableIntent(result, replyTextRaw, currentMessageText)
 			? inferAckIntentCandidateActions(
@@ -330,7 +368,10 @@ export function messageHandlerFromFieldResult(
 		runtimeContext && candidateActions.length > 0
 			? candidateActions.some((name) => {
 					const normalized = normalizeActionIdentifier(name);
-					if (canonicalPlannerControlActionName(normalized) !== null) {
+					if (
+						normalized === normalizeActionIdentifier(DISCOVER_TOOLS_NAME) ||
+						canonicalPlannerControlActionName(normalized) !== null
+					) {
 						return true;
 					}
 					return exposedActionMatches(runtimeContext.actions, normalized);
@@ -354,11 +395,12 @@ export function messageHandlerFromFieldResult(
 			stageOneCandidateActions: rawCandidateActions,
 			stageOneReplyEffectStatus:
 				result.replyEffectStatus === undefined ? undefined : replyEffectStatus,
-			stageOneIntents: declaredIntents,
+			stageOneIntents: actionableIntents,
 		})
 			? []
 			: directCurrentInference.names;
 	const preferDirectCurrentCandidateActions =
+		!hasDiscoveryCandidate &&
 		shouldPreferDirectCurrentCandidateActions({
 			candidateActions,
 			currentMessageText,
@@ -462,7 +504,7 @@ export function messageHandlerFromFieldResult(
 	const unservedDeclaredIntent =
 		!preemptDirect &&
 		!subAgentCompletionRelay &&
-		declaredIntents.length > 0 &&
+		actionableIntents.length > 0 &&
 		initialPlanningContexts.length === 0 &&
 		validCandidateCount === 0 &&
 		replyEffectStatus !== "non_applied";
@@ -588,13 +630,24 @@ export function messageHandlerFromFieldResult(
 			candidateActions: runnableCandidateActions,
 			contexts: routedContexts,
 		});
+	// The field contract defines non_applied as a terminal outcome with no
+	// remaining work, including a preview awaiting confirmation. Candidate
+	// names describe possible capabilities; they must not reopen that outcome.
+	// Explicit requiresTool and missing prose still need normal planning.
+	const terminalNonAppliedReply =
+		replyEffectStatus === "non_applied" &&
+		!modelRequiresTool &&
+		replyTextRaw.trim().length > 0;
 	const shouldPlan =
 		!preemptDirect &&
 		requestedPlanning &&
+		!terminalNonAppliedReply &&
 		!preferCompleteDirectReply &&
 		!preferInlineCodeSnippetDirectReply;
 	const finalContexts =
-		preferCompleteDirectReply || preferInlineCodeSnippetDirectReply
+		terminalNonAppliedReply ||
+		preferCompleteDirectReply ||
+		preferInlineCodeSnippetDirectReply
 			? [SIMPLE_CONTEXT_ID]
 			: shouldPlan && initialPlanningContexts.length === 0
 				? Array.from(
@@ -613,13 +666,19 @@ export function messageHandlerFromFieldResult(
 			: replyTextRaw;
 	const plan: MessageHandlerResult["plan"] = {
 		contexts: finalContexts,
+		completionContext: parseCompletionContextSelection(
+			result.completionContext,
+		),
 		intents: declaredIntents,
 		reply: replyText,
-		replyEffectStatus,
+		// Preserve missing status through routing; a parser default is not an
+		// explicit model decision that this reply claims no outstanding work.
+		...(result.replyEffectStatus !== undefined ? { replyEffectStatus } : {}),
 		simple: preemptDirect ? true : !shouldPlan,
 		requiresTool: shouldPlan,
 	};
 	if (
+		!terminalNonAppliedReply &&
 		!preferCompleteDirectReply &&
 		!preferInlineCodeSnippetDirectReply &&
 		effectiveCandidateActions.length > 0
@@ -795,6 +854,11 @@ export function applyDirectCurrentCandidateBackstopToMessageHandler(
 		messageHandler.processMessage !== "RESPOND" ||
 		!runtimeContext ||
 		runtimeContext.subAgentCompletionRelay === true ||
+		getMessageHandlerCandidateActions(messageHandler).some(
+			(name) =>
+				normalizeActionIdentifier(name) ===
+				normalizeActionIdentifier(DISCOVER_TOOLS_NAME),
+		) ||
 		currentMessageText.trim().length === 0
 	) {
 		return messageHandler;

@@ -21,7 +21,14 @@ export const ANDROID_CLOUD_SPLASH_MARK_RESOURCE = "eliza_cloud_splash_mark";
 export const ANDROID_CLOUD_SPLASH_MARK_SIZE = 288;
 
 export function applyAndroidCloudSplashTheme(source, { cloudBuild }) {
-  if (!cloudBuild) return source;
+  // The native project is reused across build lanes. The non-cloud lane
+  // removes this drawable, so its previous theme reference must go with it.
+  if (!cloudBuild) {
+    return source.replace(
+      /\n\s*<item\s+name=["']windowSplashScreenAnimatedIcon["'][^>]*>\s*@drawable\/eliza_cloud_splash_mark\s*<\/item>/g,
+      "",
+    );
+  }
 
   const launchThemePattern =
     /(<style\s+name=["']AppTheme\.NoActionBarLaunch["'][^>]*>)([\s\S]*?)(<\/style>)/;

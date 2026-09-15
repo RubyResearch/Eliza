@@ -111,6 +111,77 @@ function playbackScriptNodeOf(ctx: FakePlaybackAudioContext) {
 }
 
 describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
+  it.each([true, false])(
+    "sends changed view context before audio only when supported: %s",
+    async (supported) => {
+      const mint = makeMintFetch();
+      const ws = makeWsFactory();
+      const mic = new FakeMicAudioContext(16_000);
+      let path = "/notes";
+      const client = createVoiceSessionClient({
+        agentId: "agent-a",
+        conversationId: "conversation-a",
+        getConsentNonce: async () => "context",
+        fetch: mint.fetch,
+        webSocketFactory: ws.factory,
+        getUserMedia: fakeGetUserMedia(),
+        createMicAudioContext: () => mic,
+        createPlaybackAudioContext: () => new FakePlaybackAudioContext(16_000),
+        getUiContext: () => ({ uiViewPath: path }),
+      });
+      await client.start();
+      const socket = ws.last();
+      socket.emitOpen();
+      socket.emitControl({
+        t: "ready",
+        sessionId: "s",
+        traceId: "t",
+        uiContext: supported,
+      });
+      await flush();
+      const input = new Float32Array(1600).fill(0.25);
+      mic.scriptNode?.feed(input);
+      mic.scriptNode?.feed(input);
+      path = "/calendar";
+      mic.scriptNode?.feed(input);
+      const contexts = socket
+        .sentControls()
+        .filter((frame) => frame.t === "ui_context");
+      expect(contexts).toEqual(
+        supported
+          ? [
+              { t: "ui_context", context: { uiViewPath: "/notes" } },
+              { t: "ui_context", context: { uiViewPath: "/calendar" } },
+            ]
+          : [],
+      );
+      expect(socket.sentAudioCount()).toBe(3);
+      if (supported) {
+        const index = socket.sent.findIndex(
+          (frame) =>
+            typeof frame === "string" && frame.includes('"ui_context"'),
+        );
+        expect(socket.sent[index + 1]).toBeInstanceOf(ArrayBuffer);
+      }
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        path = "//invalid-host";
+        mic.scriptNode?.feed(input);
+        mic.scriptNode?.feed(input);
+        expect(socket.sentAudioCount()).toBe(5);
+        expect(warn).toHaveBeenCalledTimes(supported ? 1 : 0);
+        if (supported) {
+          expect(socket.sentControls().at(-1)).toEqual({
+            t: "ui_context",
+            context: {},
+          });
+        }
+      } finally {
+        warn.mockRestore();
+      }
+      await client.stop();
+    },
+  );
   it("retries a transient post-mint agent_not_found race, then connects", async () => {
     const mint = makeMintFetch([
       { status: 404, code: "agent_not_found" },
@@ -300,6 +371,7 @@ describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
     const mint = makeMintFetch();
     const ws = makeWsFactory();
     const micCtx = new FakeMicAudioContext(16_000);
+    const playbackCtx = new FakePlaybackAudioContext(16_000);
     const marks: VoiceTraceMark[] = [];
     const phases: string[] = [];
     const client = createVoiceSessionClient({
@@ -310,7 +382,7 @@ describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
       webSocketFactory: ws.factory,
       getUserMedia: fakeGetUserMedia(),
       createMicAudioContext: () => micCtx,
-      createPlaybackAudioContext: () => new FakePlaybackAudioContext(16_000),
+      createPlaybackAudioContext: () => playbackCtx,
       onState: (s) => phases.push(s.phase),
       onTraceMark: (m) => marks.push(m),
       now: () => marks.length + 1,
@@ -335,7 +407,9 @@ describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
     // downlink audio during speaking
     sock.emitAudio(new Uint8Array(320));
     sock.emitControl({ t: "speaking_end", traceId: "T1" });
-    // speaking_end → complete → looped to listening
+    // Generation ends before the device finishes playing the queued audio.
+    expect(client.state.phase).toBe("speaking");
+    playbackCtx.scriptNode?.render(1600);
     expect(client.state.phase).toBe("listening");
     sock.emitControl({ t: "usage", sttMs: 100, ttsChars: 20, traceId: "T1" });
 
@@ -350,6 +424,29 @@ describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
     // Every server-derived mark carries the turn traceId (not synthesized).
     const sttMark = marks.find((m) => m.name === "stt_final");
     expect(sttMark?.traceId).toBe("T1");
+    await client.stop();
+  });
+
+  it("returns to listening when a silent turn settles without speech events", async () => {
+    const mint = makeMintFetch();
+    const ws = makeWsFactory();
+    const { client } = baseDeps(mint, ws);
+    await client.start();
+    await flush();
+    const sock = ws.last();
+    sock.emitOpen();
+    sock.emitControl({ t: "ready", sessionId: "sess-1", traceId: "T1" });
+    await flush();
+    sock.emitControl({
+      t: "stt_final",
+      text: "Please stay quiet.",
+      traceId: "T1",
+    });
+    expect(client.state.phase).toBe("thinking");
+    sock.emitControl({ t: "usage", sttMs: 100, ttsChars: 0, traceId: "older" });
+    expect(client.state.phase).toBe("thinking");
+    sock.emitControl({ t: "usage", sttMs: 100, ttsChars: 0, traceId: "T1" });
+    expect(client.state.phase).toBe("listening");
     await client.stop();
   });
 
@@ -411,6 +508,66 @@ describe("voice-session client (real framing/state/barge-in/reconnect)", () => {
     ).toBe(true);
     await clientWithMic.stop();
     expect(clientWithMic.microphoneMuted).toBe(false);
+  });
+
+  it("blocks mic audio until playback drains and preserves an explicit mute", async () => {
+    const mint = makeMintFetch();
+    const ws = makeWsFactory();
+    const micCtx = new FakeMicAudioContext(16_000);
+    const playbackCtx = new FakePlaybackAudioContext(16_000);
+    const track = { enabled: true, stop() {} };
+    const client = createVoiceSessionClient({
+      agentId: "11111111-1111-1111-1111-111111111111",
+      conversationId: "22222222-2222-2222-2222-222222222222",
+      getConsentNonce: async () => "half-duplex",
+      fetch: mint.fetch,
+      webSocketFactory: ws.factory,
+      getUserMedia: async () =>
+        ({ getTracks: () => [track] }) as unknown as MediaStream,
+      createMicAudioContext: () => micCtx,
+      createPlaybackAudioContext: () => playbackCtx,
+    });
+    await client.start();
+    const sock = ws.last();
+    sock.emitOpen();
+    sock.emitControl({ t: "ready", sessionId: "sess-1", traceId: "T1" });
+    await flush();
+    const input = new Float32Array(1600).fill(0.25);
+    const lastFrame = () =>
+      new Uint8Array(
+        sock.sent
+          .filter((frame): frame is ArrayBuffer => frame instanceof ArrayBuffer)
+          .at(-1)!,
+      );
+
+    // Pending mic samples cannot leak through after a speaking boundary.
+    micCtx.scriptNode?.feed(input.subarray(0, 800));
+    sock.emitControl({ t: "speaking_start", traceId: "T1" });
+    expect(track.enabled).toBe(false);
+    micCtx.scriptNode?.feed(input);
+    expect(lastFrame().every((byte) => byte === 0)).toBe(true);
+    sock.emitAudio(new Uint8Array(6400).fill(1));
+    sock.emitControl({ t: "speaking_end", traceId: "T1" });
+    sock.emitControl({ t: "usage", traceId: "T1", sttMs: 100, ttsChars: 10 });
+    expect(client.state.phase).toBe("speaking");
+    expect(track.enabled).toBe(false);
+    playbackCtx.scriptNode?.render(1600);
+    expect(client.state.phase).toBe("speaking");
+    micCtx.scriptNode?.feed(input);
+    expect(lastFrame().every((byte) => byte === 0)).toBe(true);
+    playbackCtx.scriptNode?.render(3200);
+    expect(client.state.phase).toBe("listening");
+    expect(track.enabled).toBe(true);
+    micCtx.scriptNode?.feed(input);
+    expect(lastFrame().some((byte) => byte !== 0)).toBe(true);
+
+    client.setMicrophoneMuted(true);
+    sock.emitControl({ t: "speaking_start", traceId: "T2" });
+    sock.emitControl({ t: "speaking_end", traceId: "T2" });
+    expect(client.state.phase).toBe("listening");
+    expect(track.enabled).toBe(false);
+    expect(client.microphoneMuted).toBe(true);
+    await client.stop();
   });
 
   it("an empty stt_final (noise EOT) loops straight back to listening (#16662)", async () => {

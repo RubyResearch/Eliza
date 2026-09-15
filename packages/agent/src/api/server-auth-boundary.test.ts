@@ -411,6 +411,9 @@ describe("device-bridge WS upgrade gate (W1-011)", () => {
 
 describe("unauthenticated /ws bounds (W5-015)", () => {
   beforeEach(() => {
+    // Exercise the unauthenticated tier explicitly. Ordinary same-machine
+    // connections retain the HTTP-equivalent trusted-local owner boundary.
+    process.env.ELIZA_REQUIRE_LOCAL_AUTH = "1";
     __resetPendingWebSocketsForTests();
   });
 

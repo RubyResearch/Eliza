@@ -915,11 +915,24 @@ describe("voice-session WS lifecycle", () => {
       }) as unknown as typeof fetch,
     });
 
+    client.clientSend(
+      JSON.stringify({
+        t: "ui_context",
+        context: {
+          uiViewPath: "/notes",
+          uiTimeZone: "America/New_York",
+          role: "OWNER",
+        },
+      }),
+    );
     const ink = FakeInkSocket.instances.at(-1)!;
     ink.emitTurn("turn.start");
     ink.emitTurn("turn.update", "hello agen");
     ink.emitTurn("turn.eager_end", "hello agent");
     ink.emitTurn("turn.end", "hello agent");
+    client.clientSend(
+      JSON.stringify({ t: "ui_context", context: { uiViewPath: "/calendar" } }),
+    );
     await flush();
 
     const endOfTurnLog = fakeLogger.logger.info.mock.calls.findLast(
@@ -948,7 +961,11 @@ describe("voice-session WS lifecycle", () => {
     expect(requests[0].body).toEqual({
       text: "hello agent",
       channelType: "VOICE_DM",
-      metadata: { clientTransport: "realtime_voice" },
+      metadata: {
+        clientTransport: "realtime_voice",
+        uiViewPath: "/notes",
+        uiTimeZone: "America/New_York",
+      },
       streamProtocol: "delta-v2",
     });
     expect(requests[0].headers.authorization).toBe("Bearer eliza-server");
@@ -2897,6 +2914,40 @@ describe("voice-session WS lifecycle", () => {
     expect(Object.keys(receipt)).not.toContain("text");
     expect(Object.keys(receipt)).not.toContain("audio");
   });
+
+  test.each(["expired", "client_disconnect"] as const)(
+    "records an interrupted turn exactly once when its session is %s",
+    async (reason) => {
+      let nowMs = Date.now();
+      const receipts: VoiceTurnMetricsReceipt[] = [];
+      const client = new FakeClientSocket();
+      const { sessionId } = await connectSession({
+        client,
+        fetchImpl: makeSseFetch(["A response still playing."]),
+        now: () => nowMs,
+        onTurnMetrics: (receipt) => receipts.push(receipt),
+      });
+      const ink = FakeInkSocket.instances.at(-1)!;
+      ink.emitTurn("turn.start");
+      ink.emitTurn("turn.end", "read this page");
+      await flush();
+      expect(client.controlTypes()).toContain("speaking_start");
+      const cartesia = FakeCartesiaSocket.instances.at(-1)!;
+      nowMs += 120;
+      expect(
+        getVoiceSessionRegistry().severBySessionId(sessionId, reason),
+      ).toBe(true);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]?.outcome).toBe("interrupted");
+      expect(receipts[0]?.completionOffsetMs).toBe(120);
+      cartesia.emitDone();
+      client.clientClose();
+      await flush();
+      expect(receipts).toHaveLength(1);
+      expect(Object.keys(receipts[0]!)).not.toContain("text");
+      expect(Object.keys(receipts[0]!)).not.toContain("audio");
+    },
+  );
 
   test("explicit barge-in immediately releases half-duplex suppression", async () => {
     const client = new FakeClientSocket();

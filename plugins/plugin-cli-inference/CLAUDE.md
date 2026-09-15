@@ -10,6 +10,25 @@ Node-only (`"platforms": ["node"]`) — exported from `index.node.ts` only.
 
 ## Enable
 
+For an explicit local Codex text-brain override, set `ELIZA_CHAT_VIA_CLI=codex-sdk`
+and `ELIZA_BRAIN_PROVIDER=cli-inference`. The latter selects the existing
+runtime dispatch override; priority alone does not replace an explicitly
+configured provider. Set `ELIZA_CLI_CODEX_MODEL` and
+`ELIZA_CLI_CODEX_PLANNER_MODEL` to the supported model ID; use
+`ELIZA_CLI_CLAUDE_ALL_TIERS=1` to include the small text tiers.
+
+The configured `CODEX_HOME` is preserved for account selection when no pooled
+account overrides it; unrelated ambient secrets remain excluded.
+
+The official SDK manages authentication. Its inference-only exec launcher adds
+`--ignore-user-config --ignore-rules --ephemeral`; the SDK version used here
+does not expose these flags directly. This keeps personal MCP configuration out
+of inference, retains the CLI's own sign-in, and avoids persisted SDK histories.
+The adapter disables shell, apps/plugins, hooks, subagents and Codex memories.
+Use a current installed CLI supporting these flags; unsupported flags fail
+explicitly, never retry with weaker isolation. These are process-local settings,
+not edits to the owner's interactive Codex configuration.
+
 Single env gate: **`ELIZA_CHAT_VIA_CLI=claude`**, **`claude-sdk`**, **`codex`**, or **`codex-sdk`**.
 
 - Unset → the plugin is never added to the resolved set (`auto-enable.ts shouldEnable` is false), and even if force-loaded its models map is empty. INERT; no existing code path changes.
@@ -18,18 +37,18 @@ Single env gate: **`ELIZA_CHAT_VIA_CLI=claude`**, **`claude-sdk`**, **`codex`**,
 
 ## Plugin surface
 
-No actions, providers, evaluators, or routes. Model handlers only, and **only the large tier** so high-frequency should-respond/triage calls fall through to the cheap configured provider (bounding per-turn spawn cost to a few ~3-4s calls):
+No actions, providers, evaluators, or routes. Model handlers only. Large text tiers are registered by default; the existing `ELIZA_CLI_CLAUDE_ALL_TIERS=1` switch also enables small tiers for SDK backends.
 
 | Model type | Backend |
 |---|---|
 | `TEXT_LARGE` | `claude --print` or `codex exec` |
 | `TEXT_MEGA` | "" |
 | `RESPONSE_HANDLER` | "" |
-| `ACTION_PLANNER` | "" — **only when `ELIZA_PLANNER_NATIVE_TOOLS=0`** (text-planner mode) |
+| `ACTION_PLANNER` | Codex SDK: native tool-decision bridge; other backends: text-planner mode only |
 
-`TEXT_SMALL` / `TEXT_NANO` / `TEXT_MEDIUM` are intentionally **not** registered (high-frequency triage tiers fall through to the cheap provider).
+`TEXT_SMALL` / `TEXT_NANO` / `TEXT_MEDIUM` are opt-in via the shared all-tiers switch.
 
-`ACTION_PLANNER` is **conditional**: in the default native-tools mode
+`ACTION_PLANNER` is **conditional for non-Codex-SDK backends**: in the default native-tools mode
 (`ELIZA_PLANNER_NATIVE_TOOLS=1`) it is **not** registered, because that planner
 needs GBNF / native-tool grammar the free-text CLI cannot honor — so the planner
 stays on a grammar-honoring provider while the CLI still serves the user-facing
@@ -88,31 +107,39 @@ SDK at the Claude Code executable.
 returns a session-limit error); plan a fallback (a key/Cloud tier, or stealth on
 a self-host) for production continuity.
 
-## Warm Codex SDK backend (`ELIZA_CHAT_VIA_CLI=codex-sdk`)
+## Request-isolated Codex SDK backend (`ELIZA_CHAT_VIA_CLI=codex-sdk`)
 
-The codex peer of `claude-sdk` (`src/codex-sdk-session.ts`). Runs the brain on a
-ChatGPT/Codex subscription via `@openai/codex-sdk` (loaded by variable dynamic
-import; reads `~/.codex/auth.json` itself). A `CodexSdkSession` keeps ONE warm
-`Thread` (`codex.startThread()` once, `thread.run()` per turn) instead of the
-`codex exec` cold-spawn-per-call. Two modes:
+Uses the official `@openai/codex-sdk` and CLI authentication. The installed SDK
+spawns a CLI process for each run; it is not a persistent inference process.
+Every request starts a fresh thread in an isolated temporary working directory.
+Eliza supplies the complete authorized conversation and memory context, so no
+second hidden conversation can leak across rooms, actors, or permission changes.
+Adapter configuration/account affinity is keyed by runtime instance and model.
 
 - **TEXT** (`generate`): `thread.run(body)` with `sandboxMode:"read-only"`,
-  `approvalPolicy:"never"`, `networkAccessEnabled:false` → a warm completion
+  `approvalPolicy:"never"`, `networkAccessEnabled:false` → a request-isolated completion
   engine; returns the turn's `finalResponse`.
 - **ROUTE** (`route`): codex NATIVE structured output (`outputSchema`) constrains
   the turn to `{action, params}` (params as a JSON string for OpenAI strict mode),
   reliable at scale. REQUIRES `ELIZA_CLI_CODEX_BIN` pointing at the system codex —
   the SDK bundles an old codex (0.80.0) that rejects current models/structured output.
 
-codex-sdk has no thread-level system prompt, so the system is folded into the
-body and ONE warm thread per `(model, mode)` serves every system prompt. Per-tier
-models: `ELIZA_CLI_CODEX_PLANNER_MODEL` + `ELIZA_CLI_CODEX_MODEL`;
-`ELIZA_CLI_CODEX_REASONING_EFFORT` sets `modelReasoningEffort`.
+In the default native-tool planner mode, supplied tool schemas and toolChoice
+are preserved in the request. Codex structured output is validated and adapted
+to Eliza's `GenerateTextResult.toolCalls`; only Eliza executes those decisions.
+Undeclared tools, malformed argument objects, and missing required calls fail
+explicitly. This also handles Stage-1 HANDLE_RESPONSE. Legacy text routing is
+retained, but malformed route arguments are rejected rather than replaced by {}.
+This Codex backend registers ACTION_PLANNER in either planner mode; the cold
+CLI and Claude paths retain their existing registration policies.
 
-**Status:** LIVE-VERIFIED in the bot on a ChatGPT/Codex sub — btc \$59,527, eth
-\$1,566, weather, identity, knows-user, 8×8=64; live-info routes to WEB_FETCH and
-synthesizes the real fetched value (after the canonical-contentToText fix). Needs
-`ELIZA_CLI_CODEX_BIN`=system codex. 12 fake-SDK unit tests.
+For Astra Light, set `ELIZA_CLI_CODEX_MODEL=gpt-6-astra`,
+`ELIZA_CLI_CODEX_PLANNER_MODEL=gpt-6-astra`, and
+`ELIZA_CLI_CODEX_REASONING_EFFORT=low`; pin `ELIZA_CLI_CODEX_BIN` to an installed
+CLI that supports the model. Availability depends on the signed-in account.
+Use the official SDK/authentication path, not OAuth-token replay against private
+endpoints. Subscription limits still apply. Measure full app latency separately
+from an isolated SDK test; retaining a Thread object does not eliminate startup.
 
 ## Layout
 

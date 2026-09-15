@@ -413,11 +413,11 @@ describe("CHANNEL_RECAP dialogue-hygiene boundary (canonical RECENT_MESSAGES con
 			],
 		});
 		const result = await run(stub, incoming(ROOM_A));
-		expect(result.values?.messageCount).toBe(2);
+		expect(result.values?.messageCount).toBe(3);
 		const data = result.data as { messages: Array<{ text: string }> };
 		expect(
 			data.messages.filter((row) => row.text === "repeated agent line"),
-		).toHaveLength(1);
+		).toHaveLength(2);
 	});
 
 	it("hygiene-stripped rows never consume the requested depth: dialogue is back-filled from older pages", async () => {

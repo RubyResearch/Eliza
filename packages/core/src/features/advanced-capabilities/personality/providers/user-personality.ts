@@ -68,6 +68,9 @@ export const userPersonalityProvider: Provider = {
 	description:
 		"Injects per-user and global structured personality slots plus any legacy free-text preferences",
 	dynamic: true,
+	// Reply style applies before routing; context selection must not hide it
+	// from the first response. The USER gate still protects personal data.
+	alwaysInResponseState: true,
 	contexts: ["general", "agent_internal"],
 	contextGate: { anyOf: ["general", "agent_internal"] },
 	cacheStable: false,

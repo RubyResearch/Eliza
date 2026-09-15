@@ -213,7 +213,7 @@ describe("recordedTrajectoryToNativeRows", () => {
     expect(row.metadata.source_run_id).toBe("run-1");
   });
 
-  it("preserves LifeOps task/domain buckets for scenario model-call prompts", () => {
+  it("does not override a recorded planner purpose from a LifeOps prompt", () => {
     const traj = syntheticTrajectory() as Record<string, unknown> & {
       stages: Array<Record<string, unknown>>;
     };
@@ -242,8 +242,8 @@ describe("recordedTrajectoryToNativeRows", () => {
     const row = expectSingleNativeRow(
       recordedTrajectoryToNativeRows(traj as never),
     );
-    expect(row.metadata.task_type).toBe("calendar_extract");
-    expect(row.metadata.domain).toBe("lifeops");
+    expect(row.metadata.task_type).toBe("action_planner");
+    expect(row.metadata.domain).toBeUndefined();
   });
 
   it("preserves LifeOps task/domain buckets from optimized-prompt purposes", () => {
@@ -873,4 +873,61 @@ describe("scenario tier serialization", () => {
       rmSync(runDir, { recursive: true, force: true });
     }
   });
+});
+
+describe("native export task provenance", () => {
+  it.each([
+    ["messageHandler", "RESPONSE_HANDLER", "should_respond"],
+    ["planner", "ACTION_PLANNER", "action_planner"],
+    ["planner", "TEXT_LARGE", "action_planner"],
+  ])(
+    "keeps %s in its recorded bucket when catalog and reply mention other tasks",
+    (kind, modelType, expectedTask) => {
+      const runDir = mkdtempSync(
+        path.join(tmpdir(), "scenario-native-purpose-"),
+      );
+      try {
+        const template = syntheticTrajectory();
+        const planner = template.stages.find(
+          (stage) => stage.kind === "planner",
+        );
+        if (!planner || !("model" in planner))
+          throw new Error("Planner fixture is unavailable");
+        const prompt =
+          "Answer the current recall request. Authorized catalog: inbox_triage, goal_verification, calendar_extract. The user quotes: triage one inbox item.";
+        const response =
+          "The names inbox_triage and goal_verification describe available tools, not this request.";
+        const trajectory = {
+          ...template,
+          stages: [
+            {
+              ...planner,
+              kind,
+              model: {
+                ...planner.model,
+                modelType,
+                messages: [{ role: "user", content: prompt }],
+                prompt,
+                response,
+              },
+            },
+          ],
+        };
+        const trajDir = path.join(runDir, "trajectories", "agent-test");
+        mkdirSync(trajDir, { recursive: true });
+        writeFileSync(
+          path.join(trajDir, "purpose.json"),
+          JSON.stringify(trajectory),
+        );
+        const outPath = path.join(runDir, "native.jsonl");
+        exportScenarioNativeJsonl(runDir, outPath);
+        const row = JSON.parse(readFileSync(outPath, "utf8").trim());
+        expect(row.metadata.task_type).toBe(expectedTask);
+        expect(row.metadata.domain).toBeUndefined();
+        expect(JSON.stringify(row.request)).toContain(prompt);
+      } finally {
+        rmSync(runDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

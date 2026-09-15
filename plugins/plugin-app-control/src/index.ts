@@ -21,10 +21,14 @@ import { settingsAction } from "./actions/settings.js";
 import {
 	closeAllViewsAction,
 	closeViewAction,
+	showViewAction,
 	viewsAction,
 } from "./actions/views.js";
 import { createViewsClient } from "./actions/views-client.js";
-import { viewContextPlanningEvaluator } from "./evaluators/view-context-planning.js";
+import {
+	viewContextPlanningEvaluator,
+	viewContinuationField,
+} from "./evaluators/view-context-planning.js";
 import { availableAppsProvider } from "./providers/available-apps.js";
 import { currentViewProvider } from "./providers/current-view.js";
 import { pendingAppControlChoicesProvider } from "./providers/pending-choices.js";
@@ -97,8 +101,10 @@ export type { ViewsMode } from "./actions/views.js";
 export {
 	closeAllViewsAction,
 	closeViewAction,
+	createShowViewAction,
 	createViewsAction,
 	createViewsAliasAction,
+	showViewAction,
 	viewsAction,
 } from "./actions/views.js";
 export type { ViewSummary } from "./actions/views-client.js";
@@ -163,6 +169,7 @@ export const appControlPlugin: Plugin = {
 	actions: [
 		appAction,
 		viewsAction,
+		showViewAction,
 		closeViewAction,
 		closeAllViewsAction,
 		backgroundAction,
@@ -174,6 +181,7 @@ export const appControlPlugin: Plugin = {
 	// Contextual navigation joins domain work in the same planner action queue.
 	evaluators: [],
 	responseHandlerEvaluators: [viewContextPlanningEvaluator],
+	responseHandlerFieldEvaluators: [viewContinuationField],
 	providers: [
 		availableAppsProvider,
 		currentViewProvider,

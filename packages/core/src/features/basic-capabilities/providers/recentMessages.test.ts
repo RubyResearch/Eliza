@@ -1,8 +1,8 @@
 /**
  * Behavioral tests for the RECENT_MESSAGES provider's transcript hygiene:
  * dropping internal bridge / sub-agent / tool / path-dump / synthetic-failure /
- * transient rows, deduping, compaction-ledger inclusion, and the conversation-
- * window cap. Deterministic — drives `recentMessagesProvider.get` against a
+ * transient rows, exact record deduplication, distinct source occurrences and
+ * uncapped retained history. Deterministic — drives `recentMessagesProvider.get` against a
  * hand-built in-memory runtime of `vi.fn` stubs; no live model or database.
  */
 
@@ -36,6 +36,7 @@ import {
 	type IAgentRuntime,
 	type Memory,
 } from "../../../types/index.ts";
+import { addHeader, conversationMessagesHeader } from "../../../utils.ts";
 import { recentMessagesProvider } from "./recentMessages.ts";
 
 const AGENT_ID = "00000000-0000-0000-0000-000000000001";
@@ -108,6 +109,13 @@ describe("recentMessagesProvider", () => {
 		);
 
 		expect(result.data?.recentMessages).toHaveLength(2);
+		if (!result.data) throw new Error("Missing provider data");
+		expect(result.values?.recentMessages).toBe(
+			addHeader(
+				conversationMessagesHeader(2),
+				(result.data.formattedMessageSegments as string[]).join("\n"),
+			),
+		);
 		expect(result.text).toContain("Agent: done");
 		expect(result.text?.match(/Agent: done/g)).toHaveLength(1);
 	});
@@ -284,7 +292,7 @@ describe("recentMessagesProvider", () => {
 		expect(result.text).not.toContain("Typecheck still fails after repair.");
 	});
 
-	it("dedupes repeated assistant messages within one assistant run", async () => {
+	it("keeps every distinct assistant occurrence within one assistant run", async () => {
 		const memories = [
 			makeMemory("msg-1", USER_ID, "build app one", "discord", 1000),
 			makeMemory("msg-2", AGENT_ID, "On it", "discord", 2000),
@@ -313,14 +321,14 @@ describe("recentMessagesProvider", () => {
 			{ values: {}, data: {}, text: "" },
 		);
 
-		expect(result.text?.match(/Agent: On it/g)).toHaveLength(2);
+		expect(result.text?.match(/Agent: On it/g)).toHaveLength(3);
 		expect(result.text?.match(/https:\/\/example\.com\/app-one/g)).toHaveLength(
-			1,
+			2,
 		);
 		expect(result.text).toContain("User: build app two");
 	});
 
-	it("omits consecutive duplicate dialogue rows from the same sender", async () => {
+	it("keeps consecutive same-speaker messages with different source IDs", async () => {
 		const memories = [
 			makeMemory("msg-1", USER_ID, "are you there?", "discord", 1000),
 			makeMemory("msg-2", AGENT_ID, "yes", "runtime", 2000),
@@ -334,9 +342,52 @@ describe("recentMessagesProvider", () => {
 			{ values: {}, data: {}, text: "" },
 		);
 
-		expect(result.data?.recentMessages).toHaveLength(3);
-		expect(result.text?.match(/Agent: yes/g)).toHaveLength(1);
+		expect(result.data?.recentMessages).toEqual(memories);
+		expect(result.text?.match(/Agent:\s+yes/g)).toHaveLength(2);
 		expect(result.text).toContain("User: next task");
+	});
+
+	it("preserves literal differences, correction order and metadata while removing exact storage duplicates", async () => {
+		const first = makeMemory(
+			"msg-1",
+			USER_ID,
+			"The exact body is A  B.",
+			"discord",
+			1000,
+		);
+		const memories = [
+			first,
+			structuredClone(first),
+			makeMemory("msg-2", USER_ID, "The exact body is A B.", "discord", 2000),
+			makeMemory("msg-3", AGENT_ID, "The mug is violet.", "discord", 3000),
+			makeMemory("msg-4", AGENT_ID, "The mug is amber.", "discord", 4000),
+			makeMemory("msg-5", AGENT_ID, "The mug is violet.", "discord", 5000),
+			{ ...first, metadata: { correction: true } },
+		];
+		const before = structuredClone(memories);
+		const result = await recentMessagesProvider.get(
+			makeRuntime(memories),
+			makeMemory(
+				"current",
+				USER_ID,
+				"Quote both literal bodies and the latest mug color.",
+				"discord",
+				6000,
+			),
+			{ values: {}, data: {}, text: "" },
+		);
+		const rows = result.data?.recentMessages as Memory[];
+		expect(rows).toHaveLength(6);
+		expect(rows.map((row) => row.content.text)).toEqual([
+			first.content.text,
+			first.content.text,
+			"The exact body is A B.",
+			"The mug is violet.",
+			"The mug is amber.",
+			"The mug is violet.",
+		]);
+		expect(rows[1].metadata).toEqual({ correction: true });
+		expect(memories).toEqual(before);
 	});
 
 	it("ignores a stale compact ledger and renders retained history directly", async () => {

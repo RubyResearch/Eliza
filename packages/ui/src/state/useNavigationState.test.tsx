@@ -11,6 +11,26 @@ afterEach(() => {
 });
 
 describe("useNavigationState", () => {
+  it("keeps agent-driven app navigation inside the separate developer shell", () => {
+    window.history.replaceState(null, "", "/dev#/chat");
+    const setTabRaw = vi.fn();
+    const { result } = renderHook(() =>
+      useNavigationState({
+        tab: "chat" as Tab,
+        setTabRaw,
+        uiShellMode: "native",
+        hasActiveGameRun: false,
+        setAppsSubTab: vi.fn(),
+      }),
+    );
+    for (const tab of ["notes", "calendar", "chat"] as Tab[]) {
+      act(() => result.current.setTab(tab));
+      expect(setTabRaw).toHaveBeenLastCalledWith(tab);
+      expect(window.location.pathname).toBe("/dev");
+      expect(window.location.hash).toBe(`#/${tab}`);
+    }
+  });
+
   it("publishes history navigation so route-derived shell policy advances with the tab", () => {
     window.history.replaceState(null, "", "/calendar");
     const setTabRaw = vi.fn();

@@ -45,6 +45,7 @@ export interface MemoryExtraction {
 	category: LongTermMemoryCategory;
 	content: string;
 	confidence: number;
+	sourceMessageIds?: UUID[];
 	metadata?: Record<string, JsonValue>;
 }
 

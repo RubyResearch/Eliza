@@ -117,6 +117,56 @@ describe("WebSocket auth no-token trust parity", () => {
       reason: "Unauthorized",
     });
   });
+
+  it("keeps the same-origin local dashboard authorized when remote pairing has a token", () => {
+    process.env.ELIZA_API_TOKEN = "remote-device-secret";
+    const req = makeReq({
+      host: "localhost:2138",
+      origin: "http://localhost:2138",
+    });
+    const url = new URL("http://localhost:2138/ws");
+    expect(resolveWebSocketUpgradeRejection(req, url)).toBeNull();
+    expect(isWebSocketAuthorized(req, url)).toBe(true);
+  });
+
+  it.each([
+    { host: "localhost:2138", origin: "https://localhost" },
+    { host: "localhost:2138", origin: "http://localhost:9999" },
+    { host: "localhost:2138", "x-forwarded-for": "203.0.113.9" },
+  ])(
+    "does not extend local WebSocket trust to mismatched or forwarded origins: %j",
+    (headers) => {
+      process.env.ELIZA_API_TOKEN = "remote-device-secret";
+      expect(
+        isWebSocketAuthorized(
+          makeReq(headers),
+          new URL("http://localhost:2138/ws"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("still requires the configured token in strict local auth mode", () => {
+    process.env.ELIZA_API_TOKEN = "remote-device-secret";
+    process.env.ELIZA_REQUIRE_LOCAL_AUTH = "1";
+    const req = localReq();
+    const url = new URL("http://localhost:2138/ws");
+    expect(isWebSocketAuthorized(req, url)).toBe(false);
+    req.headers.authorization = "Bearer remote-device-secret";
+    expect(isWebSocketAuthorized(req, url)).toBe(true);
+  });
+
+  it("does not bypass a supplied invalid token or a provisioned cloud boundary", () => {
+    process.env.ELIZA_API_TOKEN = "remote-device-secret";
+    const req = localReq();
+    const url = new URL("http://localhost:2138/ws");
+    req.headers.authorization = "Bearer wrong-secret";
+    expect(isWebSocketAuthorized(req, url)).toBe(false);
+    delete req.headers.authorization;
+    process.env.ELIZA_CLOUD_PROVISIONED = "1";
+    process.env.STEWARD_AGENT_TOKEN = "steward-token";
+    expect(isWebSocketAuthorized(req, url)).toBe(false);
+  });
 });
 
 describe("resolveBoundaryRole (#12087 Item 13)", () => {

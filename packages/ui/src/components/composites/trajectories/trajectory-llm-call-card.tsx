@@ -10,6 +10,7 @@ import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 import { Card } from "../../ui/card";
 import { Separator } from "../../ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../ui/tabs";
 import { TrajectoryCodeBlock } from "./trajectory-code-block";
 
 interface CallMetricProps {
@@ -35,6 +36,8 @@ function CallMetric({ label, value, meta }: CallMetricProps) {
 }
 
 export interface TrajectoryLlmCallCardProps {
+  /** Compact embedded inspectors already show model and usage in their summary. */
+  compact?: boolean;
   callLabel: React.ReactNode;
   copyLabel: React.ReactNode;
   copyToClipboardLabel?: string;
@@ -66,6 +69,7 @@ export interface TrajectoryLlmCallCardProps {
 }
 
 export function TrajectoryLlmCallCard({
+  compact = false,
   callLabel,
   copyLabel,
   copyToClipboardLabel,
@@ -97,6 +101,49 @@ export function TrajectoryLlmCallCard({
 }: TrajectoryLlmCallCardProps) {
   const [showSystem, setShowSystem] = React.useState(false);
   const purposeValue = tags?.length ? tags.join(", ") : "Inference";
+
+  if (compact)
+    return (
+      <Tabs defaultValue="input" className="developer-call-text min-w-0">
+        <TabsList aria-label="Model call text" className="h-auto">
+          <TabsTrigger value="input" className="min-h-11">
+            Input
+          </TabsTrigger>
+          <TabsTrigger value="output" className="min-h-11">
+            Output
+          </TabsTrigger>
+          {systemPrompt ? (
+            <TabsTrigger value="system" className="min-h-11">
+              System
+            </TabsTrigger>
+          ) : null}
+        </TabsList>
+        {[
+          { id: "input", label: "Input", content: userPrompt },
+          { id: "output", label: "Output", content: response },
+          ...(systemPrompt
+            ? [{ id: "system", label: "System", content: systemPrompt }]
+            : []),
+        ].map((part) => (
+          <TabsContent
+            key={part.id}
+            value={part.id}
+            className="developer-raw-panel"
+          >
+            <TrajectoryCodeBlock
+              compact
+              label={part.label}
+              content={part.content}
+              linesLabel=""
+              copyLabel={copyLabel}
+              collapseLabel={systemCollapseLabel}
+              expandLabel={systemExpandLabel}
+              onCopy={onCopy}
+            />
+          </TabsContent>
+        ))}
+      </Tabs>
+    );
 
   return (
     <section>

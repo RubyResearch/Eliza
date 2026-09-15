@@ -1414,119 +1414,6 @@ function BrowserWorkspaceForAuthority(): React.JSX.Element {
     },
     [browserTabRenderPath, loadWorkspace],
   );
-
-  const navigateSelectedBrowserWorkspaceTab = useCallback(
-    async (rawUrl: string) => {
-      if (selectedTab && isInternalBrowserWorkspaceTab(selectedTab)) {
-        throw new Error(
-          t("browserworkspace.InternalTabUrlManaged", {
-            defaultValue: "This internal tab manages its own URL.",
-          }),
-        );
-      }
-      const url = normalizeBrowserWorkspaceInputUrl(rawUrl, t);
-      if (!url) {
-        throw new Error(
-          t("browserworkspace.EnterUrlToNavigate", {
-            defaultValue: "Enter a URL to navigate.",
-          }),
-        );
-      }
-      if (!selectedTabId) {
-        await openNewBrowserWorkspaceTab(url);
-        return;
-      }
-      // Native mobile shell: navigation is client-side. Updating the tab's URL
-      // in state re-drives the native surface (the hook navigates the existing
-      // WKWebView/WebView on a URL change rather than recreating it).
-      if (browserTabRenderPath === "native-mobile-webview") {
-        setWorkspace((prev) => ({
-          ...prev,
-          tabs: prev.tabs.map((tab) =>
-            tab.id === selectedTabId
-              ? { ...tab, url, updatedAt: new Date().toISOString() }
-              : tab,
-          ),
-        }));
-        setLocationInput(url);
-        setLocationDirty(false);
-        return;
-      }
-      const { tab } = await client.navigateBrowserWorkspaceTab(
-        selectedTabId,
-        url,
-      );
-      if (workspace.mode === "web") {
-        // React won't re-navigate an existing iframe when only the src
-        // attribute changes (same key = same DOM element). Set the src
-        // directly via the ref in embedded web mode only.
-        const iframe = iframeRefs.current.get(selectedTabId);
-        if (iframe && iframe.src !== tab.url) {
-          beginBrowserWalletFrameNavigation(selectedTabId, tab.url);
-          armBrowserWorkspaceIframeFocusReturn(iframe, {
-            navigationUrl: tab.url,
-          });
-          iframe.src = tab.url;
-        }
-      } else if (workspace.mode === "desktop") {
-        const tag = electrobunWebviewRefs.current.get(selectedTabId);
-        tag?.loadURL(tab.url);
-      }
-      await loadWorkspace({ preferTabId: tab.id, silent: true });
-      setLocationInput(tab.url);
-      setLocationDirty(false);
-    },
-    [
-      armBrowserWorkspaceIframeFocusReturn,
-      beginBrowserWalletFrameNavigation,
-      browserTabRenderPath,
-      loadWorkspace,
-      openNewBrowserWorkspaceTab,
-      selectedTab,
-      selectedTabId,
-      t,
-      workspace.mode,
-    ],
-  );
-
-  // Remote browser actions mutate the server workspace. Native mobile tabs are
-  // deliberately local, so mirror the completed action's verified deep-link
-  // URL into the currently mounted secure WebView instead of leaving it on the
-  // previous page. The same deep link handles the first navigation on mount;
-  // this listener covers subsequent actions while /browser is already active.
-  useEffect(() => {
-    if (!browserWorkspaceUsesLocalTabs) return;
-    const handleAgentBrowserNavigation = (event: Event) => {
-      const detail = (event as CustomEvent<NavigateViewDetail>).detail;
-      if (detail?.viewId !== "browser" || !detail.viewPath) return;
-      const query = detail.viewPath.split("?", 2)[1];
-      const rawUrl = query
-        ? new URLSearchParams(query).get("browse")?.trim()
-        : null;
-      if (!rawUrl) return;
-      void runBrowserWorkspaceAction(
-        "agent:navigate",
-        async () => {
-          await navigateSelectedBrowserWorkspaceTab(rawUrl);
-        },
-        t("browserworkspace.NavigationFailed", {
-          defaultValue: "Couldn’t open that page.",
-        }),
-      );
-    };
-    window.addEventListener(NAVIGATE_VIEW_EVENT, handleAgentBrowserNavigation);
-    return () =>
-      window.removeEventListener(
-        NAVIGATE_VIEW_EVENT,
-        handleAgentBrowserNavigation,
-      );
-  }, [
-    browserWorkspaceUsesLocalTabs,
-    navigateSelectedBrowserWorkspaceTab,
-    runBrowserWorkspaceAction,
-    t,
-  ]);
-
   const registerBrowserWorkspaceIframe = useCallback(
     (tabId: string, iframe: HTMLIFrameElement | null) => {
       if (!iframe) {
@@ -1954,7 +1841,149 @@ function BrowserWorkspaceForAuthority(): React.JSX.Element {
     occlusionSelector: BROWSER_WORKSPACE_TAB_MASK_SELECTORS,
     policy: BROWSER_NATIVE_SURFACE_POLICY,
     lifecycle: BROWSER_SURFACE_MANIFEST.lifecycle,
+    onNavigation: ({ tabId, url, previousUrl }) => {
+      setWorkspace((previous) => {
+        const tab = previous.tabs.find((entry) => entry.id === tabId);
+        // Do not let a late native observation replace a newer address-bar
+        // command that React has not yet sent across the native bridge.
+        if (!tab || tab.url === url || tab.url !== previousUrl) return previous;
+        return {
+          ...previous,
+          tabs: previous.tabs.map((entry) =>
+            entry.id === tabId
+              ? { ...entry, url, updatedAt: new Date().toISOString() }
+              : entry,
+          ),
+        };
+      });
+    },
   });
+
+  const navigateSelectedBrowserWorkspaceTab = useCallback(
+    async (rawUrl: string) => {
+      if (selectedTab && isInternalBrowserWorkspaceTab(selectedTab)) {
+        throw new Error(
+          t("browserworkspace.InternalTabUrlManaged", {
+            defaultValue: "This internal tab manages its own URL.",
+          }),
+        );
+      }
+      const url = normalizeBrowserWorkspaceInputUrl(rawUrl, t);
+      if (!url) {
+        throw new Error(
+          t("browserworkspace.EnterUrlToNavigate", {
+            defaultValue: "Enter a URL to navigate.",
+          }),
+        );
+      }
+      if (!selectedTabId) {
+        await openNewBrowserWorkspaceTab(url);
+        return;
+      }
+      // A changed URL is reconciled through tab state. Repeating the current
+      // URL must explicitly reload: unchanged state cannot retry a failed page.
+      if (browserTabRenderPath === "native-mobile-webview") {
+        if (selectedTab?.url === url) {
+          nativeTabSurfaces.reloadSurface(selectedTabId);
+          setLocationInput(url);
+          setLocationDirty(false);
+          return;
+        }
+        setWorkspace((prev) => ({
+          ...prev,
+          tabs: prev.tabs.map((tab) =>
+            tab.id === selectedTabId
+              ? { ...tab, url, updatedAt: new Date().toISOString() }
+              : tab,
+          ),
+        }));
+        setLocationInput(url);
+        setLocationDirty(false);
+        return;
+      }
+      const { tab } = await client.navigateBrowserWorkspaceTab(
+        selectedTabId,
+        url,
+      );
+      if (workspace.mode === "web") {
+        // React won't re-navigate an existing iframe when only the src
+        // attribute changes (same key = same DOM element). Set the src
+        // directly via the ref in embedded web mode only.
+        const iframe = iframeRefs.current.get(selectedTabId);
+        if (iframe && iframe.src !== tab.url) {
+          beginBrowserWalletFrameNavigation(selectedTabId, tab.url);
+          armBrowserWorkspaceIframeFocusReturn(iframe, {
+            navigationUrl: tab.url,
+          });
+          iframe.src = tab.url;
+        }
+      } else if (workspace.mode === "desktop") {
+        const tag = electrobunWebviewRefs.current.get(selectedTabId);
+        tag?.loadURL(tab.url);
+      }
+      await loadWorkspace({ preferTabId: tab.id, silent: true });
+      setLocationInput(tab.url);
+      setLocationDirty(false);
+    },
+    [
+      armBrowserWorkspaceIframeFocusReturn,
+      beginBrowserWalletFrameNavigation,
+      browserTabRenderPath,
+      loadWorkspace,
+      nativeTabSurfaces.reloadSurface,
+      openNewBrowserWorkspaceTab,
+      selectedTab,
+      selectedTabId,
+      t,
+      workspace.mode,
+    ],
+  );
+
+  // Remote browser actions mutate the server workspace. Native mobile tabs are
+  // deliberately local, so mirror the completed action's verified deep-link
+  // URL into the currently mounted secure WebView instead of leaving it on the
+  // previous page. The same deep link handles the first navigation on mount;
+  // this listener covers subsequent actions while /browser is already active.
+  useEffect(() => {
+    if (!browserWorkspaceUsesLocalTabs) return;
+    const handleAgentBrowserNavigation = (event: Event) => {
+      const detail = (event as CustomEvent<NavigateViewDetail>).detail;
+      if (detail?.viewId !== "browser" || !detail.viewPath) return;
+      const query = detail.viewPath.split("?", 2)[1];
+      const rawUrl = query
+        ? new URLSearchParams(query).get("browse")?.trim()
+        : null;
+      if (!rawUrl) return;
+      void runBrowserWorkspaceAction(
+        "agent:navigate",
+        async () => {
+          await navigateSelectedBrowserWorkspaceTab(rawUrl);
+        },
+        t("browserworkspace.NavigationFailed", {
+          defaultValue: "Couldn’t open that page.",
+        }),
+      );
+    };
+    window.addEventListener(NAVIGATE_VIEW_EVENT, handleAgentBrowserNavigation);
+    return () =>
+      window.removeEventListener(
+        NAVIGATE_VIEW_EVENT,
+        handleAgentBrowserNavigation,
+      );
+  }, [
+    browserWorkspaceUsesLocalTabs,
+    navigateSelectedBrowserWorkspaceTab,
+    runBrowserWorkspaceAction,
+    t,
+  ]);
+
+  const readNativePage = useCallback(
+    async (selector?: string) => {
+      if (!selectedTabId) throw new Error("No native Browser tab is selected.");
+      return nativeTabSurfaces.readPage(selectedTabId, selector);
+    },
+    [selectedTabId, nativeTabSurfaces.readPage],
+  );
 
   const handleTabVaultAutofillRequest = useCallback(
     async (req: {
@@ -2561,6 +2590,10 @@ function BrowserWorkspaceForAuthority(): React.JSX.Element {
 
   const backSelectedBrowserWorkspaceTab = useCallback(async () => {
     if (!selectedTab) return;
+    if (nativeMobileTabPath) {
+      await nativeTabSurfaces.backSurface(selectedTab.id);
+      return;
+    }
     const nativeTag = electrobunWebviewRefs.current.get(selectedTab.id);
     if (nativeTag) {
       nativeTag.executeJavascript("history.back()");
@@ -2578,7 +2611,7 @@ function BrowserWorkspaceForAuthority(): React.JSX.Element {
       setLocationDirty(false);
       await loadWorkspace({ preferTabId: result.tab.id, silent: true });
     }
-  }, [selectedTab, loadWorkspace]);
+  }, [selectedTab, loadWorkspace, nativeMobileTabPath, nativeTabSurfaces]);
 
   const tabsLabel = t("browserworkspace.Tabs", {
     defaultValue: "Tabs",
@@ -3379,7 +3412,10 @@ function BrowserWorkspaceForAuthority(): React.JSX.Element {
   );
 
   return (
-    <ShellViewAgentSurface viewId="browser">
+    <ShellViewAgentSurface
+      viewId="browser"
+      readPage={nativeMobileTabPath ? readNativePage : undefined}
+    >
       {mainNode}
       <BrowserTabSwitcher
         open={switcherOpen}

@@ -10,12 +10,16 @@ import type { Memory } from "../types/memory";
 import type { IAgentRuntime } from "../types/runtime";
 import type { State } from "../types/state";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.unstubAllEnvs();
+});
 
 describe("action discovery latency attribution", () => {
 	it.each([true, false])(
 		"preserves ordered authorization and exceptions with timing enabled=%s",
 		async (enabled) => {
+			vi.stubEnv("ELIZA_INFERENCE_TIMING", "1");
 			let clock = 0;
 			vi.spyOn(performance, "now").mockImplementation(() => clock);
 			const order: string[] = [];
@@ -120,57 +124,75 @@ describe("action discovery latency attribution", () => {
 			}
 		},
 	);
-	it("keeps complete large-catalog diagnostics without evicting later model spans", async () => {
-		const actions: Action[] = Array.from({ length: 600 }, (_, index) => ({
-			name: `CAPABILITY_${index}`,
-			description: "Capability",
-			similes: [],
-			examples: [],
-			validate: async () => true,
-			handler: async () => {
-				throw new Error("No execution during discovery");
-			},
-		}));
-		const runtime = {
-			actions,
-			reportError: vi.fn(),
-			logger: { warn: vi.fn() },
-		} as unknown as IAgentRuntime;
-		const message: Memory = {
-			entityId: "00000000-0000-0000-0000-000000000001",
-			agentId: "00000000-0000-0000-0000-000000000002",
-			roomId: "00000000-0000-0000-0000-000000000003",
-			content: { text: "List available capabilities" },
-		};
-		const timer = new InferenceTurnTimer({
-			turnId: "large-discovery",
-			label: "test",
-			maxSpans: 4,
-		});
-		const result = await runWithInferenceTiming(timer, () =>
-			collectV5PlannerCandidateActions({
-				runtime,
-				message,
-				state: { text: "", values: {}, data: {} },
-				discoverActions: true,
-				userRoles: ["USER"],
-			}),
-		);
-		timer.recordSpan("model:RESPONSE_HANDLER", 50);
-		const summary = timer.close();
-		const checks = JSON.parse(
-			String(
-				summary.spans.find((span) => span.name === "actions:discovery")?.meta
-					?.checks,
-			),
-		) as Array<{ action: string; gate: string }>;
-		expect(result).toEqual(actions);
-		expect(
-			checks
-				.filter((check) => check.gate === "validate")
-				.map((check) => check.action),
-		).toEqual(actions.map((action) => action.name));
-		expect(summary.byName["model:RESPONSE_HANDLER"].totalMs).toBe(50);
-		expect(summary.anomalies).not.toContain("span-cap");
-	});
+	it.each([undefined, "0", "1"])(
+		"keeps default diagnostics small and complete checks opt-in (%s)",
+		async (flag) => {
+			vi.stubEnv("ELIZA_INFERENCE_TIMING", flag);
+			const actions: Action[] = Array.from({ length: 600 }, (_, index) => ({
+				name: `CAPABILITY_${index}`,
+				description: "Capability",
+				similes: [],
+				examples: [],
+				validate: async () => true,
+				handler: async () => {
+					throw new Error("No execution during discovery");
+				},
+			}));
+			const runtime = {
+				actions,
+				reportError: vi.fn(),
+				logger: { warn: vi.fn() },
+			} as unknown as IAgentRuntime;
+			const message: Memory = {
+				entityId: "00000000-0000-0000-0000-000000000001",
+				agentId: "00000000-0000-0000-0000-000000000002",
+				roomId: "00000000-0000-0000-0000-000000000003",
+				content: { text: "List available capabilities" },
+			};
+			const timer = new InferenceTurnTimer({
+				turnId: "large-discovery",
+				label: "test",
+				maxSpans: 4,
+			});
+			const result = await runWithInferenceTiming(timer, () =>
+				collectV5PlannerCandidateActions({
+					runtime,
+					message,
+					state: { text: "", values: {}, data: {} },
+					discoverActions: true,
+					userRoles: ["USER"],
+				}),
+			);
+			timer.recordSpan("model:RESPONSE_HANDLER", 50);
+			const summary = timer.close();
+			const metadata = summary.spans.find(
+				(span) => span.name === "actions:discovery",
+			)?.meta;
+			expect(metadata).toBeDefined();
+			const totals = JSON.parse(String(metadata?.summary));
+			expect(totals.validate.count).toBe(600);
+			expect(totals["connector-policy"].count).toBe(600);
+			expect(totals.validate.throws).toBe(0);
+			expect(result).toEqual(actions);
+			if (flag === "1") {
+				const checks = JSON.parse(String(metadata?.checks)) as Array<{
+					action: string;
+					gate: string;
+				}>;
+				expect(
+					checks
+						.filter((check) => check.gate === "validate")
+						.map((check) => check.action),
+				).toEqual(actions.map((action) => action.name));
+			} else {
+				expect(metadata?.checks).toBeUndefined();
+				expect(
+					new TextEncoder().encode(JSON.stringify(metadata)).length,
+				).toBeLessThan(1024);
+			}
+
+			expect(summary.byName["model:RESPONSE_HANDLER"].totalMs).toBe(50);
+			expect(summary.anomalies).not.toContain("span-cap");
+		},
+	);
 });

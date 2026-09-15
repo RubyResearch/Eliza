@@ -745,7 +745,7 @@ export interface AppActions {
    * coding-agent PTY sessions, so it is safe to fire on a voice barge-in.
    */
   interruptActiveChatPipeline: () => void;
-  handleChatRetry: (assistantMsgId: string) => void;
+  handleChatRetry: (assistantMsgId: string) => Promise<void>;
   handleChatEdit: (messageId: string, text: string) => Promise<boolean>;
   /** Persistently delete a single message (#13533): server DELETE + optimistic
    *  UI removal with rollback on failure. Resolves false when the delete failed
@@ -782,6 +782,8 @@ export interface AppActions {
       conversationId?: string | null;
       images?: ImageAttachment[];
       metadata?: Record<string, unknown>;
+      /** Stable identity for a programmatically relayed logical turn. */
+      clientMessageId?: string;
     },
   ) => Promise<void>;
 

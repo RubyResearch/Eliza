@@ -184,6 +184,23 @@ export function collectPreparedKeywordTermMatches(
   return matches;
 }
 
+/** Same matching rules as the complete collector, but stops after the first match when only existence is needed. */
+export function hasPreparedKeywordTermMatch(
+  texts: readonly string[],
+  prepared: readonly PreparedKeywordTerm[],
+): boolean {
+  if (prepared.length === 0) return false;
+  for (const text of texts) {
+    const normalizedText = normalizeKeywordMatchText(text);
+    if (!normalizedText) continue;
+    const hasNonAsciiText = textHasNonAscii(text);
+    for (const entry of prepared) {
+      if (entry.matches(text, normalizedText, hasNonAsciiText)) return true;
+    }
+  }
+  return false;
+}
+
 export function collectKeywordTermMatches(
   texts: readonly string[],
   terms: readonly string[],

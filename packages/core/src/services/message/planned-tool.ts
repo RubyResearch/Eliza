@@ -66,7 +66,7 @@ import {
 	resolvePlannerActionName,
 	resolveRuntimeAction,
 } from "./action-identifiers.js";
-import { mergeAgentContexts } from "./action-surface.js";
+import { actionNameTokenKey, mergeAgentContexts } from "./action-surface.js";
 import { normalizeActionIdentifier } from "./direct-action-heuristics";
 import { uiViewActionPriority } from "./provider-state.js";
 
@@ -105,6 +105,7 @@ export interface ExecuteV5PlannedToolCallParams {
 
 export interface BuildV5ExecutorContextParams {
 	message: Memory;
+	replyOwner?: "planner";
 	state: State;
 	selectedContexts: AgentContext[];
 	senderRole: RoleGateRole;
@@ -117,6 +118,7 @@ export function buildV5ExecutorContext(
 ): ExecutePlannedToolCallContext {
 	return {
 		message: args.message,
+		...(args.replyOwner ? { replyOwner: args.replyOwner } : {}),
 		state: args.state,
 		activeContexts: args.selectedContexts,
 		userRoles: [args.senderRole],
@@ -707,6 +709,12 @@ export function collectBudgetedStageOneCandidateActions(args: {
 	actions: readonly Action[];
 	candidateActions: readonly string[];
 	contexts: readonly AgentContext[];
+	/** The progressive lane offers unselected operations through discovery. */
+	deferUnselectedContexts?: boolean;
+	/** Initial hints may name both a family and a specific operation. Keep the
+	 * operation inline and the family discoverable; explicit discovery never
+	 * uses this projection. */
+	deferParentHints?: boolean;
 }): Action[] {
 	if (args.candidateActions.length === 0) return [];
 
@@ -714,22 +722,57 @@ export function collectBudgetedStageOneCandidateActions(args: {
 	const selectedNames = new Set<string>();
 	for (const candidateName of args.candidateActions) {
 		const direct = resolveRuntimeAction(actionLookup, candidateName);
+		// Progressive planning can discover the actual registered operation. A
+		// guessed parent for an unregistered hint can expose unrelated schemas
+		// (NOTES_GET -> VIEWS) even beside the correctly selected child.
+		if (!direct && args.deferUnselectedContexts) {
+			// Preserve admission's unambiguous reversed-name resolution without
+			// guessing a different operation or family from overlapping words.
+			const tokenKey = actionNameTokenKey(candidateName);
+			const matches = args.actions.filter(
+				(action) => actionNameTokenKey(action.name) === tokenKey,
+			);
+			if (matches.length === 1) {
+				selectedNames.add(normalizeActionIdentifier(matches[0].name));
+			}
+			continue;
+		}
 		const resolved = direct
 			? [direct]
 			: parentAliasesForCandidateAction(candidateName)
 					.map((alias) => resolveRuntimeAction(actionLookup, alias))
 					.filter((action): action is Action => action !== undefined);
-		if (resolved.length === 0) return [];
+		// Hints are not an execution contract. One invented name must not throw
+		// away the known families and inflate the entire surface; the pipeline
+		// exposes DISCOVER_TOOLS for the remaining authorized catalog.
+		if (resolved.length === 0) continue;
 		for (const action of resolved) {
 			selectedNames.add(normalizeActionIdentifier(action.name));
 		}
 	}
-	// A candidate child is a routing hint, not a complete plan. Keep its
-	// authorized umbrella available so a compound request can use another
-	// operation after the first result (e.g. navigate, then read the page).
-	// Use declared relationships, never guessed name prefixes. Only parents
-	// already admitted by the execution gates may enter this surface.
-	for (const parent of args.actions) {
+	if (selectedNames.size === 0) return [];
+	if (args.deferUnselectedContexts && args.deferParentHints) {
+		const hintedNames = new Set(selectedNames);
+		for (const parent of args.actions) {
+			if (
+				parent.subActions?.some((child) =>
+					hintedNames.has(
+						normalizeActionIdentifier(
+							typeof child === "string" ? child : child.name,
+						),
+					),
+				)
+			) {
+				selectedNames.delete(normalizeActionIdentifier(parent.name));
+			}
+		}
+	}
+	// Legacy budget fallback has no discovery guarantee and keeps the whole
+	// family. Progressive planning keeps exact child hints; unselected siblings
+	// and their parent stay in DISCOVER_TOOLS, including for compound follow-ups.
+	// A parent still selected after the initial hint projection expands its
+	// complete authorized family. Explicit discovery retains every named parent.
+	for (const parent of args.deferUnselectedContexts ? [] : args.actions) {
 		if (
 			parent.subActions?.some((child) =>
 				selectedNames.has(
@@ -755,7 +798,9 @@ export function collectBudgetedStageOneCandidateActions(args: {
 			.flatMap((action) => action.contexts ?? [])
 			.map((context) => String(context).trim().toLowerCase()),
 	);
-	const uncoveredContexts = args.contexts.filter(
+	const uncoveredContexts = (
+		args.deferUnselectedContexts ? [] : args.contexts
+	).filter(
 		(context) => !coveredContexts.has(String(context).trim().toLowerCase()),
 	);
 	const noFocusedViewActions = new Set<string>();
@@ -765,6 +810,24 @@ export function collectBudgetedStageOneCandidateActions(args: {
 			1
 		) {
 			selectedNames.add(normalizeActionIdentifier(action.name));
+		}
+	}
+	// A loaded parent exposes its complete authorized family. Loading only the
+	// initially named child can strand a follow-up operation in a compound ask.
+	let addedChild = true;
+	while (addedChild) {
+		addedChild = false;
+		for (const action of args.actions) {
+			if (!selectedNames.has(normalizeActionIdentifier(action.name))) continue;
+			for (const child of action.subActions ?? []) {
+				const childName = normalizeActionIdentifier(
+					typeof child === "string" ? child : child.name,
+				);
+				if (!selectedNames.has(childName)) {
+					selectedNames.add(childName);
+					addedChild = true;
+				}
+			}
 		}
 	}
 
@@ -939,6 +1002,15 @@ export function collectPreviousActionResults(
 				...actionData,
 				actionName,
 			},
+			// Keep the producer's explicit model contract through background-task
+			// persistence. Losing it here re-inflates completed navigation receipts.
+			...(step.result.promptDataMode === "replace-data" &&
+			step.result.promptData
+				? {
+						promptData: { ...step.result.promptData, actionName },
+						promptDataMode: step.result.promptDataMode,
+					}
+				: {}),
 			...(values ? { values } : {}),
 			...(error !== undefined ? { error } : {}),
 			...(step.result.turnComplete !== undefined

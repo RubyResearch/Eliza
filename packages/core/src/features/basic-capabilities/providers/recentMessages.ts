@@ -10,13 +10,12 @@
  * The filtering is load-bearing for prompt hygiene: internal bridge rows
  * (sub-agent-router / swarm-synthesis), synthetic provider-failure replies,
  * transient orchestrator status posts, leaked tool transcripts and local-path
- * dumps, and consecutive- or assistant-run duplicates are all stripped so the
- * model never re-reads its own machinery or paraphrases it as fact on a later
- * turn. Every retained dialogue row is rendered; runtime conversation-length
+ * dumps are stripped so the model does not treat its own machinery as fact on a later
+ * turn. Distinct dialogue occurrences retain their IDs and exact text, even when
+ * wording repeats. Only identical copies of the same record are deduplicated.
+ * Every retained dialogue row is rendered; runtime conversation-length
  * settings and old compaction timestamps must never silently remove prompt
- * history. On any error the provider degrades to an
- * empty, safe result rather than throwing — a throw here would drop the entire
- * turn's history.
+ * history. Errors are reported and returned as explicit history unavailability.
  *
  * Also surfaces cross-room `recentInteractions` between the sender's verified
  * identity cluster and the agent. These are rendered in Stage 1 so a direct
@@ -48,6 +47,7 @@ import { ChannelType } from "../../../types/index.ts";
 import {
 	addHeader,
 	conversationMessagesHeader,
+	formatMessageSegments,
 	formatMessages,
 	formatPosts,
 } from "../../../utils.ts";
@@ -203,44 +203,6 @@ function normalizeDialogueText(memory: Memory): string {
 		: "";
 }
 
-function dedupeConsecutiveDialogueMessages(messages: Memory[]): Memory[] {
-	const deduped: Memory[] = [];
-	for (const message of messages) {
-		const previous = deduped.at(-1);
-		if (
-			previous?.entityId === message.entityId &&
-			normalizeDialogueText(previous) === normalizeDialogueText(message)
-		) {
-			continue;
-		}
-		deduped.push(message);
-	}
-	return deduped;
-}
-
-function dedupeAssistantRunMessages(
-	messages: Memory[],
-	agentId: UUID | undefined,
-): Memory[] {
-	if (!agentId) return messages;
-	const deduped: Memory[] = [];
-	let assistantRunTexts = new Set<string>();
-	for (const message of messages) {
-		if (message.entityId !== agentId) {
-			assistantRunTexts = new Set<string>();
-			deduped.push(message);
-			continue;
-		}
-		const normalized = normalizeDialogueText(message);
-		if (normalized && assistantRunTexts.has(normalized)) {
-			continue;
-		}
-		if (normalized) assistantRunTexts.add(normalized);
-		deduped.push(message);
-	}
-	return deduped;
-}
-
 /**
  * The canonical dialogue-hygiene boundary predicate: true when a stored room
  * row is real conversation that may be exposed to the model, false for
@@ -267,22 +229,22 @@ export function isHygienicDialogueMessage(
 	);
 }
 
-/**
- * The canonical dialogue dedup pass, applied to CHRONOLOGICAL (oldest-first)
- * rows after {@link isHygienicDialogueMessage}: collapses consecutive
- * duplicates from any sender, then repeated assistant texts within one
- * uninterrupted assistant run. Exported alongside the hygiene predicate so
- * CHANNEL_RECAP serves the identical deduped dialogue the RECENT_MESSAGES
- * prompt transcript exposes.
- */
+/** Drop identical copies of the same stored record, never distinct dialogue
+ * occurrences. Conflicting copies and records without IDs remain intact rather
+ * than guessing identity from wording, time, speaker or connector metadata. */
 export function dedupeHygienicDialogueMessages(
 	messages: Memory[],
-	agentId: UUID | undefined,
+	_agentId: UUID | undefined,
 ): Memory[] {
-	return dedupeAssistantRunMessages(
-		dedupeConsecutiveDialogueMessages(messages),
-		agentId,
-	);
+	const seen = new Map<UUID, Memory>();
+	return messages.filter((message) => {
+		if (!message.id) return true;
+		const previous = seen.get(message.id);
+		if (previous && JSON.stringify(previous) === JSON.stringify(message))
+			return false;
+		seen.set(message.id, message);
+		return true;
+	});
 }
 
 function buildFormattingFallbackEntity(memory: Memory): Entity | null {
@@ -522,9 +484,9 @@ export const recentMessagesProvider: Provider = {
 				: false;
 
 			// Format recent messages and posts in parallel, using only dialogue messages
-			const [formattedRecentMessages, formattedRecentPosts] = await Promise.all(
-				[
-					formatMessages({
+			const [formattedMessageSegments, formattedRecentPosts] =
+				await Promise.all([
+					formatMessageSegments({
 						messages: dialogueMessages,
 						entities: entitiesForFormatting,
 					}),
@@ -533,8 +495,9 @@ export const recentMessagesProvider: Provider = {
 						entities: entitiesForFormatting,
 						conversationHeader: false,
 					}),
-				],
-			);
+				]);
+
+			const formattedRecentMessages = formattedMessageSegments.join("\n");
 
 			// Action results are formatted exclusively by the ACTION_STATE provider
 			// (position 150) to avoid duplication in the LLM context.
@@ -793,6 +756,7 @@ export const recentMessagesProvider: Provider = {
 			return {
 				data: {
 					recentMessages: data.recentMessages,
+					formattedMessageSegments,
 					recentInteractions: data.recentInteractions,
 					...(data.recentInteractionsDisclosure
 						? {

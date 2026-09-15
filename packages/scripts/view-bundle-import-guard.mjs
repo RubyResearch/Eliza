@@ -589,7 +589,15 @@ function validateLoaderImporter(property, key, units, file) {
     if (
       value.text !== expectedImporter ||
       !unit?.callable ||
-      unit.node.parameters.length !== 0 ||
+      // Named compatibility adapters may receive an already-captured scope,
+      // but must remain callable without arguments. Inline and registered
+      // importers retain their stricter zero-parameter contract below.
+      unit.node.parameters.some(
+        (parameter) =>
+          parameter.dotDotDotToken ||
+          !ts.isIdentifier(parameter.name) ||
+          (!parameter.initializer && !parameter.questionToken),
+      ) ||
       !hasTerminalValueReturn(unit) ||
       hasDirectThrow(unit.node)
     ) {

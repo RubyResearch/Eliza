@@ -94,6 +94,9 @@ describe("Android Play manifest policy", () => {
     expect(applyAndroidCloudSplashTheme(cloud, { cloudBuild: true })).toBe(
       cloud,
     );
+    expect(applyAndroidCloudSplashTheme(cloud, { cloudBuild: false })).toBe(
+      base,
+    );
     const nonCloud = base.replace(
       '<item name="postSplashScreenTheme">',
       '<item name="windowSplashScreenAnimatedIcon">@drawable/custom_splash</item>\n        <item name="postSplashScreenTheme">',

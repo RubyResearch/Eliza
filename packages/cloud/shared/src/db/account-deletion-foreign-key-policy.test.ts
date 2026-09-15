@@ -27,7 +27,7 @@ describe("account deletion full-schema foreign-key policy", () => {
       .update(descriptors.map(serializeDescriptor).join("\n"))
       .digest("hex");
 
-    expect(descriptors).toHaveLength(255);
+    expect(descriptors).toHaveLength(256);
     expect(digest).toBe(ACCOUNT_DELETION_FOREIGN_KEY_SNAPSHOT_SHA256);
   });
 
@@ -37,7 +37,7 @@ describe("account deletion full-schema foreign-key policy", () => {
       action: classifyAccountDeletionForeignKey(descriptor),
     }));
 
-    expect(classified).toHaveLength(255);
+    expect(classified).toHaveLength(256);
     expect(classified.every(({ action }) => Boolean(action))).toBe(true);
     expect(classified.filter(({ action }) => action === "reconcile_external_resource").length).toBe(
       75,
@@ -167,6 +167,20 @@ describe("account deletion full-schema foreign-key policy", () => {
         action: "anonymize_retained_record",
       },
     ]);
+  });
+
+  test("retains the billing identity obligation after an operational agent is deleted", () => {
+    const subject = listAccountDeletionForeignKeys().find(
+      ({ sourceTable }) => sourceTable === "agent_compute_subjects",
+    );
+    expect(subject).toEqual({
+      sourceTable: "agent_compute_subjects",
+      sourceColumns: "organization_id",
+      targetTable: "organizations",
+      targetColumns: "id",
+      onDelete: "restrict",
+    });
+    expect(classifyAccountDeletionForeignKey(subject!)).toBe("anonymize_retained_record");
   });
 
   test("rejects an unknown restrictive relationship", () => {

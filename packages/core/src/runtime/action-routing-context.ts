@@ -27,6 +27,9 @@ export interface ActionRoutingContext {
 	readonly actionName: string;
 	/** The action's `modelClass` hint, if set. */
 	readonly modelClass: ActionModelClass | undefined;
+	/** Trusted caller owns final synthesis; never inferred from tool arguments. */
+	readonly replyOwner?: "planner";
+	readonly messageId?: string;
 }
 
 interface IActionRoutingContextManager {

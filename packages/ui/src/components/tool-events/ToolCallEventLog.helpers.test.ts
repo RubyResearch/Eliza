@@ -40,6 +40,70 @@ describe("ToolCallEventLog.helpers", () => {
     expect(getToolCallEventDisplayState(ev)).toBe("running");
   });
 
+  it("distinguishes valid preview-only receipts without hiding real errors or invalid receipts", () => {
+    const receipt = {
+      receiptId: "preview-1",
+      operation: "routine.preview",
+      resource: { kind: "draft", id: "draft-1" },
+      artifacts: [],
+      idempotency: { key: null, replayed: false },
+      observedAt: "2026-09-10T20:23:13.166Z",
+      outcome: "preview",
+    };
+    const event: NativeToolCallEvent = {
+      id: "event",
+      type: "tool_error",
+      status: "failed",
+      success: false,
+      result: { success: false, effectReceipts: [receipt] },
+    };
+    expect(getToolCallEventDisplayState(event)).toBe("preview");
+    expect(
+      getToolCallEventDisplayState({ ...event, error: "receipt rejected" }),
+    ).toBe("failure");
+    expect(
+      getToolCallEventDisplayState({
+        ...event,
+        result: { effectReceipts: [{ outcome: "preview" }] },
+      }),
+    ).toBe("failure");
+    expect(
+      getToolCallEventDisplayState({
+        ...event,
+        result: {
+          error: "backend rejected preview",
+          effectReceipts: [receipt],
+        },
+      }),
+    ).toBe("failure");
+    expect(
+      getToolCallEventDisplayState({
+        ...event,
+        result: {
+          effectReceipts: [
+            receipt,
+            {
+              ...receipt,
+              receiptId: "applied-2",
+              outcome: "applied",
+              commit: {
+                kind: "durable",
+                id: "commit-2",
+                committedAt: receipt.observedAt,
+              },
+            },
+          ],
+        },
+      }),
+    ).toBe("failure");
+    expect(
+      getToolCallEventDisplayState({
+        ...event,
+        result: { effectReceipts: [] },
+      }),
+    ).toBe("failure");
+  });
+
   it("resolves tool call name from available event fields", () => {
     expect(
       getToolCallName({

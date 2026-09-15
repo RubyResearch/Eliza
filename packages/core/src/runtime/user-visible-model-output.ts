@@ -73,7 +73,10 @@ export type UserVisibleModelOutput =
 	  }
 	| {
 			kind: "invalid";
-			reason: "reply-envelope-without-text" | "reply-envelope-too-deep";
+			reason:
+				| "reply-envelope-without-text"
+				| "reply-envelope-too-deep"
+				| "reply-control-characters";
 			fieldPath: readonly UserVisibleReplyField[];
 	  };
 
@@ -85,7 +88,27 @@ export type UserVisibleModelOutput =
 export function sanitizeUserVisibleModelOutput(
 	value: string | undefined,
 ): UserVisibleModelOutput {
-	return inspectValue(value, [], 0);
+	const output = inspectValue(value, [], 0);
+	if (output.kind === "text") {
+		// Check the final display text, not decoded values inside ordinary JSON:
+		// escaped control-character data is valid, raw controls in prose are not.
+		// Reject the whole reply so recovery can render it from its evidence;
+		// deleting characters could leave damaged words while claiming success.
+		for (const character of output.text) {
+			const code = character.charCodeAt(0);
+			if (
+				(code < 32 && code !== 9 && code !== 10 && code !== 13) ||
+				(code >= 127 && code <= 159)
+			) {
+				return {
+					kind: "invalid",
+					reason: "reply-control-characters",
+					fieldPath: output.fieldPath,
+				};
+			}
+		}
+	}
+	return output;
 }
 
 export function looksLikeActionEnvelopeJson(text: string): boolean {

@@ -12,6 +12,27 @@ interface Holding {
 	amount: string;
 }
 
+/**
+ * The provider observations admitted by the holdings validator, with their full
+ * original values. Reply repair needs this evidence, not the runtime provider
+ * store (which can also contain complete history and internal transport data).
+ * Conversational constraints remain in the separate saved recovery context.
+ */
+export function financialObservationProviders(
+	providers: StateData["providers"],
+): StateData["providers"] {
+	return Object.fromEntries(
+		Object.entries(providers ?? {}).filter(([name]) =>
+			[
+				"get-balance",
+				"solana-wallet",
+				"BIRDEYE_WALLET_PORTFOLIO",
+				"BIRDEYE_TRADE_PORTFOLIO",
+			].includes(name),
+		),
+	);
+}
+
 function decimal(value: unknown): string | undefined {
 	if (typeof value !== "string" && typeof value !== "number") return undefined;
 	if (typeof value === "number" && (!Number.isFinite(value) || value < 0))
@@ -83,7 +104,9 @@ function observedHoldings(
 			observations.push(...portfolioHoldings(lookup.result));
 		}
 	}
-	for (const [name, provider] of Object.entries(providers ?? {})) {
+	for (const [name, provider] of Object.entries(
+		financialObservationProviders(providers) ?? {},
+	)) {
 		const data = provider.data;
 		if (!data || data.success === false) continue;
 		if (name === "get-balance") {

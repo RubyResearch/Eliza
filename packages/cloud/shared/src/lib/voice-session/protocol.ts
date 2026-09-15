@@ -11,6 +11,8 @@
  * consumes these typed events.
  */
 
+import { parseVoiceUiContext, type VoiceUiContext } from "@elizaos/shared";
+
 export const VOICE_SESSION_PROTOCOL_VERSION = 1;
 
 /** Reject any control frame larger than this (defense against JSON bombs). */
@@ -81,6 +83,7 @@ export interface ClientEndAudioFrame {
 }
 
 export type ClientControlFrame =
+  | { t: "ui_context"; context: VoiceUiContext }
   | ClientHelloFrame
   | ClientAudioMetaFrame
   | ClientAudioCapabilitiesFrame
@@ -91,7 +94,7 @@ export type ClientControlFrame =
 // --- server -> client control / state frames ------------------------------
 
 export type ServerControlFrame =
-  | { t: "ready"; sessionId: string; traceId: string }
+  | { t: "ready"; sessionId: string; traceId: string; uiContext?: boolean }
   | { t: "stt_partial"; text: string; traceId: string }
   | { t: "stt_eager_eot"; traceId: string }
   | { t: "stt_final"; text: string; traceId: string }
@@ -174,6 +177,12 @@ export function parseClientControlFrame(raw: unknown): ProtocolParseResult<Clien
   }
 
   switch (parsed.t) {
+    case "ui_context": {
+      const context = parseVoiceUiContext(parsed.context);
+      return context
+        ? { ok: true, value: { t: "ui_context", context } }
+        : fail("ui_context_invalid", "invalid renderer view context");
+    }
     case "hello":
       return parseHello(parsed);
     case "audio_meta":
