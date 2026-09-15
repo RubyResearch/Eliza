@@ -38,6 +38,7 @@ function createTelegramService(
 ): TelegramService {
   return Object.assign(
     Object.create(TelegramService.prototype) as TelegramService,
+    { pollerCompletions: new Map(), pollerRetryTimers: new Set() },
     overrides,
   );
 }

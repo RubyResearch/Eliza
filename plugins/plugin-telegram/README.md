@@ -21,6 +21,12 @@ and replacement credentials do not override that live state. Personal account
 configuration alone remains pending until an identity-bound live session can be
 verified. Connection status does not establish owner pairing or message delivery.
 
+Service shutdown waits for each supervised polling loop to settle before its
+credential can be claimed by a replacement. A stop requested during startup
+also waits for the eventual loop; a failed stop retains ownership and reports
+incomplete shutdown. This drains polling, not independent outbound calls or
+persisted account configuration; it is not a complete account-disconnect receipt.
+
 ## Delivery evidence
 
 Text and interactive text sends return ordered provider IDs and local memory receipts. A later chunk failure retains earlier accepted IDs; a database failure after delivery is reported separately. Legacy attachment sends do not yet return a complete receipt and must not be treated as confirmed delivery by approval callers.

@@ -74,6 +74,7 @@ import {
   releaseTelegramPollerToken,
   type TelegramPollerHealth,
 } from "./poller-lock";
+import { stopTelegramPolling } from "./poller-stop";
 import { shouldStartTelegramStandaloneBot } from "./standalone/policy";
 import { registerTelegramTaskBoardCommand } from "./task-board";
 import {
@@ -398,6 +399,8 @@ export class TelegramService extends Service {
   private defaultAccountId = DEFAULT_ACCOUNT_ID;
   private accountStates: Map<string, TelegramAccountRuntime> = new Map();
   private stopping = false;
+  private pollerRetryTimers = new Set<ReturnType<typeof setTimeout>>();
+  private pollerCompletions = new Map<Telegraf<Context>, Promise<void>>();
 
   /**
    * Constructor for TelegramService class.
@@ -804,57 +807,54 @@ export class TelegramService extends Service {
    * @returns A Promise that resolves once the bot has stopped.
    */
   async stop(): Promise<void> {
-    // A released token is available to a replacement, not to this service's
-    // pending failure handler or previously scheduled retry.
     this.stopping = true;
+    for (const timer of this.pollerRetryTimers) clearTimeout(timer);
+    this.pollerRetryTimers.clear();
     const states =
       this.accountStates instanceof Map
         ? Array.from(this.accountStates.values())
         : [];
-    if (states.length > 0) {
-      for (const state of states) {
-        const token = state.account.botToken;
+    const targets = states.length
+      ? states.map((state) => ({
+          bot: state.bot,
+          token: state.account.botToken,
+        }))
+      : this.bot
+        ? [{ bot: this.bot, token: this.botToken }]
+        : [];
+    const results = await Promise.allSettled(
+      targets.map(async ({ bot, token }) => {
+        const completion = this.pollerCompletions.get(bot);
+        if (completion) {
+          // A settled failure may still hold its claim for a queued retry.
+          // Shutdown disables that retry and releases only after draining.
+          await stopTelegramPolling(bot, completion);
+          if (token) releaseTelegramPollerToken(token, bot);
+          return;
+        }
         try {
-          state.bot.stop("service-stop");
+          bot.stop("service-stop");
         } catch (error) {
-          // error-policy:J6 Shutdown must still release process-local ownership
-          // when Telegraf reports that the poller was already stopped.
+          // error-policy:J6 A constructed bot without a supervised launch has no polling loop to drain.
           logger.debug(
-            {
-              src: "plugin:telegram",
-              accountId: state.accountId,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            "Telegram poller stop failed during teardown",
+            { src: "plugin:telegram", error },
+            "Telegram unstarted bot teardown failed",
           );
-        } finally {
-          if (token) {
-            releaseTelegramPollerToken(token, state.bot);
-          }
         }
-      }
-      return;
-    }
-
-    const bot = this.bot;
-    if (bot) {
-      try {
-        bot.stop("service-stop");
-      } catch (error) {
-        // error-policy:J6 Teardown remains best-effort, but the token lock is
-        // always released below and the failure stays observable.
-        logger.debug(
-          {
-            src: "plugin:telegram",
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Telegram poller stop failed during teardown",
-        );
-      } finally {
-        if (this.botToken) {
-          releaseTelegramPollerToken(this.botToken, bot);
-        }
-      }
+        if (token) releaseTelegramPollerToken(token, bot);
+      }),
+    );
+    const failures = results
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length) {
+      throw new ElizaError(
+        "Telegram shutdown did not drain every polling loop.",
+        {
+          code: "TELEGRAM_SHUTDOWN_INCOMPLETE",
+          cause: new AggregateError(failures),
+        },
+      );
     }
   }
 
@@ -947,6 +947,11 @@ export class TelegramService extends Service {
     // so the startup retry can still relaunch.
     if (!wiring.poller) {
       await this.launchPollerSupervised(bot, state.account.botToken, accountId);
+      if (this.stopping) {
+        throw new ElizaError("Telegram service is stopping.", {
+          code: "TELEGRAM_SERVICE_STOPPING",
+        });
+      }
       wiring.poller = true;
     }
 
@@ -1076,6 +1081,13 @@ export class TelegramService extends Service {
     botToken: string | null | undefined,
     accountId: string,
   ): Promise<void> {
+    if (this.stopping) {
+      return Promise.reject(
+        new ElizaError("Telegram service is stopping.", {
+          code: "TELEGRAM_SERVICE_STOPPING",
+        }),
+      );
+    }
     const maxPollRelaunches = 5;
     const pollerReadyWarningMs = 30_000;
     const pollerReadyCheckMs = 10;
@@ -1156,6 +1168,14 @@ export class TelegramService extends Service {
           const polling = (bot as unknown as { polling?: { stop?: unknown } })
             .polling;
           if (typeof polling?.stop === "function") {
+            if (this.stopping) {
+              rejectInitialLaunch(
+                new ElizaError("Telegram service is stopping.", {
+                  code: "TELEGRAM_SERVICE_STOPPING",
+                }),
+              );
+              return;
+            }
             pollerReadyOnce = true;
             initialSettled = true;
             clearPollerReadyTimers();
@@ -1209,13 +1229,15 @@ export class TelegramService extends Service {
           },
           "Relaunching Telegram poller after poll-loop failure",
         );
-        setTimeout(() => {
+        const retryTimer = setTimeout(() => {
+          this.pollerRetryTimers.delete(retryTimer);
           if (!ownsToken()) {
             clearActive();
             return;
           }
           runLaunch();
         }, delayMs);
+        this.pollerRetryTimers.add(retryTimer);
       };
 
       const runLaunch = (): void => {
@@ -1234,7 +1256,7 @@ export class TelegramService extends Service {
           }
           return;
         }
-        bot
+        const completion = bot
           .launch(
             {
               dropPendingUpdates: false,
@@ -1244,7 +1266,7 @@ export class TelegramService extends Service {
               connectedAt = Date.now();
               if (!pollerReadyOnce) {
                 waitForStoppablePoller();
-              } else if (botToken) {
+              } else if (botToken && !this.stopping) {
                 markTelegramPollerConnected(botToken, bot);
               }
             },
@@ -1284,6 +1306,7 @@ export class TelegramService extends Service {
               scheduleRelaunch();
             },
           );
+        this.pollerCompletions.set(bot, completion);
       };
 
       runLaunch();

@@ -59,7 +59,7 @@ function makeService() {
   const runtime = { agentId: "agent-test", reportError: vi.fn() };
   const service = Object.assign(
     Object.create(TelegramService.prototype) as TelegramService,
-    { runtime },
+    { runtime, pollerCompletions: new Map(), pollerRetryTimers: new Set() },
   );
   return { service, runtime };
 }
@@ -203,10 +203,13 @@ describe("TelegramService.launchPollerSupervised", () => {
       await exposeStoppablePoller(bot);
       await launched;
 
-      if (stopTiming === "before failure") await service.stop();
+      const stopped = stopTiming === "before failure" ? service.stop() : null;
       calls[0].reject(new Error(CONFLICT));
       await flushMicrotasks();
-      if (stopTiming === "during backoff") await service.stop();
+      if (stopped) await stopped;
+      else await service.stop();
+      expect(getTelegramPollerClaim(token)).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(bot.launch).toHaveBeenCalledTimes(1);
@@ -227,6 +230,80 @@ describe("TelegramService.launchPollerSupervised", () => {
       await flushMicrotasks();
     },
   );
+
+  it("retains ownership until the stopped polling loop has drained", async () => {
+    const { bot, calls } = makeBot();
+    const { service } = makeService();
+    const token = "tok-draining";
+    Object.assign(service, { bot, botToken: token });
+    const launched = callLaunch(service, bot, token, "acct");
+    calls[0].onLaunch();
+    await exposeStoppablePoller(bot);
+    await launched;
+    let stopped = false;
+    const shutdown = service.stop().then(() => {
+      stopped = true;
+    });
+    await flushMicrotasks();
+    expect(stopped).toBe(false);
+    expect(getTelegramPollerClaim(token)?.bot).toBe(bot);
+    const replacement = makeBot();
+    await expect(
+      callLaunch(makeService().service, replacement.bot, token, "next"),
+    ).rejects.toThrow(/already has an active/i);
+    calls[0].resolve();
+    await shutdown;
+    expect(getTelegramPollerClaim(token)).toBeUndefined();
+  });
+
+  it("stops a launch that becomes stoppable after shutdown was requested", async () => {
+    const { bot, calls } = makeBot();
+    const { service } = makeService();
+    const token = "tok-stop-startup";
+    Object.assign(service, { bot, botToken: token });
+    const launched = callLaunch(service, bot, token, "acct");
+    const startupResult = expect(launched).rejects.toThrow(/stopp/i);
+    let stopped = false;
+    const shutdown = service.stop().then(() => {
+      stopped = true;
+    });
+    await flushMicrotasks();
+    expect(stopped).toBe(false);
+    expect(getTelegramPollerClaim(token)?.bot).toBe(bot);
+    calls[0].onLaunch();
+    await exposeStoppablePoller(bot);
+    expect(bot.stop).toHaveBeenCalledWith("service-stop");
+    calls[0].resolve();
+    await shutdown;
+    await startupResult;
+    expect(getTelegramPollerClaim(token)).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps ownership when stopping fails and permits shutdown to be retried", async () => {
+    const { bot, calls } = makeBot();
+    const { service } = makeService();
+    const token = "tok-stop-failure";
+    Object.assign(service, { bot, botToken: token });
+    const launched = callLaunch(service, bot, token, "acct");
+    calls[0].onLaunch();
+    await exposeStoppablePoller(bot);
+    await launched;
+    bot.stop.mockImplementation(() => {
+      throw new Error("stop rejected");
+    });
+    await expect(service.stop()).rejects.toMatchObject({
+      code: "TELEGRAM_SHUTDOWN_INCOMPLETE",
+    });
+    expect(getTelegramPollerClaim(token)?.bot).toBe(bot);
+    expect(vi.getTimerCount()).toBe(0);
+    bot.stop.mockReset();
+    const shutdown = service.stop();
+    await flushMicrotasks();
+    calls[0].resolve();
+    await shutdown;
+    expect(getTelegramPollerClaim(token)).toBeUndefined();
+  });
 
   it("fails loudly instead of replacing a poller that already owns the token", async () => {
     const first = makeBot();
