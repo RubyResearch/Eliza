@@ -1153,21 +1153,31 @@ export class IMessageService extends Service implements IIMessageService {
 
     // Split message if too long
     const chunks = splitMessageForIMessage(text);
+    const messageIds: string[] = [];
     try {
       for (const chunk of chunks) {
         const result = await this.sendSingleMessage(target, chunk);
+        if (result.messageId) messageIds.push(result.messageId);
         if (!result.success) {
-          return result;
+          return { ...result, messageIds };
         }
       }
 
       // An attachment is one external effect, independent of text chunking.
       if (media) {
         const mediaResult = await this.sendResolvedAttachment(target, media.path);
+        if (mediaResult.messageId) messageIds.push(mediaResult.messageId);
         if (!mediaResult.success) {
-          return mediaResult;
+          return { ...mediaResult, messageIds };
         }
       }
+    } catch (error) {
+      // error-policy:J1 preserve accepted provider receipts when a later transport read fails.
+      return {
+        success: false,
+        messageIds,
+        error: `iMessage send outcome is uncertain: ${error instanceof Error ? error.message : String(error)}`,
+      };
     } finally {
       await media?.cleanup();
     }
@@ -1211,7 +1221,8 @@ export class IMessageService extends Service implements IIMessageService {
 
     return {
       success: true,
-      messageId: Date.now().toString(),
+      ...(messageIds.length ? { messageId: messageIds[messageIds.length - 1] } : {}),
+      messageIds,
       chatId: target,
     };
   }
@@ -1877,7 +1888,7 @@ export class IMessageService extends Service implements IIMessageService {
       }
     }
 
-    return { success: true, messageId: Date.now().toString(), chatId: to };
+    return { success: true, chatId: to };
   }
 
   private async sendResolvedAttachment(to: string, mediaPath: string): Promise<IMessageSendResult> {
@@ -1889,7 +1900,7 @@ export class IMessageService extends Service implements IIMessageService {
     `;
     try {
       await this.runAppleScript(attachmentScript);
-      return { success: true, messageId: Date.now().toString(), chatId: to };
+      return { success: true, chatId: to };
     } catch (error) {
       // error-policy:J1 Apple Automation is the outbound process boundary.
       return {

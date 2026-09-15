@@ -210,10 +210,18 @@ export async function prepareCrossChannelSend(args: {
                 }
               : {}),
           });
-          return {
+          const receipt = {
             provider: "imessage",
             messageId: sent.messageId ?? null,
+            ...(sent.messageIds ? { messageIds: sent.messageIds } : {}),
           };
+          if (!sent.messageId?.trim()) {
+            throw new ApprovalAmbiguousDeliveryError(
+              "iMessage returned no provider message identifier; reconcile before sending again.",
+              receipt,
+            );
+          }
+          return receipt;
         },
       };
     }

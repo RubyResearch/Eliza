@@ -10,7 +10,10 @@ import type { Plugin } from "@elizaos/core";
 import { logger } from "@elizaos/core";
 import type { LifeOpsIMessageConnectorStatus } from "@elizaos/shared";
 import type { LifeOpsContext } from "../lifeops-context.js";
-import { assertConnectorSenderIdentity } from "../messaging/connector-delivery-evidence.js";
+import {
+  assertConnectorSenderIdentity,
+  ConnectorDeliveryEvidenceError,
+} from "../messaging/connector-delivery-evidence.js";
 import {
   readIMessagesWithRuntimeService,
   sendIMessageWithRuntimeService,
@@ -64,6 +67,7 @@ type RuntimeIMessageServiceLike = {
   ): Promise<{
     success: boolean;
     messageId?: string;
+    messageIds?: string[];
     chatId?: string;
     error?: string;
   }>;
@@ -404,7 +408,7 @@ export class IMessageDomain {
 
   async sendIMessage(
     req: IMessageSendRequest,
-  ): Promise<{ ok: true; messageId?: string }> {
+  ): Promise<{ ok: true; messageId?: string; messageIds?: string[] }> {
     if (req.transport !== "native" && !req.expectedAccount) {
       const delegated = await sendIMessageWithRuntimeService({
         runtime: this.ctx.runtime,
@@ -457,9 +461,24 @@ export class IMessageDomain {
       }),
     );
     if (!result.success) {
+      if (result.messageIds?.length) {
+        throw new ConnectorDeliveryEvidenceError(
+          "iMessage accepted part of the send; reconcile before sending again.",
+          {
+            provider: "imessage",
+            channelId: req.to,
+            deliveryStatus: "partial",
+            messageIds: result.messageIds,
+          },
+        );
+      }
       fail(502, result.error ?? "iMessage runtime service send failed.");
     }
-    return { ok: true, messageId: result.messageId };
+    return {
+      ok: true,
+      messageId: result.messageId,
+      ...(result.messageIds ? { messageIds: result.messageIds } : {}),
+    };
   }
 
   async readIMessages(opts: {

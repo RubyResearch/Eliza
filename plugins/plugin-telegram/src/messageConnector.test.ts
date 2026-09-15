@@ -114,10 +114,14 @@ describe("Telegram message connector adapter", () => {
 
   it("parses forum-topic channel IDs for unified sends", async () => {
     const runtime = createRuntime();
-    const sendMessage = vi.fn().mockResolvedValue([]);
+    const sendMessageWithReceipt = vi.fn().mockResolvedValue({
+      kind: "not_delivered",
+      code: "EMPTY",
+      message: "No content",
+    });
     const service = createTelegramService({
       bot: {},
-      messageManager: { sendMessage },
+      messageManager: { sendMessageWithReceipt },
     });
 
     await service.handleSendMessage(
@@ -126,7 +130,7 @@ describe("Telegram message connector adapter", () => {
       { text: "hello" },
     );
 
-    expect(sendMessage).toHaveBeenCalledWith(
+    expect(sendMessageWithReceipt).toHaveBeenCalledWith(
       "-1001234567890",
       { text: "hello", metadata: { accountId: "default" } },
       undefined,
@@ -136,8 +140,20 @@ describe("Telegram message connector adapter", () => {
 
   it("routes outbound sends through the requested account manager", async () => {
     const runtime = createRuntime();
-    const managerA = { sendMessage: vi.fn().mockResolvedValue([]) };
-    const managerB = { sendMessage: vi.fn().mockResolvedValue([]) };
+    const managerA = {
+      sendMessageWithReceipt: vi.fn().mockResolvedValue({
+        kind: "not_delivered",
+        code: "EMPTY",
+        message: "No content",
+      }),
+    };
+    const managerB = {
+      sendMessageWithReceipt: vi.fn().mockResolvedValue({
+        kind: "not_delivered",
+        code: "EMPTY",
+        message: "No content",
+      }),
+    };
     const service = createTelegramService({
       bot: {},
       messageManager: managerA,
@@ -154,8 +170,8 @@ describe("Telegram message connector adapter", () => {
       { text: "hello" },
     );
 
-    expect(managerA.sendMessage).not.toHaveBeenCalled();
-    expect(managerB.sendMessage).toHaveBeenCalledWith(
+    expect(managerA.sendMessageWithReceipt).not.toHaveBeenCalled();
+    expect(managerB.sendMessageWithReceipt).toHaveBeenCalledWith(
       "-100123",
       { text: "hello", metadata: { accountId: "acct-b" } },
       undefined,
@@ -165,8 +181,20 @@ describe("Telegram message connector adapter", () => {
 
   it("rejects sends to an unrecognized accountId instead of falling back to the default bot", async () => {
     const runtime = createRuntime();
-    const managerA = { sendMessage: vi.fn().mockResolvedValue([]) };
-    const managerB = { sendMessage: vi.fn().mockResolvedValue([]) };
+    const managerA = {
+      sendMessageWithReceipt: vi.fn().mockResolvedValue({
+        kind: "not_delivered",
+        code: "EMPTY",
+        message: "No content",
+      }),
+    };
+    const managerB = {
+      sendMessageWithReceipt: vi.fn().mockResolvedValue({
+        kind: "not_delivered",
+        code: "EMPTY",
+        message: "No content",
+      }),
+    };
     const service = createTelegramService({
       bot: {},
       messageManager: managerA,
@@ -187,13 +215,19 @@ describe("Telegram message connector adapter", () => {
       "Telegram account acct-ghost is not configured or active",
     );
 
-    expect(managerA.sendMessage).not.toHaveBeenCalled();
-    expect(managerB.sendMessage).not.toHaveBeenCalled();
+    expect(managerA.sendMessageWithReceipt).not.toHaveBeenCalled();
+    expect(managerB.sendMessageWithReceipt).not.toHaveBeenCalled();
   });
 
   it("rejects sends without a resolvable Telegram target", async () => {
     const runtime = createRuntime();
-    const manager = { sendMessage: vi.fn().mockResolvedValue([]) };
+    const manager = {
+      sendMessageWithReceipt: vi.fn().mockResolvedValue({
+        kind: "not_delivered",
+        code: "EMPTY",
+        message: "No content",
+      }),
+    };
     const service = createTelegramService({
       bot: {},
       messageManager: manager,
@@ -208,7 +242,7 @@ describe("Telegram message connector adapter", () => {
     ).rejects.toThrow(
       "Telegram SendHandler requires channelId, roomId, or entityId.",
     );
-    expect(manager.sendMessage).not.toHaveBeenCalled();
+    expect(manager.sendMessageWithReceipt).not.toHaveBeenCalled();
   });
 
   it("resolves known chats into connector targets", async () => {
@@ -497,7 +531,7 @@ describe("Telegram message connector adapter", () => {
           accountId: scopedAccount.accountId,
           account,
           bot: fakeBot,
-          messageManager: { sendMessage: vi.fn() },
+          messageManager: { sendMessageWithReceipt: vi.fn() },
           wiring: {
             commands: false,
             poller: false,

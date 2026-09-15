@@ -13,6 +13,10 @@ Telegram connector for elizaOS. Gives an Eliza agent the ability to send and rec
 - Supports multiple bot accounts per agent via `character.settings.telegram.accounts`.
 - Preserves complete outbound text across Telegram's field limits: long messages are split losslessly, and media captions over 1024 UTF-16 units are delivered as follow-up text instead of clipped.
 
+## Delivery evidence
+
+Text and interactive text sends return ordered provider IDs and local memory receipts. A later chunk failure retains earlier accepted IDs; a database failure after delivery is reported separately. Legacy attachment sends do not yet return a complete receipt and must not be treated as confirmed delivery by approval callers.
+
 ## Prerequisites
 
 Create a bot via [@BotFather](https://t.me/BotFather) and copy the token it provides.
