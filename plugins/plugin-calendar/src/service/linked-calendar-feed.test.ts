@@ -96,6 +96,55 @@ function sources(
 }
 
 describe("canonical linked calendar feed", () => {
+  it("keeps one appointment during a linked update without losing either snapshot", () => {
+    const edited = {
+      ...local,
+      title: "Pickup moved",
+      startAt: "2026-09-15T15:00:00.000Z",
+      endAt: "2026-09-15T15:30:00.000Z",
+      metadata: { version: 3, etag: '"eliza-3"' },
+    };
+    const pending: LinkedCalendarEventRecord = {
+      ...link,
+      localRevision: 3,
+      state: "dirty",
+      pendingOperation: "update",
+    };
+    const merged = mergeAggregatedCalendarFeedEvents(
+      sources([google, edited]),
+      [pending],
+    );
+    expect(
+      merged.map((event) => [event.id, event.title, event.startAt]),
+    ).toEqual([[edited.id, edited.title, edited.startAt]]);
+    expect(merged[0].metadata.deduplication).toMatchObject({
+      conflictingFields: expect.arrayContaining(["title", "startAt", "endAt"]),
+      pendingUpdate: {
+        linkId: link.id,
+        snapshots: expect.arrayContaining([
+          expect.objectContaining(edited),
+          expect.objectContaining(google),
+        ]),
+      },
+    });
+    for (const patch of [
+      { agentId: "other" },
+      { connectorAccountId: "other" },
+      { providerCalendarId: "other" },
+      { providerEventId: "other" },
+      { providerEtag: '"unreviewed-provider-change"' },
+      { localRevision: 4 },
+      { state: "quarantined" as const },
+      { state: "conflicted" as const },
+    ]) {
+      expect(
+        mergeAggregatedCalendarFeedEvents(sources([google, edited]), [
+          { ...pending, ...patch },
+        ]),
+      ).toHaveLength(2);
+    }
+  });
+
   it("renders one editable local event while retaining its Google provenance", () => {
     const merged = mergeAggregatedCalendarFeedEvents(sources([google, local]), [
       link,

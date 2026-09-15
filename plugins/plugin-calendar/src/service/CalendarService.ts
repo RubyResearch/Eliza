@@ -1084,9 +1084,13 @@ export function mergeAggregatedCalendarFeedEvents(
 
   const linkedKeys = new Map<string, string>();
   const linkedLocalIds = new Set<string>();
+  const pendingUpdateLinks = new Map<string, string>();
   const events = sources.flatMap(({ feed }) => feed.events);
   for (const link of links) {
-    if (link.state !== "clean" || link.pendingOperation) continue;
+    const pendingUpdate =
+      link.state === "dirty" && link.pendingOperation === "update";
+    if ((link.state !== "clean" || link.pendingOperation) && !pendingUpdate)
+      continue;
     const local = events.find(
       (event) =>
         event.provider === "eliza" &&
@@ -1115,6 +1119,7 @@ export function mergeAggregatedCalendarFeedEvents(
     linkedKeys.set(local.id, key);
     linkedKeys.set(remote.id, key);
     linkedLocalIds.add(local.id);
+    if (pendingUpdate) pendingUpdateLinks.set(local.id, link.id);
   }
 
   const groups = new Map<string, Candidate[]>();
@@ -1214,6 +1219,15 @@ export function mergeAggregatedCalendarFeedEvents(
             authoritativeSource: sourceReference(authoritative),
             sources: allSources,
             conflictingFields,
+            ...(pendingUpdateLinks.has(authoritative.event.id)
+              ? {
+                  pendingUpdate: {
+                    linkId: pendingUpdateLinks.get(authoritative.event.id),
+                    // Keep complete source snapshots while the provider still has the previous revision.
+                    snapshots: group.map(({ event }) => event),
+                  },
+                }
+              : {}),
           },
         },
       };
