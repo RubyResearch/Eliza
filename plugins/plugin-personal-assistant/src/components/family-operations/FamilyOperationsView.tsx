@@ -182,6 +182,8 @@ function AgreementUploadCard({
       setFile(null);
       await refresh();
     } catch (cause) {
+      // error-policy:J1 Show the failed upload without retaining active progress.
+      setProgress(null);
       setError(cause instanceof Error ? cause.message : "Upload failed");
     }
   };

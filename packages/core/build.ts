@@ -1643,7 +1643,7 @@ async function verifyPackedEdgeContract(): Promise<void> {
 		await execFileAsync(
 			resolveTscBin(),
 			[
-				// The packed consumer has explicit options; unrelated ancestor configs must not affect this probe.
+				// This standalone consumer uses only the explicit compiler options below.
 				"--ignoreConfig",
 				"--noEmit",
 				"--module",

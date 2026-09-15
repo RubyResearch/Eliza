@@ -3092,6 +3092,124 @@ describe("parenting-agreement knowledge — real PGlite", () => {
       (await previewFamilyDeletionDatabase(runtime, SELF_ENTITY_ID)).sha256,
     ).toBe(settled.sha256);
   });
+  it.each([false, true])(
+    "retries retained staged bytes after settled extraction failure (modelUnavailable=%s)",
+    async (modelUnavailable) => {
+      const agreementKey = modelUnavailable
+        ? "settled-model-outage-retry"
+        : "settled-extraction-retry";
+      const bytes = pdf(
+        "retry complete extraction without duplicating sources",
+      );
+      const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+      const upload = await beginAgreementUpload(runtime, {
+        agreementKey,
+        title: "Settled extraction retry",
+        originalFilename: "retry.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: bytes.length,
+      });
+      const staged = await acceptAgreementChunk({
+        runtime,
+        uploadId: upload.uploadId,
+        index: 0,
+        bytes,
+        sha256: hash,
+      });
+      const contentIdentity = crypto
+        .createHash("sha256")
+        .update(
+          [
+            "agreement-upload-content-v1",
+            String(bytes.length),
+            String(staged.chunkSizeBytes),
+            `0:${bytes.length}:${hash}`,
+          ].join("\n"),
+        )
+        .digest("hex");
+      const service = createAgreementKnowledgeService(runtime);
+      const repository = new AgreementKnowledgeRepository(
+        runtime,
+        runtime.agentId,
+      );
+      const input = {
+        runtime,
+        uploadId: upload.uploadId,
+        contentIdentity,
+        createArtifact: async ({ bytes: assembled }: { bytes: Buffer }) =>
+          service.createAgreementVersion({
+            agreementKey,
+            title: "Settled extraction retry",
+            originalFilename: "retry.pdf",
+            mimeType: "application/pdf",
+            bytes: assembled,
+            uploadedByEntityId: SELF_ENTITY_ID,
+          }),
+        readArtifact: async (id: string) => {
+          const artifact = await repository.getArtifact(id);
+          if (!artifact) throw new Error("Committed artifact is missing");
+          return artifact;
+        },
+      };
+      const extraction = vi
+        .spyOn(AgreementTestPdfService.prototype, "extractCompleteDocument")
+        .mockRejectedValueOnce(
+          modelUnavailable
+            ? new ElizaError("Transcription dependency unavailable", {
+                code: "PDF_PAGE_TRANSCRIPTION_UNAVAILABLE",
+              })
+            : new Error("Transcription dependency unavailable"),
+        );
+      try {
+        await expect(commitAgreementUpload(input)).rejects.toMatchObject({
+          code: modelUnavailable
+            ? "AGREEMENT_EXTRACTION_UNAVAILABLE"
+            : "AGREEMENT_INVALID_CONTRACT",
+          cause: { message: "Transcription dependency unavailable" },
+        });
+      } finally {
+        extraction.mockRestore();
+      }
+      const pending = await readAgreementUpload(runtime, upload.uploadId);
+      expect(pending.status).toBe("uploading");
+      expect(
+        await repository.getArtifactByContent({
+          householdId: DEFAULT_HOUSEHOLD_ID,
+          agreementKey,
+          contentSha256: hash,
+        }),
+      ).toBeNull();
+      const storage = runtime.getService<IFileStorageService>(
+        ServiceType.REMOTE_FILES,
+      );
+      if (!storage) throw new Error("Canonical storage is unavailable");
+      expect(await storage.readPrivate(pending.chunks[0].fileName)).toEqual(
+        bytes,
+      );
+      const preview = await previewFamilyDeletionDatabase(
+        runtime,
+        SELF_ENTITY_ID,
+      );
+      expect(
+        preview.records.filter((row) => row.kind === "workspaceOperations"),
+      ).toEqual([]);
+      const committed = await commitAgreementUpload(input);
+      expect(committed.created).toBe(true);
+      const replay = await commitAgreementUpload(input);
+      expect(replay.created).toBe(false);
+      expect(replay.artifact.id).toBe(committed.artifact.id);
+      expect(
+        (
+          await service.readOwnerPdf({
+            artifactId: committed.artifact.id,
+            ownerEntityId: SELF_ENTITY_ID,
+          })
+        ).bytes,
+      ).toEqual(bytes);
+      expect(await storage.readPrivate(pending.chunks[0].fileName)).toBeNull();
+    },
+  );
+
   it("holds durable admission through staged chunk persistence and real artifact commit", async () => {
     const bytes = pdf(
       "staged mutation guarded across private persistence and ingestion",

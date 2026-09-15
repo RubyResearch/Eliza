@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Component behavior and accessibility-name coverage for Family Operations. */
+/** Family Operations component behavior with controlled adapter boundaries. */
 
 import {
   cleanup,
@@ -881,6 +881,44 @@ describe("FamilyOperationsView", () => {
         }),
       ),
     );
+  });
+
+  it("clears extraction progress after failure and retries the selected PDF", async () => {
+    const local = adapter({
+      ...snapshot(),
+      agreements: { status: "ready", data: [] },
+    });
+    const attempt = {
+      reject: (_error: Error) => {
+        throw new Error("Upload has not started");
+      },
+    };
+    local.uploadAgreement = vi.fn(async ({ onProgress }) => {
+      onProgress?.({ uploadedBytes: 8, totalBytes: 8, phase: "processing" });
+      await new Promise<void>((_resolve, reject) => {
+        attempt.reject = reject;
+      });
+    });
+    render(<FamilyOperationsView adapter={local} />);
+    fireEvent.click(await screen.findByText("Choose a signed PDF"));
+    fireEvent.change(screen.getByLabelText("Signed PDF"), {
+      target: {
+        files: [
+          new File(["%PDF-1.7"], "retry.pdf", { type: "application/pdf" }),
+        ],
+      },
+    });
+    const upload = screen.getByRole("button", { name: "Upload immutable PDF" });
+    fireEvent.click(upload);
+    await screen.findByText(/Reading every PDF page/);
+    attempt.reject(new Error("Extraction unavailable"));
+    await screen.findByText("Extraction unavailable");
+    expect(screen.queryByText(/Reading every PDF page/)).toBeNull();
+
+    vi.mocked(local.uploadAgreement).mockResolvedValueOnce(undefined);
+    fireEvent.click(upload);
+    await screen.findByText("Immutable agreement version uploaded.");
+    expect(screen.queryByText("Extraction unavailable")).toBeNull();
   });
 
   it("allows an agreement above the former 20 MiB ceiling", async () => {

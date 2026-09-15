@@ -16,7 +16,10 @@ import {
   type FamilyWorkspaceOperationTarget,
   settleFamilyWorkspaceOperation,
 } from "../family-workflows/workspace-operation-store.js";
-import { AgreementKnowledgeError } from "./agreement-knowledge.js";
+import {
+  AgreementKnowledgeError,
+  AgreementSourceUnchangedError,
+} from "./agreement-knowledge.js";
 import { AGREEMENT_UPLOAD_CHUNK_BYTES } from "./agreement-upload-limits.js";
 
 interface UploadChunk {
@@ -471,7 +474,7 @@ export async function commitAgreementUpload<
     }
 
     const assembled = await assembleAgreementUploadUnlocked(input);
-    return withStagedUploadMutation(
+    const outcome = await withStagedUploadMutation(
       input.runtime,
       {
         kind: "agreement-upload-commit",
@@ -486,6 +489,12 @@ export async function commitAgreementUpload<
         try {
           artifact = await input.createArtifact(assembled);
         } catch (error) {
+          // error-policy:J1 Only a settled, pre-persistence failure permits retry.
+          if (error instanceof AgreementSourceUnchangedError) {
+            assembled.manifest.status = "uploading";
+            await save(input.runtime, assembled.manifest);
+            return { ok: false as const, error };
+          }
           const artifactId = duplicateArtifactId(error);
           if (!artifactId) throw error;
           artifact = await input.readArtifact(artifactId);
@@ -496,8 +505,10 @@ export async function commitAgreementUpload<
           assembled.manifest,
           artifact.id,
         );
-        return { artifact, created };
+        return { ok: true as const, artifact, created };
       },
     );
+    if (!outcome.ok) throw outcome.error;
+    return { artifact: outcome.artifact, created: outcome.created };
   });
 }
